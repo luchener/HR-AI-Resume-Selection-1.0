@@ -111,7 +111,7 @@ export default function AnalysisWorkbench() {
         : '开始分析';
 
   return (
-    <AppShell active="workspace">
+    <AppShell active="home">
       <div className="mx-auto w-full max-w-[1480px] px-5 py-8 sm:px-8 lg:px-10 lg:py-10 xl:px-14">
         <header className="flex flex-col gap-5 border-b border-[#dce2eb] pb-7 sm:flex-row sm:items-start sm:justify-between">
           <div>

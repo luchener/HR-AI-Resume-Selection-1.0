@@ -62,7 +62,7 @@ app = Flask(__name__)
 # after Flask has parsed the uploaded part.
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 MAX_RESUME_FILE_SIZE = 30 * 1024 * 1024
-_HR_ANALYSIS_VERSION = "screening-v15-highest-education-school"
+_HR_ANALYSIS_VERSION = "screening-v16-employment-timeline"
 _HR_ANALYSIS_CACHE: dict[tuple[str, str, str, str], dict] = {}
 
 
@@ -378,6 +378,268 @@ def _as_section(value, fields: tuple[str, ...]) -> dict:
     return {field: _as_text(source.get(field)) for field in fields}
 
 
+def _normalize_month_label(value, *, allow_present: bool = False) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "未提供"
+    if allow_present and text.lower() in {"至今", "目前", "在职", "present", "current", "now"}:
+        return "至今"
+
+    match = re.search(
+        r"(?<!\d)((?:19|20)\d{2})\s*[-./年]\s*(1[0-2]|0?[1-9])(?:\s*月)?(?!\d)",
+        text,
+    )
+    if match:
+        return f"{match.group(1)}-{int(match.group(2)):02d}"
+
+    year_match = re.fullmatch(r"\s*((?:19|20)\d{2})\s*年?\s*", text)
+    if year_match:
+        return year_match.group(1)
+    return _as_text(text)
+
+
+def _month_index(value: str, current: datetime) -> int | None:
+    if value == "至今":
+        return current.year * 12 + current.month - 1
+    match = re.fullmatch(r"((?:19|20)\d{2})-(1[0-2]|0[1-9])", value)
+    if not match:
+        return None
+    return int(match.group(1)) * 12 + int(match.group(2)) - 1
+
+
+def _month_label(index: int) -> str:
+    year, zero_based_month = divmod(index, 12)
+    return f"{year:04d}-{zero_based_month + 1:02d}"
+
+
+def _month_duration(months: int) -> str:
+    years, remainder = divmod(max(0, months), 12)
+    if years and remainder:
+        return f"{years} 年 {remainder} 个月"
+    if years:
+        return f"{years} 年"
+    return f"{remainder} 个月"
+
+
+def _normalize_employment_records(value) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+
+    current = datetime.now()
+    records: list[dict[str, str]] = []
+    for item in value[:_EMPLOYMENT_RECORD_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        company_name = item.get("company_name") or item.get("company")
+        job_title = item.get("job_title") or item.get("position") or item.get("title")
+        start_value = item.get("start_date") or item.get("start_time")
+        end_value = item.get("end_date") or item.get("end_time")
+        if not any((company_name, job_title, start_value, end_value)):
+            continue
+
+        start_date = _normalize_month_label(start_value)
+        end_date = _normalize_month_label(end_value, allow_present=True)
+        start_index = _month_index(start_date, current)
+        end_index = _month_index(end_date, current)
+        duration = "未提供"
+        if start_index is not None and end_index is not None and start_index <= end_index:
+            duration = _month_duration(end_index - start_index + 1)
+
+        records.append(
+            {
+                "company_name": _as_text(company_name),
+                "job_title": _as_text(job_title),
+                "start_date": start_date,
+                "end_date": end_date,
+                "duration": duration,
+            }
+        )
+
+    records.sort(
+        key=lambda record: _month_index(record["start_date"], current) or -1,
+        reverse=True,
+    )
+    return records
+
+
+def _extract_employment_records(resume_content: str) -> list[dict[str, str]]:
+    """Extract structured employment rows when the model omits them."""
+    lines = [
+        re.sub(r"[ \t\u3000]+", " ", line).strip()
+        for line in str(resume_content or "").replace("\r\n", "\n").split("\n")
+    ]
+    lines = [line for line in lines if line]
+    if not lines:
+        return []
+
+    section_start = next(
+        (index for index, line in enumerate(lines) if line.rstrip("：:") in {"工作经历", "工作经验", "任职经历"}),
+        -1,
+    )
+    section_end = len(lines)
+    if section_start >= 0:
+        for index in range(section_start + 1, len(lines)):
+            if lines[index].rstrip("：:") in {
+                "教育经历", "教育背景", "项目经历", "项目经验", "专业技能",
+                "技能特长", "证书与荣誉", "荣誉奖项", "自我评价",
+            }:
+                section_end = index
+                break
+        searchable_lines = lines[section_start + 1:section_end]
+    else:
+        searchable_lines = lines
+
+    extracted: list[dict[str, str]] = []
+    for index, line in enumerate(searchable_lines):
+        date_match = _EMPLOYMENT_DATE_RANGE_RE.search(line)
+        if not date_match:
+            continue
+
+        header_candidates: list[tuple[int, str]] = []
+        inline_header = line[:date_match.start()].strip(" |-—–~～·")
+        if inline_header:
+            header_candidates.append((index, inline_header))
+        lookback_start = max(0, index - 6)
+        header_candidates.extend(
+            (candidate_index, searchable_lines[candidate_index])
+            for candidate_index in range(index - 1, lookback_start - 1, -1)
+        )
+
+        company_name = ""
+        job_title = ""
+        for _candidate_index, candidate in header_candidates:
+            header_match = _EMPLOYMENT_HEADER_RE.fullmatch(candidate)
+            if header_match:
+                company_name = header_match.group("company").strip()
+                job_title = header_match.group("title").strip()
+                break
+
+        if not company_name:
+            for candidate_index, candidate in header_candidates:
+                company_match = _EMPLOYMENT_COMPANY_RE.fullmatch(candidate)
+                if not company_match:
+                    continue
+                company_name = company_match.group("company").strip()
+                nearby_lines = searchable_lines[candidate_index + 1:index]
+                job_title = next(
+                    (
+                        nearby.strip()
+                        for nearby in nearby_lines
+                        if _looks_like_job_title(nearby)
+                    ),
+                    "未提供",
+                )
+                break
+
+        if not company_name:
+            continue
+        extracted.append(
+            {
+                "company_name": company_name,
+                "job_title": job_title or "未提供",
+                "start_date": date_match.group("start"),
+                "end_date": date_match.group("end"),
+            }
+        )
+
+    return _normalize_employment_records(extracted)
+
+
+def _looks_like_job_title(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or text.rstrip("：:") in {"内容", "职责", "业绩", "工作内容", "工作职责"}:
+        return False
+    return bool(re.search(r"工程师|经理|主管|总监|负责人|顾问|专员|助理|实习|设计师|开发|运维|销售|会计|教师", text))
+
+
+def _merge_employment_records(
+    extracted_records: list[dict[str, str]],
+    model_records: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Prefer resume text for factual fields, then add model-only periods."""
+    merged = [dict(record) for record in extracted_records]
+    keyed = {
+        (record["start_date"], record["end_date"]): record
+        for record in merged
+        if record["start_date"] != "未提供" and record["end_date"] != "未提供"
+    }
+    for model_record in model_records:
+        key = (model_record["start_date"], model_record["end_date"])
+        existing = keyed.get(key)
+        if existing:
+            for field in ("company_name", "job_title"):
+                if existing[field] == "未提供" and model_record[field] != "未提供":
+                    existing[field] = model_record[field]
+            continue
+        merged.append(dict(model_record))
+        if key[0] != "未提供" and key[1] != "未提供":
+            keyed[key] = merged[-1]
+    return _normalize_employment_records(merged)
+
+
+def _calculate_employment_gaps(records: list[dict[str, str]], gap_note: str = "") -> str:
+    """Calculate calendar-month gaps after merging overlapping employment periods."""
+    if not records:
+        return "未提供"
+
+    current = datetime.now()
+    current_index = current.year * 12 + current.month - 1
+    intervals: list[tuple[int, int]] = []
+    incomplete = False
+    for record in records:
+        start_index = _month_index(record["start_date"], current)
+        end_index = _month_index(record["end_date"], current)
+        if (
+            start_index is None
+            or end_index is None
+            or start_index > end_index
+            or start_index > current_index
+            or end_index > current_index
+        ):
+            incomplete = True
+            continue
+        intervals.append((start_index, end_index))
+
+    if incomplete:
+        summary = "部分经历缺少精确月份，无法完整核算空窗期"
+        if gap_note and gap_note != "未提供":
+            summary += f"；简历说明：{gap_note}"
+        return summary
+
+    intervals.sort()
+    merged: list[list[int]] = []
+    for start_index, end_index in intervals:
+        if not merged or start_index > merged[-1][1] + 1:
+            merged.append([start_index, end_index])
+        else:
+            merged[-1][1] = max(merged[-1][1], end_index)
+
+    gaps: list[tuple[int, int, int, bool]] = []
+    for previous, following in zip(merged, merged[1:]):
+        gap_start = previous[1] + 1
+        gap_end = following[0] - 1
+        if gap_start <= gap_end:
+            gaps.append((gap_start, gap_end, gap_end - gap_start + 1, False))
+
+    if merged[-1][1] < current_index:
+        gap_start = merged[-1][1] + 1
+        gaps.append((gap_start, current_index, current_index - gap_start + 1, True))
+
+    if gaps:
+        total_months = sum(gap[2] for gap in gaps)
+        details = "；".join(
+            f"{_month_label(start)} 至 {_month_label(end)}（{_month_duration(months)}{'，当前' if is_current else ''}）"
+            for start, end, months, is_current in gaps
+        )
+        summary = f"共 {len(gaps)} 段，累计 {_month_duration(total_months)}：{details}"
+    else:
+        summary = f"无空窗期（任职时间连续，截至 {_month_label(current_index)}）"
+
+    if gap_note and gap_note != "未提供":
+        summary += f"；简历说明：{gap_note}"
+    return summary
+
+
 def _list_or_default(value, default: str, limit: int = 3) -> list[str]:
     return _short_list(value, limit) or [default]
 
@@ -464,6 +726,18 @@ _WORK_HISTORY_FIELDS = (
     "seniority", "team_size", "stability", "employment_gaps",
     "responsibility_match",
 )
+_EMPLOYMENT_RECORD_LIMIT = 12
+_EMPLOYMENT_DATE_TOKEN = r"(?:19|20)\d{2}\s*[-./年]\s*(?:1[0-2]|0?[1-9])(?:\s*月)?"
+_EMPLOYMENT_DATE_RANGE_RE = re.compile(
+    rf"(?P<start>{_EMPLOYMENT_DATE_TOKEN})\s*(?:-|—|–|~|～|至)\s*"
+    rf"(?P<end>至今|目前|在职|present|current|{_EMPLOYMENT_DATE_TOKEN})",
+    re.IGNORECASE,
+)
+_EMPLOYMENT_COMPANY_SUFFIX = r"(?:有限责任公司|股份有限公司|有限公司|集团公司|集团|公司|研究院|事务所|中心|工作室|厂)"
+_EMPLOYMENT_HEADER_RE = re.compile(
+    rf"(?P<company>.+?{_EMPLOYMENT_COMPANY_SUFFIX})\s+(?P<title>.+)"
+)
+_EMPLOYMENT_COMPANY_RE = re.compile(rf"(?P<company>.+?{_EMPLOYMENT_COMPANY_SUFFIX})")
 
 _SCORE_BREAKDOWN_LIMITS = {
     "hard_requirements": 25,
@@ -488,7 +762,7 @@ def _normalize_score_breakdown(value) -> tuple[dict[str, int], bool]:
     return normalized, complete
 
 
-def _normalize_hr_analysis(raw: dict, job_content: str = "") -> dict:
+def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str = "") -> dict:
     """Enforce the scoring formula and all allowed deduction/grade ranges."""
     score_breakdown, has_complete_breakdown = _normalize_score_breakdown(raw.get("score_breakdown"))
     base_score = (
@@ -535,7 +809,18 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "") -> dict:
         requested_fit_tag = score_fit_tag
 
     basic_screening = _as_section(raw.get("basic_screening"), _BASIC_SCREENING_FIELDS)
-    work_history = _as_section(raw.get("work_history"), _WORK_HISTORY_FIELDS)
+    raw_work_history = raw.get("work_history") if isinstance(raw.get("work_history"), dict) else {}
+    work_history = _as_section(raw_work_history, _WORK_HISTORY_FIELDS)
+    model_employment_records = _normalize_employment_records(raw_work_history.get("employment_records"))
+    extracted_employment_records = _extract_employment_records(resume_content)
+    employment_records = _merge_employment_records(
+        extracted_employment_records,
+        model_employment_records,
+    )
+    work_history["employment_records"] = employment_records
+    if employment_records:
+        gap_note = _as_text(raw_work_history.get("employment_gap_notes"))
+        work_history["employment_gaps"] = _calculate_employment_gaps(employment_records, gap_note)
     raw_skill_match = raw.get("skill_match") if isinstance(raw.get("skill_match"), dict) else {}
     skill_match = {
         "hard_skills": _normalize_skill_labels(raw_skill_match.get("hard_skills")) or ["[简历未体现] 未找到可确认的岗位核心技能证据。"],
@@ -583,6 +868,11 @@ def _hr_analysis_markdown(result: dict) -> str:
     skills = result["skill_match"]
     basic = result["basic_screening"]
     history = result["work_history"]
+    employment_records = history.get("employment_records") or []
+    employment_lines = [
+        f"- {record['company_name']} / {record['job_title']}：{record['start_date']} 至 {record['end_date']}"
+        for record in employment_records
+    ] or ["- 工作经历明细：未提供"]
     return "\n".join(
         [
             "# HR 招聘分析报告",
@@ -596,6 +886,8 @@ def _hr_analysis_markdown(result: dict) -> str:
             "## 工作履历",
             f"- 年限：总计 {history['total_years']}；相关岗位 {history['relevant_years']}；行业匹配 {history['industry_match']}",
             f"- 履历稳定性：{history['stability']}；职责重合度：{history['responsibility_match']}",
+            *employment_lines,
+            f"- 空窗期：{history['employment_gaps']}",
             "## 技能与项目匹配",
             "- 核心技能：" + "；".join(skills['hard_skills']),
             "- 项目匹配：" + "；".join(skills['project_match_points']),
@@ -681,6 +973,7 @@ def _run_hr_analysis(resume_id: str, job_id: str, ai_config: dict | None = None)
     prompt = PROMPT_HR_RECRUITMENT_ANALYSIS.format(
         Job_Description=_compact_analysis_text(job.get("content", ""), 6000),
         raw_resume=_compact_analysis_text(resume.get("content", ""), 8000),
+        current_date=datetime.now().strftime("%Y-%m"),
     )
     started = time.perf_counter()
     try:
@@ -690,7 +983,11 @@ def _run_hr_analysis(resume_id: str, job_id: str, ai_config: dict | None = None)
             max_tokens=4000,
             runtime_config=ai_config,
         )
-        result = _normalize_hr_analysis(raw, job.get("content", ""))
+        result = _normalize_hr_analysis(
+            raw,
+            job.get("content", ""),
+            resume.get("content", ""),
+        )
         _HR_ANALYSIS_CACHE[cache_key] = result
         logger.info(
             "HR analysis completed: candidates=1 prompt_chars=%s elapsed_ms=%s",

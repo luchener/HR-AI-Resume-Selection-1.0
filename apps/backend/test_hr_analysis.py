@@ -107,6 +107,8 @@ class HrAnalysisTests(unittest.TestCase):
         self.assertEqual(call.call_count, 1)
         self.assertEqual(call.call_args.kwargs["max_tokens"], 4000)
         self.assertIn("必须全部来自这同一段教育经历", call.call_args.args[0])
+        self.assertIn("employment_records", call.call_args.args[0])
+        self.assertIn("分析基准月份", call.call_args.args[0])
 
     def test_normalizer_uses_ai_score_breakdown_sum(self):
         raw = {
@@ -143,6 +145,137 @@ class HrAnalysisTests(unittest.TestCase):
 
         self.assertEqual(result["recruitment_recommendation"], "淘汰")
         self.assertEqual(result["fit_tag"], "不匹配")
+
+    def test_normalizer_calculates_gaps_from_employment_records(self):
+        result = backend._normalize_hr_analysis(
+            {
+                "job_fit_score": 70,
+                "ai_risk": "none",
+                "work_history": {
+                    "employment_records": [
+                        {
+                            "company_name": "甲公司",
+                            "job_title": "工程师",
+                            "start_date": "2019年1月",
+                            "end_date": "2020年6月",
+                        },
+                        {
+                            "company_name": "乙公司",
+                            "job_title": "高级工程师",
+                            "start_date": "2020/09",
+                            "end_date": "2022.03",
+                        },
+                        {
+                            "company_name": "丙公司",
+                            "job_title": "技术负责人",
+                            "start_date": "2022-04",
+                            "end_date": "至今",
+                        },
+                    ],
+                    "employment_gap_notes": "该阶段在职备考",
+                    "employment_gaps": "模型自行计算的内容不会被采用",
+                },
+            }
+        )
+
+        history = result["work_history"]
+        self.assertEqual(
+            [record["company_name"] for record in history["employment_records"]],
+            ["丙公司", "乙公司", "甲公司"],
+        )
+        self.assertEqual(history["employment_records"][1]["duration"], "1 年 7 个月")
+        self.assertEqual(
+            history["employment_gaps"],
+            "共 1 段，累计 2 个月：2020-07 至 2020-08（2 个月）；简历说明：该阶段在职备考",
+        )
+
+    def test_normalizer_marks_imprecise_employment_dates(self):
+        result = backend._normalize_hr_analysis(
+            {
+                "job_fit_score": 70,
+                "ai_risk": "none",
+                "work_history": {
+                    "employment_records": [
+                        {
+                            "company_name": "甲公司",
+                            "job_title": "工程师",
+                            "start_date": "2019",
+                            "end_date": "2021",
+                        }
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(
+            result["work_history"]["employment_gaps"],
+            "部分经历缺少精确月份，无法完整核算空窗期",
+        )
+
+    def test_normalizer_extracts_all_employment_records_from_resume_text(self):
+        resume_content = """
+工作经历
+华强方特（芜湖）智能技术有限公司 机械工程师
+2023.06-至今
+内容：舞台桁架与游乐设备设计
+苏州法特迪科技股份有限公司 机械工程师
+2021.01-2023.05
+内容：芯片测试夹具设计
+广州白云电器设备股份有限公司 机械结构工程师
+2019.07-2020.08
+内容：车间装配指导与设备故障排查
+教育经历
+华南农业大学 本科
+2015-2019
+"""
+        result = backend._normalize_hr_analysis(
+            {
+                "job_fit_score": 70,
+                "ai_risk": "none",
+                "work_history": {
+                    "employment_records": [
+                        {
+                            "company_name": "模型返回的重复公司",
+                            "job_title": "机械工程师",
+                            "start_date": "2023-06",
+                            "end_date": "至今",
+                        }
+                    ]
+                },
+            },
+            resume_content=resume_content,
+        )
+
+        history = result["work_history"]
+        self.assertEqual(
+            [record["company_name"] for record in history["employment_records"]],
+            [
+                "华强方特（芜湖）智能技术有限公司",
+                "苏州法特迪科技股份有限公司",
+                "广州白云电器设备股份有限公司",
+            ],
+        )
+        self.assertEqual(
+            [record["job_title"] for record in history["employment_records"]],
+            ["机械工程师", "机械工程师", "机械结构工程师"],
+        )
+        self.assertEqual(history["employment_records"][1]["duration"], "2 年 5 个月")
+        self.assertEqual(
+            history["employment_gaps"],
+            "共 1 段，累计 4 个月：2020-09 至 2020-12（4 个月）",
+        )
+
+    def test_normalizer_keeps_legacy_gap_text_without_records(self):
+        result = backend._normalize_hr_analysis(
+            {
+                "job_fit_score": 70,
+                "ai_risk": "none",
+                "work_history": {"employment_gaps": "2021 年有 3 个月空窗"},
+            }
+        )
+
+        self.assertEqual(result["work_history"]["employment_records"], [])
+        self.assertEqual(result["work_history"]["employment_gaps"], "2021 年有 3 个月空窗")
 
     def test_normalizer_removes_salary_risk_without_job_budget(self):
         result = backend._normalize_hr_analysis(

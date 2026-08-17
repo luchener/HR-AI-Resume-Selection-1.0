@@ -2,6 +2,14 @@
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 
+export interface EmploymentRecord {
+  company_name: string;
+  job_title: string;
+  start_date: string;
+  end_date: string;
+  duration: string;
+}
+
 export interface HrAnalysis {
   candidate_name: string;
   final_score: number;
@@ -35,6 +43,7 @@ export interface HrAnalysis {
     team_size: string;
     stability: string;
     employment_gaps: string;
+    employment_records?: EmploymentRecord[];
     responsibility_match: string;
   };
   skill_match: {

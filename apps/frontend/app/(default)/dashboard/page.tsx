@@ -7,7 +7,9 @@ import {
   ArrowLeftIcon,
   BarChart3Icon,
   BriefcaseBusinessIcon,
+  CalendarDaysIcon,
   CheckCircle2Icon,
+  Clock3Icon,
   FileSearch2Icon,
   GraduationCapIcon,
   LoaderCircleIcon,
@@ -19,7 +21,7 @@ import {
   UserRoundIcon,
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
-import { useAnalysis } from '@/components/workbench/analysis-context';
+import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analysis-context';
 import { AiModelButton, useAiModel } from '@/components/workbench/ai-model-config';
 import { API_URL } from '@/lib/api/config';
 import { analyzeResumes, improveResumeStream } from '@/lib/api/screening';
@@ -28,9 +30,15 @@ type Action = 'reanalyze' | 'improve' | 'editor' | null;
 
 const EMPTY_VALUE = '简历未提供';
 
-function DetailGrid({ values }: { values: Array<[string, string | undefined]> }) {
+function DetailGrid({
+  values,
+  compact = false,
+}: {
+  values: Array<[string, string | undefined]>;
+  compact?: boolean;
+}) {
   return (
-    <dl className="mt-5 grid border-l border-t border-[#e2e7ee] sm:grid-cols-2 xl:grid-cols-3">
+    <dl className={`mt-5 grid border-l border-t border-[#e2e7ee] ${compact ? 'grid-cols-2 xl:grid-cols-4' : 'sm:grid-cols-2 xl:grid-cols-3'}`}>
       {values.map(([label, value]) => (
         <div key={label} className="min-w-0 border-b border-r border-[#e2e7ee] px-4 py-3.5">
           <dt className="text-xs text-[#8290a3]">{label}</dt>
@@ -38,6 +46,56 @@ function DetailGrid({ values }: { values: Array<[string, string | undefined]> })
         </div>
       ))}
     </dl>
+  );
+}
+
+function EmploymentGapSummary({ value }: { value?: string }) {
+  return (
+    <div className="mt-5 flex items-start gap-3 border-y border-[#e2e7ee] bg-[#f8fafc] px-4 py-3.5">
+      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-[#eaf0fb] text-[#4d6fae]">
+        <Clock3Icon className="size-4" />
+      </span>
+      <div className="min-w-0">
+        <p className="text-xs font-medium text-[#66758b]">空窗期核算</p>
+        <p className="mt-1 break-words text-sm font-medium leading-6 text-[#2c394f]">{value || EMPTY_VALUE}</p>
+      </div>
+    </div>
+  );
+}
+
+function EmploymentTimeline({ records }: { records?: EmploymentRecord[] }) {
+  const rows = records || [];
+  return (
+    <div className="mt-6">
+      <div className="flex flex-wrap items-end justify-between gap-2">
+        <h3 className="text-sm font-semibold text-[#29364c]">工作经历明细</h3>
+        {rows.length > 0 && <p className="text-xs text-[#8290a3]">{rows.length} 段经历 · 按开始时间倒序</p>}
+      </div>
+      <ol className="mt-3 divide-y divide-[#e5e9ef] border-y border-[#e2e7ee]">
+        {rows.length ? rows.map((record, index) => (
+          <li
+            key={`${record.company_name}-${record.start_date}-${index}`}
+            className="grid min-w-0 gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_minmax(210px,auto)] sm:items-center"
+          >
+            <div className="min-w-0">
+              <p className="break-words text-sm font-semibold leading-6 text-[#243249]">{record.company_name || EMPTY_VALUE}</p>
+              <p className="mt-0.5 break-words text-sm leading-6 text-[#65738a]">{record.job_title || EMPTY_VALUE}</p>
+            </div>
+            <div className="min-w-0 text-sm text-[#526178] sm:text-right">
+              <p className="inline-flex max-w-full items-center gap-2 leading-6">
+                <CalendarDaysIcon className="size-4 shrink-0 text-[#6c86bd]" />
+                <span className="break-words">{record.start_date || EMPTY_VALUE} 至 {record.end_date || EMPTY_VALUE}</span>
+              </p>
+              {record.duration && record.duration !== '未提供' && (
+                <p className="mt-0.5 text-xs text-[#8290a3]">任职 {record.duration}</p>
+              )}
+            </div>
+          </li>
+        )) : (
+          <li className="py-4 text-sm leading-6 text-[#8290a3]">{EMPTY_VALUE}</li>
+        )}
+      </ol>
+    </div>
   );
 }
 
@@ -332,18 +390,22 @@ export default function DashboardPage() {
                   ]} />
                 </Section>
 
-                <Section eyebrow="Career evidence" title="工作履历硬指标" icon={BriefcaseBusinessIcon}>
-                  <DetailGrid values={[
-                    ['总工作年限', analysis.work_history.total_years],
-                    ['相关岗位年限', analysis.work_history.relevant_years],
-                    ['行业匹配', analysis.work_history.industry_match],
-                    ['公司背景', analysis.work_history.company_background],
-                    ['岗位层级', analysis.work_history.seniority],
-                    ['带人规模', analysis.work_history.team_size],
-                    ['跳槽稳定性', analysis.work_history.stability],
-                    ['空窗期', analysis.work_history.employment_gaps],
-                    ['职责重合度', analysis.work_history.responsibility_match],
-                  ]} />
+                <Section eyebrow="Career evidence" title="工作履历" icon={BriefcaseBusinessIcon}>
+                  <DetailGrid
+                    compact
+                    values={[
+                      ['总工作年限', analysis.work_history.total_years],
+                      ['相关岗位年限', analysis.work_history.relevant_years],
+                      ['职责重合度', analysis.work_history.responsibility_match],
+                      ['行业匹配', analysis.work_history.industry_match],
+                      ['公司背景', analysis.work_history.company_background],
+                      ['岗位层级', analysis.work_history.seniority],
+                      ['带人规模', analysis.work_history.team_size],
+                      ['跳槽稳定性', analysis.work_history.stability],
+                    ]}
+                  />
+                  <EmploymentGapSummary value={analysis.work_history.employment_gaps} />
+                  <EmploymentTimeline records={analysis.work_history.employment_records} />
                 </Section>
 
                 <div className="grid gap-6 lg:grid-cols-2">
