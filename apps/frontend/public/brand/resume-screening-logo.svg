@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">AI 简历智选</title>
+  <desc id="logo-desc">带有匹配勾选标记的简历图形</desc>
+  <rect x="4" y="4" width="120" height="120" rx="24" fill="#78A0FF"/>
+  <path d="M33 24h39l23 23v55a7 7 0 0 1-7 7H40a7 7 0 0 1-7-7V24Z" fill="#F8FAFC"/>
+  <path d="M72 24v18a5 5 0 0 0 5 5h18L72 24Z" fill="#284064"/>
+  <rect x="45" y="56" width="34" height="7" rx="3.5" fill="#A4B0C2"/>
+  <rect x="45" y="70" width="25" height="7" rx="3.5" fill="#CBD3DF"/>
+  <circle cx="82" cy="88" r="22" fill="#16304E"/>
+  <path d="m70 88 8 8 16-18" fill="none" stroke="#52E0AA" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

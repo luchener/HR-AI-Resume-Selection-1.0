@@ -1,0 +1,5 @@
+flask==3.0.*
+gunicorn==23.*
+openai==1.75.*
+pdfminer.six==20250327
+python-dotenv==1.1.*
