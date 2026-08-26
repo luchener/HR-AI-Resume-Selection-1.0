@@ -23,11 +23,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, g, request, jsonify, Response, stream_with_context
 
 import config
 from config import ALLOWED_ORIGINS
 import store
+import auth as auth_mod
+import mailer as mailer_mod
 import llm
 import parser as doc_parser
 from prompts import (
@@ -58,6 +60,10 @@ for noisy_logger in ("openai", "httpx", "httpcore"):
 config.check_production()
 
 app = Flask(__name__)
+
+# ── 认证中间件 + 错误处理器（init_auth 一行注册：require_auth + _AuthError 处理）
+auth_mod.init_auth(app)
+
 # Leave a little room for multipart headers, then enforce the exact file limit
 # after Flask has parsed the uploaded part.
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
@@ -127,6 +133,18 @@ def _request_id(service: str = "api") -> str:
     return f"{service}:{uuid.uuid4()}"
 
 
+def _current_user_id() -> str:
+    """
+    从认证中间件注入的 g.auth_user 获取当前用户 id。
+    注意：只能在请求上下文中调用；线程池任务（如批量分析）必须显式传入，
+    不能在线程里访问 g。
+    """
+    auth_user = g.get("auth_user")
+    if not auth_user:
+        raise ApiError("请先登录。", 401, "auth")
+    return auth_user["user_id"]
+
+
 def _err(detail: str, status: int, service: str = "api"):
     """统一错误响应：{detail, request_id}"""
     return jsonify({"detail": detail, "request_id": _request_id(service)}), status
@@ -150,6 +168,214 @@ def _request_ai_config(data: dict, *, required: bool = False) -> dict | None:
 @app.get("/ping")
 def ping():
     return jsonify({"message": "pong", "database": "reachable"})
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 用户认证
+# ════════════════════════════════════════════════════════════════════════
+
+@app.post("/api/v1/auth/register")
+def register():
+    """注册：需先通过注册邮箱验证码校验。body: {username, password, email, code}"""
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    email = (data.get("email") or "").strip()
+    code = (data.get("code") or "").strip()
+    if not username or not password:
+        return jsonify({"detail": "请提供用户名和密码。", "request_id": rid}), 422
+    if not email or not code:
+        return jsonify({"detail": "请提供邮箱和邮箱验证码。", "request_id": rid}), 422
+    user, error, field = auth_mod.register_with_email_code(username, password, email, code)
+    if error:
+        return jsonify({"detail": error, "request_id": rid}), 409
+    token = auth_mod.generate_jwt(user["user_id"], user["username"])
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "user_id": user["user_id"],
+            "username": user["username"],
+            "token": token,
+        },
+    })
+
+
+@app.post("/api/v1/auth/email-code/send")
+def email_code_send():
+    """
+    发送邮箱验证码（注册绑定时用）。body: {email}
+    - 邮箱已注册 → 422
+    - 冷却期内（60 秒）→ 429
+    - SMTP 未配置 → 503
+    - 成功 → 200
+    """
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    if not email:
+        return jsonify({"detail": "请提供邮箱。", "request_id": rid}), 422
+    email_clean = email.lower()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email_clean):
+        return jsonify({"detail": "邮箱格式不正确。", "request_id": rid}), 422
+    # 该邮箱已注册
+    if auth_mod.find_user_by_email(email_clean):
+        return jsonify({"detail": "该邮箱已被注册，请直接登录或使用忘记密码。", "request_id": rid}), 422
+    # 频率限制
+    if not auth_mod.can_request_code(email_clean, auth_mod.PURPOSE_EMAIL_VERIFY):
+        return jsonify({"detail": "发送过于频繁，请稍后再试。", "request_id": rid}), 429
+    if not mailer_mod.smtp_available():
+        return jsonify({"detail": "邮件服务未配置，请联系管理员处理。", "request_id": rid}), 503
+    code = auth_mod.create_email_code(email_clean, auth_mod.PURPOSE_EMAIL_VERIFY)
+    if not code:
+        return jsonify({"detail": "发送过于频繁，请稍后再试。", "request_id": rid}), 429
+    try:
+        mailer_mod.send_verification_email(email_clean, code, purpose="注册")
+    except Exception as exc:
+        logger.error("send register email code failed for %s: %s", email_clean, exc)
+        return jsonify({"detail": "邮件发送失败，请稍后重试或联系管理员。", "request_id": rid}), 502
+    logger.info("register email code sent to %s", email_clean)
+    return jsonify({"detail": "验证码已发送，请查收邮件。", "request_id": rid}), 200
+
+
+@app.post("/api/v1/auth/login")
+def login():
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    if not username or not password:
+        return jsonify({"detail": "请提供用户名和密码。", "request_id": rid}), 422
+    user = auth_mod.authenticate_user(username, password)
+    if not user:
+        return jsonify({"detail": "用户名或密码错误。", "request_id": rid}), 401
+    token = auth_mod.generate_jwt(user["user_id"], user["username"])
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "user_id": user["user_id"],
+            "username": user["username"],
+            "token": token,
+        },
+    })
+
+
+@app.get("/api/v1/auth/me")
+def auth_me():
+    """返回当前登录用户信息。"""
+    auth_user = g.get("auth_user")
+    if not auth_user:
+        return jsonify({"detail": "请先登录。", "request_id": "auth:me"}), 401
+    return jsonify({
+        "request_id": f"auth:me:{auth_user['user_id'][:8]}",
+        "data": {
+            "user_id": auth_user["user_id"],
+            "username": auth_user["username"],
+        },
+    })
+
+
+@app.post("/api/v1/auth/change-password")
+def change_password():
+    """修改当前登录用户的密码。需验证旧密码；成功后旧 token 全部失效。"""
+    rid = auth_mod._request_id("auth")
+    auth_user = g.get("auth_user")
+    if not auth_user:
+        return jsonify({"detail": "请先登录。", "request_id": rid}), 401
+
+    data = request.get_json(silent=True) or {}
+    old_password = (data.get("old_password") or "")
+    new_password = (data.get("new_password") or "")
+
+    if not old_password or not new_password:
+        return jsonify({"detail": "请提供旧密码和新密码。", "request_id": rid}), 422
+    if old_password == new_password:
+        return jsonify({"detail": "新密码不能与旧密码相同。", "request_id": rid}), 422
+
+    # 校验旧密码（用当前登录用户名走一次完整认证，防止 token 持有者越权改密）
+    authed = auth_mod.authenticate_user(auth_user["username"], old_password)
+    if not authed:
+        return jsonify({"detail": "旧密码错误。", "request_id": rid}), 401
+
+    ok, error = auth_mod.update_password(auth_user["user_id"], new_password)
+    if not ok:
+        return jsonify({"detail": error, "request_id": rid}), 422
+
+    # 密码已变更：旧 token 因 pwd_ver 不匹配全部失效，前端应跳回登录页
+    return jsonify({
+        "request_id": rid,
+        "data": {"message": "密码修改成功，请重新登录。", "require_relogin": True},
+    })
+
+
+@app.post("/api/v1/auth/reset-password/request")
+def reset_password_request():
+    """
+    忘记密码 · 第一步：提交邮箱 → 生成 6 位重置验证码并发邮件。
+    为避免用户枚举，邮箱不存在或未配置 SMTP 时返回相同的 200 文案。
+    """
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"detail": "请提供注册邮箱。", "request_id": rid}), 422
+
+    generic_msg = "如果该邮箱已注册，重置验证码已发送，请查收。"
+
+    user = auth_mod.find_user_by_email(email)
+    if not user or not user.get("email"):
+        # 用户不存在 / 该账号未登记邮箱：返回同样文案，防止邮箱枚举
+        logger.info("reset request for unknown email=%s", email)
+        return jsonify({"detail": generic_msg, "request_id": rid}), 200
+
+    if not mailer_mod.smtp_available():
+        return jsonify({
+            "detail": "邮件服务未配置，请联系管理员处理。",
+            "request_id": rid,
+        }), 503
+
+    # 频率限制：防止对同一邮箱爆破/骚扰
+    if not auth_mod.can_request_code(email, auth_mod.PURPOSE_RESET_PASSWORD):
+        return jsonify({"detail": "发送过于频繁，请稍后再试。", "request_id": rid}), 429
+
+    try:
+        code = auth_mod.create_email_code(email, auth_mod.PURPOSE_RESET_PASSWORD)
+        if not code:
+            return jsonify({"detail": "发送过于频繁，请稍后再试。", "request_id": rid}), 429
+        mailer_mod.send_password_reset_email(email, user["username"], code)
+    except Exception as exc:
+        logger.error("reset request failed for %s: %s", email, exc)
+        return jsonify({
+            "detail": "重置邮件发送失败，请稍后重试或联系管理员。",
+            "request_id": rid,
+        }), 502
+
+    logger.info("reset code generation/email done for user_id=%s", user["user_id"])
+    return jsonify({"detail": generic_msg, "request_id": rid}), 200
+
+
+@app.post("/api/v1/auth/reset-password/confirm")
+def reset_password_confirm():
+    """
+    忘记密码 · 第二步：提交邮箱 + 6 位验证码 + 新密码 → 重置成功，旧 token 吊销。
+    """
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    code = (data.get("code") or "").strip()
+    new_password = (data.get("new_password") or "")
+    if not email or not code or not new_password:
+        return jsonify({"detail": "请提供邮箱、验证码和新密码。", "request_id": rid}), 422
+
+    ok, error = auth_mod.reset_password_with_code(email, code, new_password)
+    if not ok:
+        return jsonify({"detail": error, "request_id": rid}), 400
+
+    logger.info("password reset completed via email code")
+    return jsonify({
+        "request_id": rid,
+        "data": {"message": "密码重置成功，请使用新密码登录。"},
+    })
 
 
 @app.post("/api/v1/ai/test")
@@ -220,7 +446,8 @@ def upload_resume():
         return _err(f"File conversion failed: {e}", 400, "resumes")
 
     # 上传链路不调用 LLM，避免用户等待 60-90 秒；招聘分析阶段一次性处理。
-    resume_id = store.save_resume(content=text, processed={})
+    user_id = _current_user_id()
+    resume_id = store.save_resume(content=text, processed={}, user_id=user_id)
 
     return jsonify(
         {
@@ -244,28 +471,35 @@ def improve_resume():
     if not resume_id or not job_id:
         return _err("resume_id and job_id are required", 422, "resumes")
     ai_config = _request_ai_config(data)
+    user_id = _current_user_id()
 
     if stream:
         return Response(
-            stream_with_context(_improve_stream(resume_id, job_id, rid, ai_config)),
+            stream_with_context(_improve_stream(resume_id, job_id, rid, user_id, ai_config)),
             mimetype="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
 
     # 非流式：异常走全局 errorhandler，类型安全
-    result = _do_improve(resume_id, job_id, rid, ai_config)
+    result = _do_improve(resume_id, job_id, rid, user_id, ai_config)
     return jsonify({"request_id": rid, "data": result})
 
 
-def _do_improve(resume_id: str, job_id: str, rid: str, ai_config: dict | None = None) -> dict:
+def _do_improve(
+    resume_id: str,
+    job_id: str,
+    rid: str,
+    user_id: str,
+    ai_config: dict | None = None,
+) -> dict:
     """
     执行分析（核心逻辑，非流式与流式共用）。
     成功返回 dict；失败抛 ApiError，由全局 errorhandler 统一序列化。
     """
-    resume = store.get_resume(resume_id)
+    resume = store.get_resume(resume_id, user_id=user_id)
     if not resume:
         raise ApiError(f"Resume not found: {resume_id}", 404, "resumes")
-    job = store.get_job(job_id)
+    job = store.get_job(job_id, user_id=user_id)
     if not job:
         raise ApiError(f"Job not found: {job_id}", 404, "resumes")
 
@@ -299,6 +533,7 @@ def _improve_stream(
     resume_id: str,
     job_id: str,
     rid: str,
+    user_id: str,
     ai_config: dict | None = None,
 ):
     """SSE 生成器。严格照搬旧版事件格式：data: {json}\\n\\n"""
@@ -308,11 +543,11 @@ def _improve_stream(
     try:
         yield sse({"status": "starting", "message": "Analyzing resume and job description..."})
 
-        resume = store.get_resume(resume_id)
+        resume = store.get_resume(resume_id, user_id=user_id)
         if not resume:
             yield sse({"status": "error", "message": f"Resume not found: {resume_id}"})
             return
-        job = store.get_job(job_id)
+        job = store.get_job(job_id, user_id=user_id)
         if not job:
             yield sse({"status": "error", "message": f"Job not found: {job_id}"})
             return
@@ -956,17 +1191,22 @@ def _resume_studio_markdown(resume: dict) -> str:
     return _normalize_md_for_a4cv(_build_raw_resume_markdown(resume.get("content", "")))
 
 
-def _run_hr_analysis(resume_id: str, job_id: str, ai_config: dict | None = None) -> dict:
+def _run_hr_analysis(
+    resume_id: str,
+    job_id: str,
+    user_id: str,
+    ai_config: dict | None = None,
+) -> dict:
     config_fingerprint = llm.model_config_fingerprint(ai_config)
-    cache_key = (_HR_ANALYSIS_VERSION, resume_id, job_id, config_fingerprint)
+    cache_key = (_HR_ANALYSIS_VERSION, user_id, resume_id, job_id, config_fingerprint)
     cached = _HR_ANALYSIS_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    resume = store.get_resume(resume_id)
+    resume = store.get_resume(resume_id, user_id=user_id)
     if not resume:
         raise ApiError(f"Resume not found: {resume_id}", 404, "resumes")
-    job = store.get_job(job_id)
+    job = store.get_job(job_id, user_id=user_id)
     if not job:
         raise ApiError(f"Job not found: {job_id}", 404, "resumes")
 
@@ -1006,6 +1246,7 @@ def _run_hr_analysis(resume_id: str, job_id: str, ai_config: dict | None = None)
 def _run_hr_batch_analysis(
     resume_ids: list[str],
     job_id: str,
+    user_id: str,
     ai_config: dict | None = None,
 ) -> tuple[dict[str, dict], list[dict]]:
     """Run isolated candidate analyses concurrently to preserve single-resume quality."""
@@ -1015,6 +1256,7 @@ def _run_hr_batch_analysis(
     for resume_id in resume_ids:
         cache_key = (
             _HR_ANALYSIS_VERSION,
+            user_id,
             resume_id,
             job_id,
             llm.model_config_fingerprint(ai_config),
@@ -1023,7 +1265,7 @@ def _run_hr_batch_analysis(
         if cached is not None:
             results[resume_id] = cached
             continue
-        resume = store.get_resume(resume_id)
+        resume = store.get_resume(resume_id, user_id=user_id)
         if not resume:
             failures.append({"resume_id": resume_id, "detail": f"Resume not found: {resume_id}"})
             continue
@@ -1035,7 +1277,7 @@ def _run_hr_batch_analysis(
     started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=min(3, len(pending)), thread_name_prefix="hr-analysis") as executor:
         futures = {
-            executor.submit(_run_hr_analysis, resume_id, job_id, ai_config): resume_id
+            executor.submit(_run_hr_analysis, resume_id, job_id, user_id, ai_config): resume_id
             for resume_id in pending
         }
         for future in as_completed(futures):
@@ -1090,8 +1332,8 @@ def _candidate_name_from_resume(resume: dict, result: dict) -> str:
     return "未识别姓名"
 
 
-def _hr_analysis_payload(resume_id: str, job_id: str, result: dict) -> dict:
-    resume = store.get_resume(resume_id)
+def _hr_analysis_payload(resume_id: str, job_id: str, result: dict, user_id: str) -> dict:
+    resume = store.get_resume(resume_id, user_id=user_id)
     return {
         "resume_id": resume_id,
         "job_id": job_id,
@@ -1117,14 +1359,15 @@ def hr_analysis():
     if len(resume_ids) > 3:
         return _err("A maximum of 3 resumes can be analyzed at once", 422, "resumes")
     ai_config = _request_ai_config(data)
+    user_id = _current_user_id()
 
     if len(resume_ids) == 1:
-        result = _run_hr_analysis(resume_ids[0], job_id, ai_config)
-        payload = _hr_analysis_payload(resume_ids[0], job_id, result)
+        result = _run_hr_analysis(resume_ids[0], job_id, user_id, ai_config)
+        payload = _hr_analysis_payload(resume_ids[0], job_id, result, user_id)
     else:
-        batch_results, failures = _run_hr_batch_analysis(resume_ids, job_id, ai_config)
+        batch_results, failures = _run_hr_batch_analysis(resume_ids, job_id, user_id, ai_config)
         analyses = [
-            _hr_analysis_payload(resume_id, job_id, batch_results[resume_id])
+            _hr_analysis_payload(resume_id, job_id, batch_results[resume_id], user_id)
             for resume_id in resume_ids
             if resume_id in batch_results
         ]
@@ -1152,7 +1395,7 @@ def get_resume():
     if not resume_id:
         return _err("resume_id is required", 422, "resumes")
 
-    view = store.get_resume_view(resume_id)
+    view = store.get_resume_view(resume_id, user_id=_current_user_id())
     if not view:
         return _err(f"Resume not found: {resume_id}", 404, "resumes")
     return jsonify({"request_id": rid, "data": view})
@@ -1186,7 +1429,7 @@ def improved_markdown():
 
     # 2. 兜底：从结构化简历拼装
     if resume_id:
-        resume = store.get_resume(resume_id)
+        resume = store.get_resume(resume_id, user_id=_current_user_id())
         if resume:
             md = _resume_studio_markdown(resume)
             if md:
@@ -1231,14 +1474,15 @@ def upload_job():
     if not job_descriptions:
         return _err("job_descriptions is required", 422, "jobs")
 
-    # 校验 resume 存在
-    if not store.get_resume(resume_id):
+    # 校验 resume 存在（且属于当前用户）
+    user_id = _current_user_id()
+    if not store.get_resume(resume_id, user_id=user_id):
         return _err(f"resume corresponding to resume_id: {resume_id} not found", 400, "jobs")
 
     job_ids = []
     for desc in job_descriptions:
         processed = doc_parser.summarize_job_locally(desc)
-        jid = store.save_job(resume_id=resume_id, content=desc, processed=processed)
+        jid = store.save_job(resume_id=resume_id, content=desc, processed=processed, user_id=user_id)
         job_ids.append(jid)
         logger.info(f"Job created: {jid}")
 
@@ -1259,7 +1503,7 @@ def get_job():
     if not job_id:
         return _err("job_id is required", 422, "jobs")
 
-    view = store.get_job_view(job_id)
+    view = store.get_job_view(job_id, user_id=_current_user_id())
     if not view:
         return _err(f"Job not found: {job_id}", 404, "jobs")
     return jsonify({"request_id": rid, "data": view})

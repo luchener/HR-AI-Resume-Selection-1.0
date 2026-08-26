@@ -16,7 +16,7 @@
 ```bash
 cp .env.sample .env
 npm ci
-npm run dev -- -p 3003
+npm run dev -- --hostname 127.0.0.1 -p 3008
 ```
 
 默认通过 `BACKEND_INTERNAL_URL=http://127.0.0.1:9001` 将浏览器的同源 `/api/*` 请求转发到 Flask。

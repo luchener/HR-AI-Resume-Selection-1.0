@@ -22,9 +22,7 @@ import {
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
 import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analysis-context';
-import { AiModelButton, useAiModel } from '@/components/workbench/ai-model-config';
-import { API_URL } from '@/lib/api/config';
-import { analyzeResumes, improveResumeStream } from '@/lib/api/screening';
+import { analyzeResumes, fetchImprovedMarkdown, improveResumeStream } from '@/lib/api/screening';
 
 type Action = 'reanalyze' | 'improve' | 'editor' | null;
 
@@ -159,7 +157,6 @@ function MarkdownReport({ content }: { content: string }) {
 export default function DashboardPage() {
   const router = useRouter();
   const { analysisResult, setAnalysisResult, isHydrated } = useAnalysis();
-  const { config: aiConfig, isConfigured, openConfigurator } = useAiModel();
   const [action, setAction] = useState<Action>(null);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
@@ -205,16 +202,11 @@ export default function DashboardPage() {
   };
 
   const handleReanalyze = async () => {
-    if (!isConfigured) {
-      setError('请先配置 AI 模型，再重新分析。');
-      openConfigurator();
-      return;
-    }
     setAction('reanalyze');
     setError('');
     setProgress('正在重新生成招聘报告');
     try {
-      const result = await analyzeResumes(data.resume_id, data.job_id, aiConfig);
+      const result = await analyzeResumes(data.resume_id, data.job_id);
       if (batchAnalyses.length > 1) {
         const refreshed = result.data;
         const nextBatch = batchAnalyses.map((item) => item.resume_id === refreshed.resume_id ? refreshed : item);
@@ -231,11 +223,6 @@ export default function DashboardPage() {
   };
 
   const handleImprove = async () => {
-    if (!isConfigured) {
-      setError('请先配置 AI 模型，再进行深度优化。');
-      openConfigurator();
-      return;
-    }
     setAction('improve');
     setError('');
     setProgress('正在准备深度优化');
@@ -243,7 +230,6 @@ export default function DashboardPage() {
       const result = await improveResumeStream(
         data.resume_id,
         data.job_id,
-        aiConfig,
         (_status, message) => setProgress(message),
       );
       setAnalysisResult(result);
@@ -261,14 +247,11 @@ export default function DashboardPage() {
     try {
       let markdown = data.studio_markdown;
       if (!markdown) {
-        const response = await fetch(`${API_URL}/api/v1/resumes/improved-markdown`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ resume_id: data.resume_id, job_id: data.job_id, analysis_result: data.analysis_result || '' }),
-        });
-        const text = await response.text();
-        if (!response.ok) throw new Error(text || `编辑器内容生成失败（HTTP ${response.status}）`);
-        markdown = (JSON.parse(text) as { data?: { markdown?: string } }).data?.markdown;
+        markdown = await fetchImprovedMarkdown(
+          data.resume_id,
+          data.job_id,
+          data.analysis_result || '',
+        );
       }
       if (!markdown) throw new Error('未获取到可编辑的简历内容。');
       sessionStorage.setItem('pendingResumeMD', markdown);
@@ -300,7 +283,6 @@ export default function DashboardPage() {
             <p className="mt-3 text-sm text-[#6f7d91]">{candidateName} · 基于目标岗位要求生成</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <AiModelButton compact />
             {analysis ? (
               <>
                 <button type="button" disabled={busy} onClick={handleReanalyze} className="inline-flex h-10 items-center gap-2 rounded-md border border-[#d3dae5] bg-white px-4 text-sm font-medium text-[#334158] hover:bg-[#f8f9fb] disabled:opacity-50">

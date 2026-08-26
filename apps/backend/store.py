@@ -45,11 +45,12 @@ def _read_json(path: str) -> Optional[dict]:
 
 # ── 简历 ──────────────────────────────────────────────────────────────
 
-def save_resume(content: str, processed: dict, content_type: str = "md") -> str:
-    """保存简历（raw + processed 合并到一个文件），返回 resume_id。"""
+def save_resume(content: str, processed: dict, user_id: str, content_type: str = "md") -> str:
+    """保存简历（raw + processed + user_id 合并到一个文件），返回 resume_id。"""
     resume_id = str(uuid.uuid4())
     record = {
         "resume_id": resume_id,
+        "user_id": user_id,
         "content": content,
         "content_type": content_type,
         "created_at": _now_iso(),
@@ -59,16 +60,25 @@ def save_resume(content: str, processed: dict, content_type: str = "md") -> str:
     return resume_id
 
 
-def get_resume(resume_id: str) -> Optional[dict]:
-    """读取简历完整记录。"""
-    return _read_json(os.path.join(RESUMES_DIR, f"{resume_id}.json"))
+def get_resume(resume_id: str, user_id: str = "") -> Optional[dict]:
+    """
+    读取简历完整记录。
+    当 user_id 非空时校验归属：不匹配时返回 None（跨用户隔离）。
+    """
+    record = _read_json(os.path.join(RESUMES_DIR, f"{resume_id}.json"))
+    if record is None:
+        return None
+    if user_id and record.get("user_id") != user_id:
+        return None
+    return record
 
 
-def get_resume_view(resume_id: str) -> Optional[dict]:
+def get_resume_view(resume_id: str, user_id: str = "") -> Optional[dict]:
     """
     构造 GET /resumes 的响应结构（与旧版 get_resume_with_processed_data 兼容）。
+    当 user_id 非空时校验归属。
     """
-    rec = get_resume(resume_id)
+    rec = get_resume(resume_id, user_id=user_id)
     if not rec:
         return None
     p = rec.get("processed") or {}
@@ -98,12 +108,13 @@ def get_resume_view(resume_id: str) -> Optional[dict]:
 
 # ── 岗位 ──────────────────────────────────────────────────────────────
 
-def save_job(resume_id: str, content: str, processed: dict) -> str:
+def save_job(resume_id: str, content: str, processed: dict, user_id: str) -> str:
     """保存 JD，返回 job_id。"""
     job_id = str(uuid.uuid4())
     record = {
         "job_id": job_id,
         "resume_id": resume_id,
+        "user_id": user_id,
         "content": content,
         "created_at": _now_iso(),
         "processed": processed,
@@ -112,16 +123,22 @@ def save_job(resume_id: str, content: str, processed: dict) -> str:
     return job_id
 
 
-def get_job(job_id: str) -> Optional[dict]:
-    """读取 JD 完整记录。"""
-    return _read_json(os.path.join(JOBS_DIR, f"{job_id}.json"))
+def get_job(job_id: str, user_id: str = "") -> Optional[dict]:
+    """读取 JD 完整记录。当 user_id 非空时校验归属。"""
+    record = _read_json(os.path.join(JOBS_DIR, f"{job_id}.json"))
+    if record is None:
+        return None
+    if user_id and record.get("user_id") != user_id:
+        return None
+    return record
 
 
-def get_job_view(job_id: str) -> Optional[dict]:
+def get_job_view(job_id: str, user_id: str = "") -> Optional[dict]:
     """
     构造 GET /jobs 的响应结构（与旧版 get_job_with_processed_data 兼容）。
+    当 user_id 非空时校验归属。
     """
-    rec = get_job(job_id)
+    rec = get_job(job_id, user_id=user_id)
     if not rec:
         return None
     p = rec.get("processed") or {}

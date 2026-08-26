@@ -12,6 +12,11 @@ COPY apps/frontend/ ./
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 
+# Backend URL used by Next.js rewrites (/api/* -> backend). Must match the
+# compose `environment` value so build-time and runtime rewrites agree.
+ARG BACKEND_INTERNAL_URL
+ENV BACKEND_INTERNAL_URL=$BACKEND_INTERNAL_URL
+
 RUN npm run build
 
 FROM node:20-alpine AS runner

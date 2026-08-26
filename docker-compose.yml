@@ -10,14 +10,14 @@ services:
     restart: unless-stopped
     env_file:
       - path: apps/backend/.env
-        required: false  # 新 clone 时如未 cp .env.sample .env，仍可启动
+        required: false  # 新 clone 时如未 cp .env.sample .env，仍可启动（ENV 默认 local）
     environment:
-      # 默认 local，保证无 .env 也能启动；配置好 .env 后由 env_file 覆盖为 production。
-      # 若 .env 里写了 ENV=production，则以 .env 为准（要求修改 SESSION_SECRET_KEY）。
-      ENV: local
+      # 注意：不要在 environment 里设置 ENV —— 它的优先级高于 env_file，
+      # 会覆盖 .env 里的 ENV=production，导致生产模式校验失效。
+      # ENV 与密钥均从 apps/backend/.env 读取；无 .env 时回退 local。
       LOG_DIR: /app/logs
     ports:
-      - "127.0.0.1:8000:8000"
+      - "0.0.0.0:8000:8000"
     volumes:
       - backend-data:/app/data
       - backend-logs:/app/logs
@@ -43,7 +43,7 @@ services:
     environment:
       BACKEND_INTERNAL_URL: http://backend:8000
     ports:
-      - "127.0.0.1:3000:3000"
+      - "0.0.0.0:3000:3000"
     depends_on:
       backend:
         condition: service_healthy

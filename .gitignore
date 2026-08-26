@@ -48,6 +48,13 @@ apps/backend/app.db-wal
 # Resume/JD runtime data (may contain personal information)
 apps/backend/data/
 
+# Test scratch dirs (auth smoke test / unit tests)
+apps/backend/.test-tmp/
+apps/backend/.test-data/
+apps/backend/.smoke-tmp/
+apps/backend/.smoke-debug/
+apps/backend/smoke-out.txt
+
 # Local test resumes, job descriptions, and captures (may contain PII)
 /*.docx
 /*.pdf

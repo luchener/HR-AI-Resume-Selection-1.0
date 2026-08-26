@@ -29,10 +29,14 @@ import os
 import re
 import sys
 import time
+import uuid
 import urllib.error
 import urllib.request
 
 from test_helpers import build_anonymous_resume_docx
+
+# 当前测试会话的 JWT（main() 启动时注册/登录获取）。
+_AUTH_TOKEN = ""
 
 # Minimal placeholder JD (~200 chars) so --skip-llm tests can still pass job
 # upload validation without needing the big file. The placeholder has enough
@@ -82,6 +86,8 @@ def _request(
     """Issue an HTTP request and return (status, body). For streams, body
     is the full text concatenated (the caller decides how to chunk)."""
     hdrs = dict(headers or {})
+    if _AUTH_TOKEN:
+        hdrs.setdefault("Authorization", f"Bearer {_AUTH_TOKEN}")
     body_bytes: bytes | None = None
     if json_body is not None:
         hdrs.setdefault("Content-Type", "application/json")
@@ -110,6 +116,35 @@ def _post_json(base: str, path: str, body: dict, **kw) -> dict:
 def _get(base: str, path: str, **kw) -> tuple[int, str]:
     url = base.rstrip("/") + path
     return _request("GET", url, **kw)
+
+
+def _ensure_token(base: str) -> str:
+    """注册/登录一个随机会话用户并返回 JWT。"""
+    global _AUTH_TOKEN
+    username = f"e2e_{uuid.uuid4().hex[:10]}"
+    password = "E2E-Test-Pass-2024!"
+    # 先尝试注册（随机用户名，通常直接成功）；若已存在则走登录。
+    status, text = _request(
+        "POST",
+        base.rstrip("/") + "/api/v1/auth/register",
+        json_body={"username": username, "password": password},
+        timeout=30,
+    )
+    if status not in (200, 409):
+        raise AssertionError(f"register failed: HTTP {status}: {text[:200]}")
+    status, text = _request(
+        "POST",
+        base.rstrip("/") + "/api/v1/auth/login",
+        json_body={"username": username, "password": password},
+        timeout=30,
+    )
+    if status != 200:
+        raise AssertionError(f"login failed: HTTP {status}: {text[:200]}")
+    token = (json.loads(text).get("data") or {}).get("token", "")
+    if not token:
+        raise AssertionError("no token in login response")
+    _AUTH_TOKEN = token
+    return token
 
 
 # ---------- Test framework ----------
@@ -413,6 +448,10 @@ def main() -> int:
     print(f"  backend:  {args.base_url}")
     print(f"  frontend: {args.frontend_url or '(skipped)'}")
     print(f"  skip-llm: {args.skip_llm}")
+
+    # 认证：注册/登录随机会话用户
+    _ensure_token(args.base_url)
+    print(f"  auth:     session token obtained")
 
     t = TestRunner(args.base_url, args.frontend_url, args.skip_llm)
 

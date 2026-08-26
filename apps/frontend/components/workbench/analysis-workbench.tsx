@@ -16,7 +16,6 @@ import {
 import AppShell from './app-shell';
 import { analyzeResumes, uploadJobDescription, uploadResume } from '@/lib/api/screening';
 import { useAnalysis } from './analysis-context';
-import { AiModelButton, useAiModel } from './ai-model-config';
 
 const MAX_FILES = 3;
 const MAX_FILE_SIZE = 30 * 1024 * 1024;
@@ -30,7 +29,6 @@ export default function AnalysisWorkbench() {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const { setAnalysisResult } = useAnalysis();
-  const { config: aiConfig, isConfigured, openConfigurator } = useAiModel();
   const [files, setFiles] = useState<File[]>([]);
   const [jobDescription, setJobDescription] = useState('');
   const [isDragging, setIsDragging] = useState(false);
@@ -76,11 +74,6 @@ export default function AnalysisWorkbench() {
 
   const handleAnalyze = async () => {
     if (!canAnalyze) return;
-    if (!isConfigured) {
-      setError('请先配置 AI 模型，再开始分析。');
-      openConfigurator();
-      return;
-    }
     setError('');
     try {
       setPhase('uploading');
@@ -88,7 +81,7 @@ export default function AnalysisWorkbench() {
       setPhase('job');
       const jobId = await uploadJobDescription(jobDescription.trim(), resumeIds[0]);
       setPhase('analyzing');
-      const result = await analyzeResumes(resumeIds, jobId, aiConfig);
+      const result = await analyzeResumes(resumeIds, jobId);
       setAnalysisResult(result);
       router.push('/dashboard');
     } catch (caught) {
@@ -119,7 +112,6 @@ export default function AnalysisWorkbench() {
             <h1 className="mt-3 text-3xl font-semibold text-[#152137] sm:text-4xl">AI 智能<span className="block sm:inline">全维度量化人才评估。</span></h1>
             <p className="mt-3 max-w-2xl text-sm leading-6 text-[#6d7b91] sm:text-base">自动匹配岗位与简历信息，输出可直接用于招聘决策的标准化分析报告</p>
           </div>
-          <AiModelButton />
         </header>
 
         <div className="mt-7 grid gap-6 xl:grid-cols-[minmax(340px,0.82fr)_minmax(500px,1.18fr)]">

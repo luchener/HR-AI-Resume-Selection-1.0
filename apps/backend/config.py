@@ -45,6 +45,11 @@ LL_MODEL = (
     or "deepseek-v4-flash"
 )
 
+# JWT 签名密钥（多用户认证）。production 下不能是默认值。
+JWT_SECRET_KEY = _strip_quotes(
+    os.getenv("JWT_SECRET_KEY", "change-me-jwt-secret")
+)
+
 # Session 密钥（保留以备未来 Flask-Session 扩展；当前未使用）
 SESSION_SECRET_KEY = _strip_quotes(os.getenv("SESSION_SECRET_KEY", "change-me"))
 
@@ -64,6 +69,31 @@ else:
         f"http://localhost:{p}" for p in (3000, 3001, 3002)
     ] + [f"http://127.0.0.1:{p}" for p in (3000, 3001, 3002)]
 
+# ── SMTP 邮件配置（忘记密码重置）───────────────────────────────────
+# 未配置时重置接口返回 503，提示管理员配置邮件服务。
+SMTP_HOST = _strip_quotes(os.getenv("SMTP_HOST", ""))
+SMTP_PORT = 465
+try:
+    SMTP_PORT = int(_strip_quotes(os.getenv("SMTP_PORT", "465")))
+except (TypeError, ValueError):
+    SMTP_PORT = 465
+SMTP_USER = _strip_quotes(os.getenv("SMTP_USER", ""))
+SMTP_PASSWORD = _strip_quotes(os.getenv("SMTP_PASSWORD", ""))
+SMTP_FROM = _strip_quotes(os.getenv("SMTP_FROM", "")) or SMTP_USER
+
+def smtp_configured() -> bool:
+    """是否已配置可用的 SMTP 服务。"""
+    return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
+
+# 密码重置 Token 有效期（秒），默认 30 分钟
+RESET_TOKEN_TTL_SECONDS = 1800
+try:
+    RESET_TOKEN_TTL_SECONDS = int(
+        _strip_quotes(os.getenv("RESET_TOKEN_TTL_SECONDS", "1800"))
+    )
+except (TypeError, ValueError):
+    RESET_TOKEN_TTL_SECONDS = 1800
+
 # 子目录（启动时自动创建）
 RESUMES_DIR = os.path.join(DATA_DIR, "resumes")
 JOBS_DIR = os.path.join(DATA_DIR, "jobs")
@@ -72,9 +102,19 @@ for _d in (DATA_DIR, RESUMES_DIR, JOBS_DIR, LOG_DIR):
 
 
 def check_production():
-    """生产环境启动校验；模型 Key 也可以由浏览器按请求提供。"""
+    """
+    生产环境启动校验。
+    - SESSION_SECRET_KEY 和 JWT_SECRET_KEY 不能是默认值。
+    - LLM_API_KEY 由用户在前端按请求提供，不作为硬性启动条件。
+    """
     if ENV == "production":
         if not SESSION_SECRET_KEY or SESSION_SECRET_KEY == "change-me":
             raise SystemExit(
-                "[config] ENV=production 时 SESSION_SECRET_KEY 必须改成随机字符串。"
+                "[config] ENV=production 时 SESSION_SECRET_KEY 必须改成随机字符串。\n"
+                "生成：python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
+        if not JWT_SECRET_KEY or JWT_SECRET_KEY == "change-me-jwt-secret":
+            raise SystemExit(
+                "[config] ENV=production 时 JWT_SECRET_KEY 必须改成随机字符串。\n"
+                "生成：python -c \"import secrets; print(secrets.token_urlsafe(32))\""
             )

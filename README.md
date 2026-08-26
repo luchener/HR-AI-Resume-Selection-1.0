@@ -134,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File .\start-resume-matcher.ps1
 
 默认地址：
 
-- 前端：`http://127.0.0.1:3003`
+- 前端：`http://127.0.0.1:3008`
 - 后端：`http://127.0.0.1:9001`
 
 ### 手动启动
@@ -161,10 +161,10 @@ python -m venv .venv
 ```bash
 cd apps/frontend
 npm ci
-npm run dev -- -p 3003
+npm run dev -- --hostname 127.0.0.1 -p 3008
 ```
 
-打开 `http://127.0.0.1:3003`，先在右上角配置并测试 AI 模型，再上传简历和岗位描述。
+打开 `http://127.0.0.1:3008`，先在右上角配置并测试 AI 模型，再上传简历和岗位描述。
 
 ## Docker Compose
 

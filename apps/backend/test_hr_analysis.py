@@ -8,19 +8,34 @@ from unittest.mock import patch
 
 import app as backend
 import llm as llm_module
+import auth as auth_module
 from test_helpers import build_anonymous_resume_docx
 
 
 class HrAnalysisTests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
+        # 用工作区内固定目录（沙箱环境不允许写系统临时目录；服务器上无此限制）
+        self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-data")
+        os.makedirs(self.temp_dir, exist_ok=True)
         backend._HR_ANALYSIS_CACHE.clear()
-        backend.store.RESUMES_DIR = os.path.join(self.temp_dir.name, "resumes")
-        backend.store.JOBS_DIR = os.path.join(self.temp_dir.name, "jobs")
+        backend.store.RESUMES_DIR = os.path.join(self.temp_dir, "resumes")
+        backend.store.JOBS_DIR = os.path.join(self.temp_dir, "jobs")
+        # 认证：创建测试用户并生成 JWT（auth 模块的 USERS_DIR 指向临时目录）
+        # 注意：新版 auth 的索引/重置目录依赖 USERS_DIR 初始化，需一并重定向
+        auth_module.USERS_DIR = os.path.join(self.temp_dir, "users")
+        auth_module._INDEX_FILE = os.path.join(auth_module.USERS_DIR, "_index.json")
+        auth_module._INDEX_LOCK = os.path.join(auth_module.USERS_DIR, "_index.lock")
+        auth_module.RESETS_DIR = os.path.join(self.temp_dir, "password_resets")
+        os.makedirs(auth_module.RESETS_DIR, exist_ok=True)
+        user, _err = auth_module.create_user("tester", "password123")
+        self.user_id = user["user_id"]
+        self.token = auth_module.generate_jwt(user["user_id"], user["username"])
+        self.headers = {"Authorization": f"Bearer {self.token}"}
         self.client = backend.app.test_client()
 
     def tearDown(self):
-        self.temp_dir.cleanup()
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_resume_and_job_upload_do_not_call_llm(self):
         file_bytes = build_anonymous_resume_docx()
@@ -30,6 +45,7 @@ class HrAnalysisTests(unittest.TestCase):
                 "/api/v1/resumes/upload",
                 data={"file": (io.BytesIO(file_bytes), "anonymous-resume.docx")},
                 content_type="multipart/form-data",
+                headers=self.headers,
             )
             self.assertEqual(upload.status_code, 200)
             resume_id = upload.get_json()["resume_id"]
@@ -40,6 +56,7 @@ class HrAnalysisTests(unittest.TestCase):
                     "resume_id": resume_id,
                     "job_descriptions": ["AI 产品经理\n负责 AI Agent 产品\n要求 5 年产品经验"],
                 },
+                headers=self.headers,
             )
             self.assertEqual(job.status_code, 200)
 
@@ -54,14 +71,15 @@ class HrAnalysisTests(unittest.TestCase):
                 )
             },
             content_type="multipart/form-data",
+            headers=self.headers,
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertGreater(response.get_json()["extracted_characters"], 500)
 
     def test_hr_analysis_enforces_formula_and_fixed_fields(self):
-        resume_id = backend.store.save_resume("Python AI 产品经理，8 年经验", {})
-        job_id = backend.store.save_job(resume_id, "招聘 AI 产品经理，要求 5 年经验", {})
+        resume_id = backend.store.save_resume("Python AI 产品经理，8 年经验", {}, self.user_id)
+        job_id = backend.store.save_job(resume_id, "招聘 AI 产品经理，要求 5 年经验", {}, self.user_id)
         model_result = {
             "candidate_name": "张三",
             "job_fit_score": 88,
@@ -89,6 +107,7 @@ class HrAnalysisTests(unittest.TestCase):
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_id": resume_id, "job_id": job_id},
+                headers=self.headers,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -461,13 +480,14 @@ class HrAnalysisTests(unittest.TestCase):
         )
 
     def test_hr_analysis_returns_error_when_model_returns_invalid_json(self):
-        resume_id = backend.store.save_resume("Python 后端工程师，5 年经验，FastAPI 开发", {})
-        job_id = backend.store.save_job(resume_id, "招聘 Python 后端工程师，要求 3 年经验，FastAPI", {})
+        resume_id = backend.store.save_resume("Python 后端工程师，5 年经验，FastAPI 开发", {}, self.user_id)
+        job_id = backend.store.save_job(resume_id, "招聘 Python 后端工程师，要求 3 年经验，FastAPI", {}, self.user_id)
 
         with patch.object(backend.llm, "call_llm", side_effect=ValueError("invalid JSON")):
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_id": resume_id, "job_id": job_id},
+                headers=self.headers,
             )
 
         self.assertEqual(response.status_code, 502)
@@ -475,13 +495,14 @@ class HrAnalysisTests(unittest.TestCase):
 
     def test_batch_hr_analysis_keeps_successful_results(self):
         resume_ids = [
-            backend.store.save_resume("Python 后端工程师，5 年经验", {}),
-            backend.store.save_resume("Java 后端工程师，3 年经验", {}),
+            backend.store.save_resume("Python 后端工程师，5 年经验", {}, self.user_id),
+            backend.store.save_resume("Java 后端工程师，3 年经验", {}, self.user_id),
         ]
         job_id = backend.store.save_job(
             resume_ids[0],
             "招聘后端工程师，要求 Python、API 和数据库经验",
             {},
+            self.user_id,
         )
         model_result = {
             "job_fit_score": 80,
@@ -502,6 +523,7 @@ class HrAnalysisTests(unittest.TestCase):
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_ids": resume_ids, "job_id": job_id},
+                headers=self.headers,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -517,11 +539,11 @@ class HrAnalysisTests(unittest.TestCase):
 
     def test_batch_hr_analysis_maps_all_candidates_from_one_model_call(self):
         resume_ids = [
-            backend.store.save_resume("候选人甲，Python 5 年", {}),
-            backend.store.save_resume("候选人乙，Java 4 年", {}),
-            backend.store.save_resume("候选人丙，Go 3 年", {}),
+            backend.store.save_resume("候选人甲，Python 5 年", {}, self.user_id),
+            backend.store.save_resume("候选人乙，Java 4 年", {}, self.user_id),
+            backend.store.save_resume("候选人丙，Go 3 年", {}, self.user_id),
         ]
-        job_id = backend.store.save_job(resume_ids[0], "招聘后端工程师", {})
+        job_id = backend.store.save_job(resume_ids[0], "招聘后端工程师", {}, self.user_id)
 
         def analysis(name: str, score: int) -> dict:
             return {
@@ -549,6 +571,7 @@ class HrAnalysisTests(unittest.TestCase):
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_ids": resume_ids, "job_id": job_id},
+                headers=self.headers,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -576,6 +599,7 @@ class HrAnalysisTests(unittest.TestCase):
             response = self.client.post(
                 "/api/v1/ai/test",
                 json={"ai_config": ai_config},
+                headers=self.headers,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -596,14 +620,15 @@ class HrAnalysisTests(unittest.TestCase):
                     "model": "custom-chat",
                 }
             },
+            headers=self.headers,
         )
 
         self.assertEqual(response.status_code, 422)
         self.assertIn("HTTP", response.get_json()["detail"])
 
     def test_hr_cache_is_isolated_by_request_model_config(self):
-        resume_id = backend.store.save_resume("Python 工程师，5 年经验", {})
-        job_id = backend.store.save_job(resume_id, "招聘 Python 工程师", {})
+        resume_id = backend.store.save_resume("Python 工程师，5 年经验", {}, self.user_id)
+        job_id = backend.store.save_job(resume_id, "招聘 Python 工程师", {}, self.user_id)
         model_result = {
             "job_fit_score": 76,
             "ai_risk": "none",
@@ -624,14 +649,17 @@ class HrAnalysisTests(unittest.TestCase):
             first = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_id": resume_id, "job_id": job_id, "ai_config": first_config},
+                headers=self.headers,
             )
             cached = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_id": resume_id, "job_id": job_id, "ai_config": first_config},
+                headers=self.headers,
             )
             isolated = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_id": resume_id, "job_id": job_id, "ai_config": second_config},
+                headers=self.headers,
             )
 
         self.assertEqual(first.status_code, 200)

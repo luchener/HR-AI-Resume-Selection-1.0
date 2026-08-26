@@ -1,14 +1,32 @@
 import type { AnalysisResult } from '@/components/workbench/analysis-context';
-import type { AiModelConfig } from '@/components/workbench/ai-model-config';
+import { getStoredToken } from '@/components/workbench/auth-context';
 import { API_URL } from './config';
 
-function aiConfigPayload(config: AiModelConfig) {
-  return {
-    provider: config.provider,
-    api_key: config.apiKey,
-    base_url: config.baseUrl,
-    model: config.model,
-  };
+/**
+ * 统一请求头：附带 JWT（Authorization: Bearer <token>）。
+ * 未登录时 getStoredToken() 返回空串，后端会返回 401，由调用方引导登录。
+ */
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  const token = getStoredToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+/** 401 统一处理：清掉失效 token，跳登录页。 */
+function handleUnauthorized(response: Response): void {
+  if (response.status === 401) {
+    try {
+      window.localStorage.removeItem('resume-screening-token');
+      window.localStorage.removeItem('resume-screening-user');
+      window.sessionStorage.removeItem('resume-screening-result');
+    } catch {
+      // ignore
+    }
+    if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+      window.location.replace('/login');
+    }
+  }
 }
 
 async function errorDetail(response: Response): Promise<string> {
@@ -25,9 +43,11 @@ export async function uploadResume(file: File): Promise<string> {
   formData.append('file', file);
   const response = await fetch(`${API_URL}/api/v1/resumes/upload`, {
     method: 'POST',
+    headers: authHeaders(),
     body: formData,
   });
   if (!response.ok) {
+    handleUnauthorized(response);
     throw new Error((await errorDetail(response)) || `简历上传失败（HTTP ${response.status}）`);
   }
   const payload = (await response.json()) as { resume_id?: string };
@@ -38,10 +58,11 @@ export async function uploadResume(file: File): Promise<string> {
 export async function uploadJobDescription(description: string, resumeId: string): Promise<string> {
   const response = await fetch(`${API_URL}/api/v1/jobs/upload`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ job_descriptions: [description], resume_id: resumeId }),
   });
   if (!response.ok) {
+    handleUnauthorized(response);
     throw new Error((await errorDetail(response)) || `岗位描述上传失败（HTTP ${response.status}）`);
   }
   const payload = (await response.json()) as { job_id?: string[] };
@@ -53,20 +74,20 @@ export async function uploadJobDescription(description: string, resumeId: string
 export async function analyzeResumes(
   resumeIds: string | string[],
   jobId: string,
-  aiConfig: AiModelConfig,
   signal?: AbortSignal,
 ): Promise<AnalysisResult> {
   const response = await fetch(`${API_URL}/api/v1/resumes/hr-analysis`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(
       Array.isArray(resumeIds)
-        ? { resume_ids: resumeIds, job_id: jobId, ai_config: aiConfigPayload(aiConfig) }
-        : { resume_id: resumeIds, job_id: jobId, ai_config: aiConfigPayload(aiConfig) },
+        ? { resume_ids: resumeIds, job_id: jobId }
+        : { resume_id: resumeIds, job_id: jobId },
     ),
     signal,
   });
   if (!response.ok) {
+    handleUnauthorized(response);
     throw new Error((await errorDetail(response)) || `招聘分析失败（HTTP ${response.status}），请稍后重试。`);
   }
   return (await response.json()) as AnalysisResult;
@@ -75,21 +96,20 @@ export async function analyzeResumes(
 export async function improveResumeStream(
   resumeId: string,
   jobId: string,
-  aiConfig: AiModelConfig,
   onProgress?: (status: string, message: string) => void,
   signal?: AbortSignal,
 ): Promise<AnalysisResult> {
   const response = await fetch(`${API_URL}/api/v1/resumes/improve?stream=true`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    headers: authHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }),
     body: JSON.stringify({
       resume_id: resumeId,
       job_id: jobId,
-      ai_config: aiConfigPayload(aiConfig),
     }),
     signal,
   });
   if (!response.ok) {
+    handleUnauthorized(response);
     throw new Error((await errorDetail(response)) || `深度优化失败（HTTP ${response.status}）`);
   }
   if (!response.body) throw new Error('深度优化服务未返回数据流。');
@@ -135,24 +155,46 @@ export async function improveResumeStream(
   return finalResult;
 }
 
-export async function testAiConnection(
-  aiConfig: AiModelConfig,
-  signal?: AbortSignal,
-): Promise<{ model: string; elapsedMs: number }> {
-  const response = await fetch(`${API_URL}/api/v1/ai/test`, {
+export async function fetchImprovedMarkdown(
+  resumeId: string,
+  jobId: string,
+  analysisResult: string,
+): Promise<string> {
+  const response = await fetch(`${API_URL}/api/v1/resumes/improved-markdown`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ai_config: aiConfigPayload(aiConfig) }),
-    signal,
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ resume_id: resumeId, job_id: jobId, analysis_result: analysisResult }),
   });
   if (!response.ok) {
-    throw new Error((await errorDetail(response)) || `连接测试失败（HTTP ${response.status}）`);
+    handleUnauthorized(response);
+    throw new Error((await errorDetail(response)) || `编辑器内容生成失败（HTTP ${response.status}）`);
+  }
+  const payload = (await response.json()) as { data?: { markdown?: string } };
+  return payload.data?.markdown || '';
+}
+
+/**
+ * 修改当前登录用户密码。
+ * 成功后后端会将密码版本 +1，当前 token 立即失效 → 需要重新登录。
+ */
+export async function changePassword(
+  oldPassword: string,
+  newPassword: string,
+): Promise<{ message: string; requireRelogin: boolean }> {
+  const response = await fetch(`${API_URL}/api/v1/auth/change-password`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+  });
+  if (!response.ok) {
+    handleUnauthorized(response);
+    throw new Error((await errorDetail(response)) || `密码修改失败（HTTP ${response.status}）`);
   }
   const payload = (await response.json()) as {
-    data?: { model?: string; elapsed_ms?: number };
+    data?: { message?: string; require_relogin?: boolean };
   };
   return {
-    model: payload.data?.model || aiConfig.model,
-    elapsedMs: payload.data?.elapsed_ms || 0,
+    message: payload.data?.message || '密码修改成功。',
+    requireRelogin: payload.data?.require_relogin ?? true,
   };
 }
