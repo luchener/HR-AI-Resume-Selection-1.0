@@ -11,8 +11,11 @@
 1. [项目架构与技术栈](#一项目架构与技术栈)
 2. [登录模块与并发隔离技术实现](#二登录模块与并发隔离技术实现)
 3. [账号数据保存逻辑结构](#三账号数据保存逻辑结构)
-4. [云服务器部署步骤（腾讯云 Ubuntu 24.04）](#四云服务器部署步骤腾讯云-ubuntu-2404)
-5. [多用户改造文件清单](#附多用户改造文件清单)
+4. [核心 API 接口](#四核心-api-接口)
+5. [本地开发与测试](#五本地开发与测试)
+6. [Docker 构建与发布](#六docker-构建与发布)
+7. [云服务器部署步骤（腾讯云 Ubuntu 24.04）](#七云服务器部署步骤腾讯云-ubuntu-2404)
+8. [主要文件职责](#附主要文件职责)
 
 ---
 
@@ -47,42 +50,105 @@
 
 ### 1.2 技术栈清单
 
-| 层 | 技术 | 版本 |
-|----|------|------|
-| 前端框架 | Next.js (App Router) | 15.3.0 |
-| 前端 UI | React + Tailwind CSS + lucide-react | 19 / 4 / 0.501 |
-| 后端框架 | Flask | 3.0.* |
-| WSGI 服务器 | Gunicorn | 23.* |
-| LLM 调用 | openai SDK（兼容 DeepSeek 等） | 1.75.* |
-| 认证 | PyJWT (HS256) + PBKDF2 密码哈希 | 2.10.* |
-| 文档解析 | pdfminer.six + 手写 DOCX(zip+xml) 解析 | 20250327 |
-| 存储 | JSON 文件（零数据库依赖） | — |
-| 部署 | Docker Compose（backend + frontend 双容器） | — |
+| 层          | 技术                                        | 版本           |
+| ----------- | ------------------------------------------- | -------------- |
+| 前端框架    | Next.js (App Router)                        | 15.3.0         |
+| 前端 UI     | React + Tailwind CSS + lucide-react         | 19 / 4 / 0.501 |
+| 后端框架    | Flask                                       | 3.0.*          |
+| WSGI 服务器 | Gunicorn                                    | 23.*           |
+| LLM 调用    | openai SDK（兼容 DeepSeek 等）              | 1.75.*         |
+| 认证        | PyJWT (HS256) + PBKDF2 密码哈希             | 2.10.*         |
+| 文档解析    | pdfminer.six + 手写 DOCX(zip+xml) 解析      | 20250327       |
+| 存储        | JSON 文件（零数据库依赖）                   | —              |
+| 部署        | Docker Compose（backend + frontend 双容器） | —              |
 
 ### 1.3 目录结构
 
 ```
 AIResumeSmartSelection1.0-CloudDeploymentVersion/
 ├── apps/
-│   ├── backend/          # Flask 后端（8 个 py 文件）
-│   │   ├── auth.py       # JWT 认证（多用户改造新增）
+│   ├── backend/          # Flask 后端（10 个核心 py 文件）
+│   │   ├── auth.py       # JWT、用户、密码和验证码
 │   │   ├── app.py        # 路由 + 分析编排
 │   │   ├── store.py      # JSON 存储（原子写）
 │   │   ├── config.py     # 配置（.env 读取）
-│   │   ├── llm.py / parser.py / prompts.py / run.py
+│   │   ├── mailer.py     # SMTP HTML/纯文本验证码邮件
+│   │   ├── reset_password_cli.py # 管理员重置无邮箱账号
+│   │   └── llm.py / parser.py / prompts.py / run.py
+│   │       # LLM 调用、文档解析、Prompt、启动辅助
 │   │   ├── .env          # 密钥（gitignore，不入库）
 │   │   └── Dockerfile
 │   └── frontend/         # Next.js 前端
 │       ├── app/          # 页面路由（login/dashboard/首页）
 │       ├── components/workbench/  # 工作台组件 + auth-context
 │       ├── lib/api/      # API 封装（带 JWT 头）
-│       ├── public/a4cv/  # 独立简历编辑器（直连 LLM，不经后端）
+│       ├── public/a4cv/  # 独立简历编辑器
 │       └── Dockerfile
 ├── docker-compose.yml
 ├── package.json          # 根脚本（build/start/docker:*）
 ├── .dockerignore
 └── docs/                 # 文档
 ```
+
+### 1.4 运行环境要求
+
+#### 本地开发环境
+
+| 项目     | 要求                                       |
+| -------- | ------------------------------------------ |
+| 操作系统 | Windows 10/11、macOS、Ubuntu 22.04+        |
+| Node.js  | 20 LTS 或更高                              |
+| npm/pnpm | npm 10+ 或 pnpm 9+                         |
+| Python   | 3.12                                       |
+| 内存     | 8 GB 推荐；前端构建建议至少 4 GB 可用内存  |
+| 网络     | 可访问 DeepSeek 或其他 OpenAI 兼容 LLM API |
+
+#### 生产环境
+
+推荐腾讯云 Ubuntu Server 24.04 LTS：
+
+- 2 核 4 GB 起步；并发分析推荐 4 核 8 GB；
+- 磁盘 40 GB 起步，按简历数量扩容；
+- Docker Engine 24+、Docker Compose v2；
+- 安全组只开放 22、80、443，3000/8000 不直接暴露公网；
+- 域名 A 记录指向服务器公网 IP；
+- 已开通 SMTP 服务并取得授权码；
+- 服务器可以访问 LLM API。
+
+### 1.5 环境变量
+
+后端配置文件为 `apps/backend/.env`，禁止提交到 Git。
+
+```ini
+ENV="production"
+SESSION_SECRET_KEY="随机生成的长字符串"
+JWT_SECRET_KEY="随机生成的长字符串"
+LLM_API_KEY="sk-你的APIKey"
+LLM_BASE_URL="https://api.deepseek.com/v1"
+LLM_MODEL="deepseek-chat"
+
+# 163 SMTP 示例
+SMTP_HOST="smtp.163.com"
+SMTP_PORT=465
+SMTP_USER="your-account@163.com"
+SMTP_PASSWORD="163邮箱授权码"
+SMTP_FROM="your-account@163.com"
+
+# 可选配置
+RESET_TOKEN_TTL_SECONDS=1800
+LOG_DIR="logs"
+ALLOWED_ORIGINS=""
+GUNICORN_WORKERS=4
+NEXT_PUBLIC_API_URL=""
+```
+
+生成随机密钥：
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+`SMTP_PASSWORD` 是邮箱 SMTP 授权码，不是网页登录密码。生产环境禁止使用默认密钥；修改 `JWT_SECRET_KEY` 会令所有旧 JWT 失效；修改 SMTP 配置后必须重启 backend。
 
 ---
 
@@ -111,6 +177,7 @@ auth_mod.init_auth(app)   # 注册 require_auth (before_request) + _AuthError �
 - 校验通过后把 `{user_id, username}` 注入 Flask `g`，供路由取用
 
 **安全细节**：
+
 - 密码哈希：PBKDF2-HMAC-SHA256，**200,000 次迭代 + 16 字节随机盐**，常量时间比较（`hmac.compare_digest`）防时序攻击
 - 用户不存在时也执行一次哈希（防用户名枚举的时序侧信道）
 - **用户名大小写不敏感**：`admin` / `Admin` / `ADMIN` 视为同一账号 —— 注册查重与登录匹配都统一转小写比较（`create_user` 和 `find_user_by_username`），杜绝因大小写不同产生的重复账号；JWT 用户名保留首次注册时的大小写
@@ -134,6 +201,7 @@ get_job(job_id, user_id)
 **效果**：用户 A 的 resume_id 被用户 B 猜测/枚举时，返回 **404**（而不是 403/500），不泄露资源是否存在；用户 B 也无法用 A 的 resume_id 上传 JD 或触发分析（同样 404/400）。
 
 **请求级隔离**（`app.py`）：
+
 - `_current_user_id()` 从 `g.auth_user` 取当前用户
 - **线程池任务显式传参**：`_run_hr_batch_analysis` 用 `ThreadPoolExecutor(max_workers=3)` 并行分析，worker 线程内**不能访问 Flask 的 `g`**（线程不共享请求上下文），所以 `user_id` 作为参数显式传入每个任务 —— 这是并发实现的关键点。
 
@@ -146,30 +214,31 @@ futures = {
 
 ### 2.3 并发安全设计
 
-| 并发点 | 实现 | 说明 |
-|--------|------|------|
-| 文件写入 | 原子写：`写 .tmp 临时文件 → fsync → os.replace` | 断电/多 worker 并发不会产生半写文件 |
-| 多 worker | Gunicorn `-w 4`，每个 worker 独立进程 | 支持多用户同时分析不排队 |
-| 批量分析 | `ThreadPoolExecutor(max_workers=3)`，**每个请求内部**并发 | 不是全局共享线程池，请求间天然隔离 |
-| 分析缓存 | `_HR_ANALYSIS_CACHE`（进程内 dict） | key 含 `user_id`：`(version, user_id, resume_id, job_id, config_fingerprint)`，杜绝跨用户结果串味 |
-| CORS | `after_request` + `before_request` 预检 | 同源反代部署留空即可 |
-| 文件锁 | 原子写天然串行化 | 无需额外锁，UUID 文件名避免冲突 |
+| 并发点    | 实现                                                      | 说明                                                         |
+| --------- | --------------------------------------------------------- | ------------------------------------------------------------ |
+| 文件写入  | 原子写：`写 .tmp 临时文件 → fsync → os.replace`           | 断电/多 worker 并发不会产生半写文件                          |
+| 多 worker | Gunicorn `-w 4`，每个 worker 独立进程                     | 支持多用户同时分析不排队                                     |
+| 批量分析  | `ThreadPoolExecutor(max_workers=3)`，**每个请求内部**并发 | 不是全局共享线程池，请求间天然隔离                           |
+| 分析缓存  | `_HR_ANALYSIS_CACHE`（进程内 dict）                       | key 含 `user_id`：`(version, user_id, resume_id, job_id, config_fingerprint)`，杜绝跨用户结果串味 |
+| CORS      | `after_request` + `before_request` 预检                   | 同源反代部署留空即可                                         |
+| 文件锁    | 原子写天然串行化                                          | 无需额外锁，UUID 文件名避免冲突                              |
 
 ### 2.4 前端鉴权实现
 
-| 模块 | 职责 |
-|------|------|
+| 模块                                    | 职责                                                         |
+| --------------------------------------- | ------------------------------------------------------------ |
 | `components/workbench/auth-context.tsx` | `AuthProvider`：localStorage 恢复登录态、未登录重定向 `/login`、`login()/logout()`；公开页白名单含 `/login`、`/reset-password` |
-| `app/(default)/login/page.tsx` | 登录/注册页（注册密码≥8位、两次确认、邮箱验证码发送+输入） |
-| `lib/api/screening.ts` | 所有 API 调用统一注入 `Authorization: Bearer <token>`；401 统一处理（清 token + 跳登录） |
-| `components/workbench/app-shell.tsx` | 侧边栏显示用户名 + 登出 + 修改密码（弹窗）；登出时清 sessionStorage 分析结果 |
-| `app/(default)/reset-password/page.tsx` | 忘记密码：两步（邮箱 → 验证码+新密码） |
+| `app/(default)/login/page.tsx`          | 登录/注册页（注册密码≥8位、两次确认、邮箱验证码发送+输入）   |
+| `lib/api/screening.ts`                  | 所有 API 调用统一注入 `Authorization: Bearer <token>`；401 统一处理（清 token + 跳登录） |
+| `components/workbench/app-shell.tsx`    | 侧边栏显示用户名 + 登出 + 修改密码（弹窗）；登出时清 sessionStorage 分析结果 |
+| `app/(default)/reset-password/page.tsx` | 忘记密码：两步（邮箱 → 验证码+新密码）                       |
 
 ### 2.5 邮箱验证码机制（注册绑定 + 忘记密码重置，统一实现）
 
 **统一机制**（`auth.py` 的 `email code` 部分）：验证码按**邮箱 + 用途**存储，磁盘只存 SHA-256 哈希。6 位**全大写字母+数字**（排除易混淆 `0O1lI`，`ABCDEFGHJKMNPQRSTUVWXYZ23456789` 36 字符，36^6≈21.8 亿组合）。
 
 **大小写不敏感**：邮件中显示大写；校验时统一先 `.upper()` 再哈希比对，因此用户填写大写/小写/混合均能通过；前端输入框也自动转大写（`onChange` 直接 `.toUpperCase()`），所见即所得。两种用途用常量区分：
+
 - `PURPOSE_EMAIL_VERIFY`（注册绑定邮箱）
 - `PURPOSE_RESET_PASSWORD`（忘记密码重置）
 
@@ -196,6 +265,7 @@ futures = {
 ```
 
 **安全细节**：
+
 - 验证码只存哈希（`data/password_resets/<purpose>.<sha256>.json`），文件泄露无法直接利用
 - 30 分钟有效 + **一次性消费**（用后即删，防重放）
 - **防爆破三重防线**：① 同邮箱 60 秒发码冷却；② 同一验证码尝试 5 次作废；③ 一次性消费
@@ -280,20 +350,255 @@ AI 分析 → 结果只存内存缓存（_HR_ANALYSIS_CACHE），不落盘
 
 ---
 
-## 四、云服务器部署步骤（腾讯云 Ubuntu 24.04）
+## 四、核心 API 接口
+
+API 基础地址：本地为 `http://127.0.0.1:8000`，生产环境通过 `https://你的域名` 同源访问。受保护接口需要：
+
+```http
+Authorization: Bearer <JWT>
+Content-Type: application/json
+```
+
+### 4.1 健康检查
+
+#### `GET /ping`
+
+无需认证。
+
+```json
+{"message":"pong","database":"reachable"}
+```
+
+### 4.2 注册与登录
+
+#### `POST /api/v1/auth/email-code/send`
+
+发送注册验证码：
+
+```json
+{"email":"user@example.com"}
+```
+
+成功返回 `200`。`422` 表示邮箱格式错误或已注册，`429` 表示 60 秒冷却中，`503` 表示 SMTP 未配置，`502` 表示 SMTP 发送失败。
+
+#### `POST /api/v1/auth/register`
+
+```json
+{
+  "username":"alice",
+  "password":"StrongPass123",
+  "email":"user@example.com",
+  "code":"A7K2MP"
+}
+```
+
+成功返回 `data.user_id`、`data.username`、`data.token`。
+
+#### `POST /api/v1/auth/login`
+
+```json
+{"username":"alice","password":"StrongPass123"}
+```
+
+用户名大小写不敏感，成功返回 JWT，凭据错误返回 `401`。
+
+#### `GET /api/v1/auth/me`
+
+需要认证，返回当前用户信息。
+
+#### `POST /api/v1/auth/change-password`
+
+```json
+{"old_password":"OldPass123","new_password":"NewPass456"}
+```
+
+成功后密码版本递增，旧 JWT 失效，客户端需要重新登录。
+
+### 4.3 忘记密码
+
+#### `POST /api/v1/auth/reset-password/request`
+
+```json
+{"email":"user@example.com"}
+```
+
+未知邮箱与已知邮箱返回统一提示，降低邮箱枚举风险。已绑定邮箱会收到重置验证码。
+
+#### `POST /api/v1/auth/reset-password/confirm`
+
+```json
+{
+  "email":"user@example.com",
+  "code":"A7K2MP",
+  "new_password":"NewStrong456"
+}
+```
+
+验证码填写不区分大小写，成功后所有旧 token 失效。
+
+### 4.4 简历、JD 与分析
+
+以下接口均需要 JWT，具体字段以当前 `app.py` 为准：
+
+| 方法     | 路径                          | 说明                         |
+| -------- | ----------------------------- | ---------------------------- |
+| `POST`   | `/api/v1/resumes/upload`      | multipart 上传 PDF/DOCX 简历 |
+| `GET`    | `/api/v1/resumes`             | 获取当前用户简历             |
+| `GET`    | `/api/v1/resumes/<resume_id>` | 获取当前用户指定简历         |
+| `DELETE` | `/api/v1/resumes/<resume_id>` | 删除当前用户简历             |
+| `POST`   | `/api/v1/jobs/upload`         | 提交 JD，关联简历            |
+| `GET`    | `/api/v1/jobs`                | 获取当前用户 JD/任务         |
+| `GET`    | `/api/v1/jobs/<job_id>`       | 获取当前用户 JD              |
+| `POST`   | `/api/v1/resumes/hr-analysis` | 执行 HR 分析                 |
+| `GET`    | `/api/v1/resumes/hr-analysis` | 查询分析结果/缓存结果        |
+
+### 4.5 错误状态码
+
+| 状态码 | 含义                       |
+| -----: | -------------------------- |
+|    200 | 成功                       |
+|    400 | 参数或业务校验失败         |
+|    401 | 未认证或 JWT 无效          |
+|    404 | 资源不存在或不属于当前用户 |
+|    409 | 注册冲突或验证码业务冲突   |
+|    422 | 请求字段或格式不合法       |
+|    429 | 频率限制                   |
+|    502 | SMTP/LLM 外部服务失败      |
+|    503 | 服务未配置或暂不可用       |
+
+通用错误格式：
+
+```json
+{"detail":"错误说明","request_id":"auth:uuid"}
+```
+
+---
+
+## 五、本地开发与测试
+
+### 5.1 后端
+
+```powershell
+cd apps/backend
+python -m venv .venv
+.\\.venv\\Scripts\\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.sample .env
+# 编辑 .env 填写 LLM_API_KEY、JWT_SECRET_KEY 等
+python run.py
+```
+
+### 5.2 前端
+
+```powershell
+cd apps/frontend
+npm install
+npm run dev
+```
+
+### 5.3 测试
+
+```powershell
+cd apps/backend
+python -m unittest test_hr_analysis
+python smoke_test_auth.py
+
+cd ../frontend
+npx tsc --noEmit -p tsconfig.json
+```
+
+未配置 `LLM_API_KEY` 时，冒烟测试中的 AI 分析部分可能打印预期的模型配置错误；认证、权限和验证码断言仍应通过。
+
+---
+
+## 六、Docker 构建与发布
+
+### 6.1 服务
+
+| 服务       | 容器端口 | 作用                      |
+| ---------- | -------: | ------------------------- |
+| `backend`  |     8000 | Flask + Gunicorn API      |
+| `frontend` |     3000 | Next.js production server |
+
+首次构建：
+
+```bash
+cd /opt/resume-matcher-agent-cn
+docker compose up -d --build
+docker compose ps
+docker compose logs -f backend
+```
+
+### 6.2 后端构建注意事项
+
+后端 Dockerfile 使用显式 `COPY` 文件列表，新模块必须加入 COPY 行；当前包含 `mailer.py` 和 `reset_password_cli.py`。
+
+腾讯云访问官方 PyPI 可能出现 `ReadTimeoutError`。当前 Dockerfile 使用清华镜像：
+
+```dockerfile
+RUN pip install --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    -r requirements.txt
+```
+
+### 6.3 更新代码后的正确流程
+
+```bash
+cd /opt/resume-matcher-agent-cn
+
+# 改后端
+docker compose build backend
+docker compose up -d backend
+
+# 改前端
+docker compose build frontend
+docker compose up -d frontend
+
+# 两端都改
+docker compose build backend frontend
+docker compose up -d backend frontend
+```
+
+仅执行 `docker compose build` 不会自动替换当前运行容器。构建后必须执行对应的 `up -d 服务名`，并检查容器启动时间。
+
+验证 backend 是否包含验证码新版：
+
+```bash
+docker exec hr-ai-resume-selection-backend \
+  grep -c create_email_code /app/auth.py
+```
+
+输出大于等于 1 才说明容器内加载的是新版代码。
+
+### 6.4 前端括号路径
+
+```powershell
+tar -cf frontend-patch.tar `
+  "apps/frontend/app/(default)/login/page.tsx" `
+  "apps/frontend/app/(default)/reset-password/page.tsx"
+```
+
+不能把 `(default)` 下文件扁平复制到 `apps/frontend/` 根目录。
+
+---
+
+## 七、云服务器部署步骤（腾讯云 Ubuntu 24.04）
 
 以下为**实战验证过的完整流程**，含踩坑点标注。
 
 ### Step 1：服务器准备
+
 - 腾讯云控制台 → 安全组 → 入站规则开放：**22、80、443**（如不用 Nginx 则开放 3000、8000）
 - SSH 登录：`ssh ubuntu@你的IP`
 
 ### Step 2：安装 Docker
+
 ```bash
 sudo apt update && sudo apt upgrade -y
 curl -fsSL https://get.docker.com | sudo sh
 sudo usermod -aG docker $USER && exit   # 重新登录使权限生效
 ```
+
 > ⚠️ **踩坑点**：报 `Cannot connect to the Docker daemon` 时，先 `sudo systemctl start docker && sudo systemctl enable docker`；再不行就是权限问题，**必须重新登录 SSH** 让 docker 组生效。
 
 ### Step 3：上传代码（两种方式任选）
@@ -336,6 +641,7 @@ cd AIResumeSmartSelection1.0-CloudDeploymentVersion
 把项目**手动上传**到服务器的 `/opt/AIResumeSmartSelection1.0-CloudDeploymentVersion` 目录。
 
 > ⚠️ **不要上传这些目录**（本地才有，服务器不需要，上传了也没用且拖慢速度）：
+>
 > - `node_modules/`（根目录 + `apps/frontend/node_modules/`）— 构建时在服务器自动安装
 > - `apps/backend/.venv/` — Python 虚拟环境，构建时在容器里重建
 > - `apps/frontend/.next/` — 前端构建产物，构建时重新生成
@@ -361,6 +667,7 @@ ls /opt/AIResumeSmartSelection1.0-CloudDeploymentVersion
 ```
 
 ### Step 4：配置 .env（关键）
+
 ```bash
 cd /opt/AIResumeSmartSelection1.0-CloudDeploymentVersion
 ls apps/backend/.env          # 确认 .env 已随上传带上来
@@ -368,16 +675,20 @@ ls apps/backend/.env          # 确认 .env 已随上传带上来
 # cp apps/backend/.env.sample apps/backend/.env
 nano apps/backend/.env
 ```
+
 必改 3 项：`ENV="production"`、`LLM_API_KEY="sk-..."`（DeepSeek）、随机 `SESSION_SECRET_KEY`/`JWT_SECRET_KEY`（用 `python3 -c "import secrets; print(secrets.token_urlsafe(48))"` 生成）。
 
 ### Step 5：构建启动
+
 ```bash
 cd /opt/AIResumeSmartSelection1.0-CloudDeploymentVersion
 docker compose up -d --build      # 首次 5-15 分钟
 docker compose ps                 # 两个容器 healthy
 curl http://127.0.0.1:8000/ping   # → {"database":"reachable","message":"pong"}
 ```
+
 > ⚠️ **踩坑点**：如果 `docker compose ps` 只有 backend 没有 frontend，或报 `Conflict. The container name ... is already in use`：
+>
 > ```bash
 > docker compose down --remove-orphans
 > docker rm -f hr-ai-resume-selection-frontend   # 强制删旧容器
@@ -385,10 +696,12 @@ curl http://127.0.0.1:8000/ping   # → {"database":"reachable","message":"pong"
 > ```
 
 ### Step 6：Nginx 反代 + HTTPS
+
 ```bash
 sudo apt install -y nginx certbot python3-certbot-nginx
 sudo nano /etc/nginx/sites-available/resume-matcher
 ```
+
 ```nginx
 server {
     listen 80;
@@ -403,32 +716,35 @@ server {
     }
 }
 ```
+
 ```bash
 sudo ln -s /etc/nginx/sites-available/resume-matcher /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 sudo certbot --nginx -d www.luchenstudio.cn    # 自动 HTTPS
 ```
+
 > ⚠️ **踩坑点**：`Internal Server Error` 时，先 `docker compose ps` 确认 frontend 容器存在（90% 是前端容器没起来），再 `docker compose logs backend --tail 80` 看后端日志。
 
 ### Step 7：验证
+
 浏览器访问 `https://www.luchenstudio.cn/` → 自动跳登录页 → 注册 → 登录 → 上传简历分析。
 
 ---
 
 ## 附：多用户改造文件清单
 
-| 文件 | 变更 |
-|------|------|
-| `apps/backend/auth.py` | 🆕 新增：JWT 认证 + 用户管理 + 中间件 |
-| `apps/backend/app.py` | 认证中间件 + auth 路由 + 所有 store 调用传 user_id |
-| `apps/backend/store.py` | 全部读写加 user_id 归属校验 |
-| `apps/backend/config.py` | 新增 JWT_SECRET_KEY + production 校验 |
-| `apps/backend/requirements.txt` | + PyJWT |
-| `apps/backend/.env` / `.env.sample` | production 配置 + JWT 密钥 |
-| `apps/backend/Dockerfile` | 复制 auth.py；gunicorn 4 workers |
-| `apps/frontend/...` | 登录页、auth-context、API 鉴权头、移除模型配置、登出 |
-| `docker-compose.yml` | 端口 0.0.0.0；ENV 从 .env 读取 |
-| `package.json` / `.gitignore` | 构建脚本、忽略测试临时目录 |
+| 文件                                | 变更                                                 |
+| ----------------------------------- | ---------------------------------------------------- |
+| `apps/backend/auth.py`              | 🆕 新增：JWT 认证 + 用户管理 + 中间件                 |
+| `apps/backend/app.py`               | 认证中间件 + auth 路由 + 所有 store 调用传 user_id   |
+| `apps/backend/store.py`             | 全部读写加 user_id 归属校验                          |
+| `apps/backend/config.py`            | 新增 JWT_SECRET_KEY + production 校验                |
+| `apps/backend/requirements.txt`     | + PyJWT                                              |
+| `apps/backend/.env` / `.env.sample` | production 配置 + JWT 密钥                           |
+| `apps/backend/Dockerfile`           | 复制 auth.py；gunicorn 4 workers                     |
+| `apps/frontend/...`                 | 登录页、auth-context、API 鉴权头、移除模型配置、登出 |
+| `docker-compose.yml`                | 端口 0.0.0.0；ENV 从 .env 读取                       |
+| `package.json` / `.gitignore`       | 构建脚本、忽略测试临时目录                           |
 
 一、基础信息筛选
 
