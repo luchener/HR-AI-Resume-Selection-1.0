@@ -46,45 +46,7 @@ AI 简历智选是面向公司内部招聘团队的多候选人筛选工作台�
 | 岗位专项 | 根据管理、技术、销售、应届生等岗位类型动态生成 |
 | 可信度 | AI 美化程度、模板化表达、缺少事实或量化证据 |
 
-## 技术栈
 
-| 模块 | 技术与职责 |
-| --- | --- |
-| 前端 | Next.js 15.3、React 19、TypeScript 5、Tailwind CSS 4、Lucide React |
-| 后端 | Python 3.12、Flask 3、Gunicorn 23 |
-| AI 接入 | OpenAI Python SDK 1.75、请求级 OpenAI 兼容客户端、结构化 JSON 重试/修复 |
-| 文档解析 | `pdfminer.six` 解析 PDF；标准库 ZIP/XML 解析 DOCX |
-| 数据存储 | 本地 JSON 文件，原子写入，无数据库依赖 |
-| 批量分析 | `ThreadPoolExecutor`，最多 3 位候选人并发且结果相互隔离 |
-| 流式输出 | Server-Sent Events（SSE） |
-| 简历编辑 | 内置 a4cv Resume Studio 静态应用 |
-| 部署 | Docker Compose，或 Nginx + Next.js + Gunicorn |
-| 测试 | Python `unittest`、HTTP E2E、TypeScript/Next.js 构建检查、Playwright 页面检查 |
-
-## 系统架构
-
-```text
-Browser
-  ├─ 上传 1-3 份简历与岗位描述
-  ├─ 保存当前用户的 AI 模型配置
-  └─ 展示候选人报告 / Resume Studio
-          │
-          ▼
-Next.js 15
-  ├─ 工作台与分析报告 UI
-  ├─ /api/* 同源反向代理
-  └─ sessionStorage / localStorage 会话状态
-          │
-          ▼
-Flask 3
-  ├─ parser.py：PDF / DOCX 文本提取
-  ├─ prompts.py：JD 驱动的招聘分析策略
-  ├─ llm.py：请求级模型客户端与 JSON 修复
-  ├─ app.py：并发分析、评分标准化和 API
-  └─ store.py：简历与岗位 JSON 存储
-          │
-          ▼
-DeepSeek / 任意 OpenAI 兼容模型服务
 ```
 
 ## 一、项目架构与技术栈
