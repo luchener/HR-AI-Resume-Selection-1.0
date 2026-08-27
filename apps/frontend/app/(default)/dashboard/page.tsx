@@ -355,22 +355,37 @@ export default function DashboardPage() {
 
                 <Section eyebrow="Basic screening" title="基础信息筛选" icon={GraduationCapIcon}>
                   <DetailGrid values={[
-                    ['最高学历', analysis.basic_screening.highest_education],
-                    [
-                      '院校及层次',
-                      [analysis.basic_screening.school_name, analysis.basic_screening.school_tier]
-                        .filter((value) => value && value !== '未提供' && value !== EMPTY_VALUE)
-                        .join(' · ') || EMPTY_VALUE,
-                    ],
-                    ['学历类型', analysis.basic_screening.education_type],
-                    ['专业匹配', analysis.basic_screening.major_match],
-                    ['毕业时间', analysis.basic_screening.graduation_year],
-                    ['应届状态', analysis.basic_screening.fresh_graduate],
-                    ['年龄', analysis.basic_screening.age],
+                    ['姓名', candidateName],
                     ['性别', analysis.basic_screening.gender],
+                    ['年龄', analysis.basic_screening.age],
+                    ['籍贯', analysis.basic_screening.native_place],
                     ['工作所在地', analysis.basic_screening.work_location],
                     ['期望薪资', analysis.basic_screening.salary_expectation],
                   ]} />
+                </Section>
+
+                <Section eyebrow="Education history" title="教育经历" icon={GraduationCapIcon}>
+                  {analysis.education_history && analysis.education_history.length > 0 ? (
+                    <div className="mt-2 flex flex-col gap-3">
+                      {analysis.education_history.map((edu, i) => (
+                        <div key={i} className="rounded-md border border-[#e5e9ef] bg-[#fbfcfe] p-4">
+                          <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#3e6fd3]">
+                            <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-[#eaf0fb] text-[10px]">{i + 1}</span>
+                            <span>{edu.degree}</span>
+                            <span className="ml-auto text-[#65738a] font-normal">毕业时间：{edu.graduation_year}</span>
+                          </div>
+                          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+                            <div><dt className="text-[11px] text-[#8190a4]">院校</dt><dd className="text-sm text-[#2c394f]">{edu.school_name}</dd></div>
+                            <div><dt className="text-[11px] text-[#8190a4]">层次</dt><dd className="text-sm text-[#2c394f]">{edu.school_tier}</dd></div>
+                            <div><dt className="text-[11px] text-[#8190a4]">学历类型</dt><dd className="text-sm text-[#2c394f]">{edu.education_type}</dd></div>
+                            <div><dt className="text-[11px] text-[#8190a4]">专业匹配</dt><dd className="text-sm text-[#2c394f]">{edu.major_match}</dd></div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-sm text-[#8190a4]">暂无教育经历信息。</p>
+                  )}
                 </Section>
 
                 <Section eyebrow="Career evidence" title="工作履历" icon={BriefcaseBusinessIcon}>

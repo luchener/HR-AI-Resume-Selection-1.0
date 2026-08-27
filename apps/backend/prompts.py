@@ -101,18 +101,22 @@ PROMPT_HR_RECRUITMENT_ANALYSIS = """
   "ai_deduction": 0,
   "summary": "不超过120字的综合判定",
   "basic_screening": {{
-    "highest_education": "最高学历，未提供则写未提供",
-    "school_name": "最高学历对应的学校全称，未提供则写未提供",
-    "school_tier": "985/211/一本/二本/专科/其他/未提供",
-    "education_type": "统招/非统招/未提供",
-    "major_match": "对口/相关/无关/未提供",
-    "graduation_year": "年份或未提供",
-    "fresh_graduate": "是/否/未提供",
+    "native_place": "籍贯或未提供",
     "age": "年龄或未提供",
     "gender": "性别或未提供",
     "work_location": "所在地或未提供",
     "salary_expectation": "期望薪资或未提供"
   }},
+  "education_history": [
+    {{
+      "degree": "学历（博士/硕士/本科/专科/其他/未提供）",
+      "school_name": "学校全称或未提供",
+      "school_tier": "985/211/一本/二本/专科/其他/未提供",
+      "education_type": "统招/非统招/未提供",
+      "major_match": "对口/相关/无关/未提供",
+      "graduation_year": "年份或未提供"
+    }}
+  ],
   "certificates": ["证书名称 + 必备/加分属性 + 有效期或含金量；没有则写未提供"],
   "work_history": {{
     "total_years": "总工作年限或未提供",

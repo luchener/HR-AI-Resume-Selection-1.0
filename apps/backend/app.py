@@ -955,9 +955,10 @@ def _looks_like_extraction_noise(line: str) -> bool:
 
 
 _BASIC_SCREENING_FIELDS = (
-    "highest_education", "school_name", "school_tier", "education_type", "major_match",
-    "graduation_year", "fresh_graduate", "age", "gender", "work_location",
-    "salary_expectation",
+    "native_place", "age", "gender", "work_location", "salary_expectation",
+)
+_EDUCATION_HISTORY_FIELDS = (
+    "degree", "school_name", "school_tier", "education_type", "major_match", "graduation_year",
 )
 _WORK_HISTORY_FIELDS = (
     "total_years", "relevant_years", "industry_match", "company_background",
@@ -984,6 +985,29 @@ _SCORE_BREAKDOWN_LIMITS = {
     "industry_background": 15,
     "evidence_bonus": 10,
 }
+
+
+def _normalize_education_history(raw) -> list[dict]:
+    """Normalize education history entries, sorted by degree (博士 > 硕士 > 本科 > 专科)."""
+    _DEGREE_ORDER = {"博士": 0, "硕士": 1, "本科": 2, "专科": 3, "大专": 3, "其他": 4}
+    if not isinstance(raw, list) or not raw:
+        return []
+    entries: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        degree = str(item.get("degree") or "未提供").strip()
+        entry = {
+            "degree": degree,
+            "school_name": _as_text(item.get("school_name")),
+            "school_tier": _as_text(item.get("school_tier")),
+            "education_type": _as_text(item.get("education_type")),
+            "major_match": _as_text(item.get("major_match")),
+            "graduation_year": _as_text(item.get("graduation_year")),
+        }
+        entries.append(entry)
+    entries.sort(key=lambda e: _DEGREE_ORDER.get(e["degree"], 99))
+    return entries[:6]
 
 
 def _normalize_score_breakdown(value) -> tuple[dict[str, int], bool]:
@@ -1047,6 +1071,7 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         requested_fit_tag = score_fit_tag
 
     basic_screening = _as_section(raw.get("basic_screening"), _BASIC_SCREENING_FIELDS)
+    education_history = _normalize_education_history(raw.get("education_history"))
     raw_work_history = raw.get("work_history") if isinstance(raw.get("work_history"), dict) else {}
     work_history = _as_section(raw_work_history, _WORK_HISTORY_FIELDS)
     model_employment_records = _normalize_employment_records(raw_work_history.get("employment_records"))
@@ -1088,6 +1113,7 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         "ai_deduction": deduction,
         "summary": summary,
         "basic_screening": basic_screening,
+        "education_history": education_history,
         "work_history": work_history,
         "skill_match": skill_match,
         "certificates": _list_or_default(raw.get("certificates"), "简历未提供证书资质信息。", 5),
@@ -1107,6 +1133,8 @@ def _hr_analysis_markdown(result: dict) -> str:
     reasons = result["deduction_reasons"] or ["未发现需要扣分的明显 AI 包装依据"]
     skills = result["skill_match"]
     basic = result["basic_screening"]
+    education_history = result.get("education_history") or []
+    edu_lines = [f"- 学历：{e['degree']} / {e['school_name']} / {e['school_tier']} / {e['education_type']} / {e['major_match']} / {e['graduation_year']}" for e in education_history] or ["- 教育经历：未提供"]
     history = result["work_history"]
     employment_records = history.get("employment_records") or []
     employment_lines = [
@@ -1121,8 +1149,10 @@ def _hr_analysis_markdown(result: dict) -> str:
             f"3. **AI美化风险等级**：{result['ai_risk_level']}（扣 {result['ai_deduction']} 分，{result['ai_risk_label']}）",
             f"4. **核心判定简要说明**：{result['summary']}",
             "## 基础信息",
-            f"- 学历：{basic['highest_education']} / {basic['school_name']} / {basic['school_tier']} / {basic['major_match']}",
-            f"- 毕业与地点：{basic['graduation_year']} / {basic['work_location']}；薪资：{basic['salary_expectation']}",
+            f"- 姓名：{result['candidate_name']}；性别：{basic['gender']}；年龄：{basic['age']}",
+            f"- 籍贯：{basic['native_place']}；工作所在地：{basic['work_location']}；期望薪资：{basic['salary_expectation']}",
+            "## 教育经历",
+            *edu_lines,
             "## 工作履历",
             f"- 年限：总计 {history['total_years']}；相关岗位 {history['relevant_years']}；行业匹配 {history['industry_match']}",
             f"- 履历稳定性：{history['stability']}；职责重合度：{history['responsibility_match']}",

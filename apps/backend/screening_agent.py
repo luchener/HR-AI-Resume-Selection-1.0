@@ -272,6 +272,8 @@ def _validate_report(report: Any, requirements: dict, resume_content: str) -> di
     for field in ("basic_screening", "work_history", "skill_match"):
         if field in report and not isinstance(report[field], dict):
             issues.append(f"字段类型错误：{field} 必须是对象")
+    if "education_history" in report and not isinstance(report["education_history"], list):
+        issues.append("字段类型错误：education_history 必须是数组")
     for field in ("strengths", "weaknesses", "risk_points"):
         if field in report and not isinstance(report[field], list):
             issues.append(f"字段类型错误：{field} 必须是数组")

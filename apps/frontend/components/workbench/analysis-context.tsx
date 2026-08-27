@@ -22,18 +22,20 @@ export interface HrAnalysis {
   ai_deduction: number;
   summary: string;
   basic_screening: {
-    highest_education: string;
-    school_name: string;
-    school_tier: string;
-    education_type: string;
-    major_match: string;
-    graduation_year: string;
-    fresh_graduate: string;
+    native_place: string;
     age: string;
     gender: string;
     work_location: string;
     salary_expectation: string;
   };
+  education_history: Array<{
+    degree: string;
+    school_name: string;
+    school_tier: string;
+    education_type: string;
+    major_match: string;
+    graduation_year: string;
+  }>;
   work_history: {
     total_years: string;
     relevant_years: string;
