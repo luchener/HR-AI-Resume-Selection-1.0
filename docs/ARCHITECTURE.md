@@ -798,14 +798,34 @@ def build_review_markers(content, analysis, *, candidate_name):
 
 #### Agent 分析驱动
 
-`screening_agent.run_screening_agent()` 执行 4 步 Agent 流程：
+`screening_agent.run_screening_agent()` 执行 5 步 Agent 流程：
 
 ```
-① 需求抽取    _extract_requirements     → 提取岗位要求清单（1 次 LLM）
-② 经验匹配    _find_resume_experiences  → 纯关键词匹配（0 次 LLM）
-③ 报告生成    _call_json(_report_prompt) → 生成 JSON 报告（1 次 LLM）
-④ 报告校验    _validate_report          → 校验 + 必要时重试（0~1 次 LLM）
+① 需求抽取    _extract_requirements         → 提取岗位要求清单（1 次 LLM）
+② 经验匹配    _find_resume_experiences      → 纯关键词匹配（0 次 LLM）
+③ 报告生成    _call_json(_report_prompt)    → 生成 JSON 报告（1 次 LLM）
+④ 报告校验    _validate_report              → 校验 + 必要时重试（0~1 次 LLM）
+⑤ 自校        _self_reflect                 → 5 项规则核查 + 必要时修订（1~2 次 LLM）
 ```
+
+**自校步骤**（`_self_reflect`）在报告校验通过后执行，仅当剩余 LLM 调用预算充足时触发（`budget["calls"] < MAX_AGENT_LLM_CALLS - 1`，其中 `MAX_AGENT_LLM_CALLS=5`）。核查 5 条规则，发现违反项则用修正提示重新生成报告：
+
+| 规则编号 | 规则名称 | 示例 |
+|---|---|---|
+| 1 | 论断是否超出简历依据 | 简历写"了解 Python"，报告断言"精通 Python" |
+| 2 | 评分依据是否可追溯 | 扣分 15 分（中度 AI 美化），但未引用具体句子 |
+| 3 | 加分项是否与岗位相关 | PMP 证书对纯前端岗列为加分项 |
+| 4 | 缺失项是否标注"未提供" | 简历未提及薪资，报告写成"符合预期" |
+| 5 | 风险判断是否区分"风险"和"未体现" | 简历未提及空窗期，报告写"无空窗期" |
+
+**预算分配**（`MAX_AGENT_LLM_CALLS = 5`）：
+
+| 场景 | 调用次数 |
+|---|---|
+| 无重试无修订 | 1(抽)+1(生成)+1(自校) = **3** |
+| 无重试有修订 | 1(抽)+1(生成)+1(自校)+1(修订) = **4** |
+| 有重试无修订 | 1(抽)+1(生成)+1(重试)+1(自校) = **4** |
+| 有重试有修订 | 1(抽)+1(生成)+1(重试)+1(自校)+1(修订) = **5** |
 
 ### 8.4 批量分析 LLM 调用优化
 
@@ -827,11 +847,11 @@ futures = {
 }
 ```
 
-| 指标 | 优化前 | 优化后 | 降幅 |
+| 指标 | 优化前（无自校） | 优化后（含自校） | 降幅 |
 |---|---|---|---|
-| 调用次数（无重试） | 6 | 4 | **33%** |
-| 调用次数（全部重试） | 9 | 7 | **22%** |
-| Token 消耗 | ~14600 | ~10200 | **30%** |
+| 调用次数（无重试） | 3×2=6 | 1+3×2=7 | 预提取节省 2 次（相对无自校） |
+| 调用次数（全部重试） | 3×3=9 | 1+3×3=10 | 预提取节省 2 次（相对无自校） |
+| Token 消耗 | ~14600 | ~12000 | — |
 
 单份分析路径不受影响（`precomputed_requirements=None` 时走原有逻辑）。
 
@@ -875,6 +895,56 @@ futures = {
 
 `ResumeReviewPanel` 使用 `key={data.resume_id}` 强制 React 在切换候选人时重新挂载组件，所有内部 state 重置；组件挂载时 `useEffect` 自动加载新候选人的简历重点标记。
 
+### 8.8 Agent 自校
+
+**位置**：`screening_agent._self_reflect()`，在报告校验通过后执行。
+
+**触发条件**：`budget["calls"] < MAX_AGENT_LLM_CALLS - 1`（`MAX_AGENT_LLM_CALLS = 5`），即预算不足以支撑"自校 + 修订"时静默跳过。
+
+**5 条核查规则**（Prompt 模板）：
+
+```python
+【核查规则】
+1. 论断是否超出简历依据
+   例如：简历写"了解 Python"，报告断言"精通 Python"——这是超出简历依据。
+2. 评分依据是否可追溯
+   例如：报告扣 15 分（中度 AI 美化），但未引用具体句子——这是评分依据不可追溯。
+3. 加分项是否与岗位相关
+   例如：简历有"PMP 证书"，但岗位是纯前端开发，仍列为加分项——这是加分项与岗位无关。
+4. 缺失项是否标注了"未提供"
+   例如：简历未提及薪资期望，报告写成"符合预期"——这是编造缺失信息。
+5. 风险判断是否区分了"风险"和"未体现"
+   例如：简历未提及空窗期，报告写"无空窗期，稳定性好"——这是将未体现误判为事实。
+```
+
+**输出字段**（`hr_analysis.agent_validation`）：
+
+```python
+{
+    "checked_rules": 5,              # 核查规则总数
+    "issues": [
+        {"rule": 1, "problem": "论断超出简历依据", "fix": "已修正为'了解 Python，有 2 年开发经历'"}
+    ],
+    "passed": false                   # true = 无问题 / 问题已修正
+}
+```
+
+**前端展示**：dashboard 页面「Agent 校验」模块，以表格形式展示 JD 要求 / 问题 / 修正三列，仅当 `issues.length > 0` 时显示。
+
+### 8.9 跨候选人对比
+
+**位置**：`app._compare_candidates()`，在批量分析（≥2 份简历）完成后调用。
+
+**输入**：N 份候选人的分析结果摘要（姓名、得分、优势、短板），LLM 生成：
+
+| 输出字段 | 说明 |
+|---|---|
+| `ranking[]` | 排名列表，每项含 `rank` / `name` / `score` / `difference`（核心差异点） |
+| `pairwise[]` | 两两对比自然语言描述 |
+| `recommendation` | 优先面试建议 |
+
+**前端展示**：dashboard 页面「候选人排名」模块，展示排名表格 + 差异对比 + 优先面试建议。
+
 ---
 
 ## 附：多用户改造文件清单
@@ -899,13 +969,13 @@ futures = {
 |------|------|
 | `apps/backend/resume_sanitize.py` | 🆕 PDF 解析 ASCII 垃圾过滤（短 ASCII/稀疏 ASCII/长二进制三模式） |
 | `apps/backend/resume_review.py` | 🆕 零 token 简历重点标记生成（关键词匹配 + 原文定位） |
-| `apps/backend/screening_agent.py` | 🆕 Agent 驱动招聘分析（需求抽取→经验匹配→报告→校验→重试） |
-| `apps/backend/app.py` | 集成清洗、标记路由、批量分析优化（预提取需求）、教育经历排序 |
+| `apps/backend/screening_agent.py` | 🆕 Agent 驱动招聘分析（需求抽取→经验匹配→报告→校验→重试→自校） |
+| `apps/backend/app.py` | 集成清洗、标记路由、批量分析优化（预提取需求）、教育经历排序、跨候选人对比 |
 | `apps/backend/prompts.py` | Prompt 模板：新增 `education_history` 数组 schema |
 | `apps/frontend/components/workbench/resume-review-panel.tsx` | 🆕 简历重点标记面板（高亮渲染 + 三种导出） |
 | `apps/frontend/lib/api/screening.ts` | 新增 `fetchResumeReviewMarkers` / `fetchResumeView` API |
-| `apps/frontend/components/workbench/analysis-context.tsx` | `HrAnalysis` 类型：新增 `education_history` 数组 |
-| `apps/frontend/app/(default)/dashboard/page.tsx` | 基础信息筛选精简 + 教育经历模块（独立卡片，多段按学历排序） |
+| `apps/frontend/components/workbench/analysis-context.tsx` | `HrAnalysis` 类型：新增 `education_history` / `agent_validation`；新增 `CandidateComparison` |
+| `apps/frontend/app/(default)/dashboard/page.tsx` | 基础信息筛选精简 + 教育经历 + 候选人排名 + Agent 校验 |
 | `.dockerignore` | 排除 `test_*.py` / `smoke_test_*.py` / `*.log`（不进生产镜像） |
 | `apps/backend/Dockerfile` | `COPY apps/backend/*.py ./`（通配符，新模块自动包含） |
 | `package.json`（前端） | + `html2canvas@1.4.1`（PNG 导出依赖） |
