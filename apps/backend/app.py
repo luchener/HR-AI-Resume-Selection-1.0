@@ -32,6 +32,9 @@ import auth as auth_mod
 import mailer as mailer_mod
 import llm
 import parser as doc_parser
+import screening_agent
+import resume_review
+import resume_sanitize
 from prompts import (
     PROMPT_HR_JUDGE,
     PROMPT_HR_RECRUITMENT_ANALYSIS,
@@ -68,7 +71,7 @@ auth_mod.init_auth(app)
 # after Flask has parsed the uploaded part.
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 MAX_RESUME_FILE_SIZE = 30 * 1024 * 1024
-_HR_ANALYSIS_VERSION = "screening-v16-employment-timeline"
+_HR_ANALYSIS_VERSION = "screening-agent-v1-employment-timeline"
 _HR_ANALYSIS_CACHE: dict[tuple[str, str, str, str], dict] = {}
 
 
@@ -1210,17 +1213,12 @@ def _run_hr_analysis(
     if not job:
         raise ApiError(f"Job not found: {job_id}", 404, "resumes")
 
-    prompt = PROMPT_HR_RECRUITMENT_ANALYSIS.format(
-        Job_Description=_compact_analysis_text(job.get("content", ""), 6000),
-        raw_resume=_compact_analysis_text(resume.get("content", ""), 8000),
-        current_date=datetime.now().strftime("%Y-%m"),
-    )
     started = time.perf_counter()
     try:
-        raw = llm.call_llm(
-            prompt,
-            expect_json=True,
-            max_tokens=4000,
+        raw = screening_agent.run_screening_agent(
+            job_content=job.get("content", ""),
+            resume_content=resume.get("content", ""),
+            current_date=datetime.now().strftime("%Y-%m"),
             runtime_config=ai_config,
         )
         result = _normalize_hr_analysis(
@@ -1230,8 +1228,8 @@ def _run_hr_analysis(
         )
         _HR_ANALYSIS_CACHE[cache_key] = result
         logger.info(
-            "HR analysis completed: candidates=1 prompt_chars=%s elapsed_ms=%s",
-            len(prompt),
+            "HR analysis completed: candidates=1 input_chars=%s elapsed_ms=%s",
+            len(job.get("content", "")) + len(resume.get("content", "")),
             int((time.perf_counter() - started) * 1000),
         )
         return result
@@ -1398,7 +1396,32 @@ def get_resume():
     view = store.get_resume_view(resume_id, user_id=_current_user_id())
     if not view:
         return _err(f"Resume not found: {resume_id}", 404, "resumes")
+    # 过滤 PDF 解析器残留的 ASCII 二进制乱码，避免前端展示乱码
+    view["raw_resume"]["content"] = resume_sanitize.sanitize_resume_content(
+        view["raw_resume"].get("content", "")
+    )
     return jsonify({"request_id": rid, "data": view})
+
+
+@app.post("/api/v1/resumes/review-markers")
+def review_markers():
+    """基于已有招聘分析和原简历内容生成零 Token 的简历重点标记。"""
+    rid = _request_id("resumes")
+    data = request.get_json(silent=True) or {}
+    resume_id = str(data.get("resume_id") or "").strip()
+    analysis = data.get("analysis") if isinstance(data.get("analysis"), dict) else {}
+    if not resume_id:
+        return _err("resume_id is required", 422, "resumes")
+    resume = store.get_resume(resume_id, user_id=_current_user_id())
+    if not resume:
+        return _err(f"Resume not found: {resume_id}", 404, "resumes")
+    clean_content = resume_sanitize.sanitize_resume_content(resume.get("content", ""))
+    payload = resume_review.build_review_markers(
+        clean_content,
+        analysis,
+        candidate_name=str(data.get("candidate_name") or "候选人"),
+    )
+    return jsonify({"request_id": rid, "data": payload})
 
 
 @app.post("/api/v1/resumes/improved-markdown")

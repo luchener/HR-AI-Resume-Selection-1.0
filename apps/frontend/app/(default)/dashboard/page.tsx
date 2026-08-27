@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
 import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analysis-context';
+import ResumeReviewPanel from '@/components/workbench/resume-review-panel';
 import { analyzeResumes, fetchImprovedMarkdown, improveResumeStream } from '@/lib/api/screening';
 
 type Action = 'reanalyze' | 'improve' | 'editor' | null;
@@ -445,6 +446,12 @@ export default function DashboardPage() {
                 )}
               </aside>
             </div>
+
+            <ResumeReviewPanel
+              resumeId={data.resume_id}
+              analysis={analysis}
+              candidateName={data.candidate_name}
+            />
           </>
         ) : (
           <section className="mt-6 rounded-md border border-[#dce2eb] bg-white p-5 sm:p-8">

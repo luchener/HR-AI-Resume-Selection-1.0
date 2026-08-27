@@ -103,7 +103,7 @@ class HrAnalysisTests(unittest.TestCase):
             "deduction_reasons": ["部分表述较为同质化"],
         }
 
-        with patch.object(backend.llm, "call_llm", return_value=model_result) as call:
+        with patch.object(backend.screening_agent, "run_screening_agent", return_value=model_result) as call:
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_id": resume_id, "job_id": job_id},
@@ -124,10 +124,44 @@ class HrAnalysisTests(unittest.TestCase):
         self.assertEqual(response.get_json()["data"]["candidate_name"], "张三")
         self.assertIn("# Python AI 产品经理", response.get_json()["data"]["studio_markdown"])
         self.assertEqual(call.call_count, 1)
-        self.assertEqual(call.call_args.kwargs["max_tokens"], 4000)
-        self.assertIn("必须全部来自这同一段教育经历", call.call_args.args[0])
-        self.assertIn("employment_records", call.call_args.args[0])
-        self.assertIn("分析基准月份", call.call_args.args[0])
+        self.assertEqual(call.call_args.kwargs["current_date"], backend.datetime.now().strftime("%Y-%m"))
+        self.assertIn("AI 产品经理", call.call_args.kwargs["job_content"])
+        self.assertIn("Python AI 产品经理", call.call_args.kwargs["resume_content"])
+
+    def test_normalized_report_protocol_contains_all_frontend_fields(self):
+        raw = {
+            "candidate_name": "协议候选人",
+            "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 18, "industry_background": 10, "evidence_bonus": 7},
+            "job_fit_score": 75,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "summary": "协议回归测试。",
+            "basic_screening": {},
+            "work_history": {"employment_records": []},
+            "skill_match": {},
+            "certificates": [],
+            "bonus_items": [],
+            "strengths": ["有相关经历"],
+            "weaknesses": ["部分信息未提供"],
+            "risk_points": ["无明显风险"],
+            "role_specific_assessment": ["不适用"],
+            "deduction_reasons": [],
+            "recruitment_recommendation": "储备观察",
+            "fit_tag": "部分匹配",
+        }
+        result = backend._normalize_hr_analysis(raw, "招聘后端工程师", "协议候选人\nPython 后端工程师")
+        expected_fields = {
+            "candidate_name", "final_score", "fit_grade", "job_fit_score", "job_fit_percentage",
+            "ai_risk", "ai_risk_level", "ai_risk_label", "ai_deduction", "summary",
+            "basic_screening", "work_history", "skill_match", "certificates", "bonus_items",
+            "strengths", "weaknesses", "risk_points", "role_specific_assessment",
+            "deduction_reasons", "recruitment_recommendation", "fit_tag", "score_breakdown",
+        }
+        self.assertTrue(expected_fields.issubset(result.keys()))
+        self.assertIsInstance(result["basic_screening"], dict)
+        self.assertIsInstance(result["work_history"], dict)
+        self.assertIsInstance(result["skill_match"], dict)
+        self.assertIsInstance(result["employment_records"] if "employment_records" in result else result["work_history"].get("employment_records", []), list)
 
     def test_normalizer_uses_ai_score_breakdown_sum(self):
         raw = {
@@ -514,12 +548,12 @@ class HrAnalysisTests(unittest.TestCase):
             "risk_points": ["无明显风险"],
         }
 
-        def analyze_candidate(prompt, **_kwargs):
-            if "Java 后端工程师，3 年经验" in prompt:
+        def analyze_candidate(*, resume_content="", **_kwargs):
+            if "Java 后端工程师，3 年经验" in resume_content:
                 raise ValueError("invalid candidate output")
             return model_result
 
-        with patch.object(backend.llm, "call_llm", side_effect=analyze_candidate) as call:
+        with patch.object(backend.screening_agent, "run_screening_agent", side_effect=analyze_candidate) as call:
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_ids": resume_ids, "job_id": job_id},
@@ -533,9 +567,6 @@ class HrAnalysisTests(unittest.TestCase):
         self.assertEqual(data["batch_analyses"][0]["resume_id"], resume_ids[0])
         self.assertEqual(data["batch_failures"][0]["resume_id"], resume_ids[1])
         self.assertEqual(call.call_count, 2)
-        for item in call.call_args_list:
-            self.assertEqual(item.kwargs["max_tokens"], 4000)
-            self.assertEqual(item.args[0].count("招聘后端工程师，要求 Python、API 和数据库经验"), 1)
 
     def test_batch_hr_analysis_maps_all_candidates_from_one_model_call(self):
         resume_ids = [
@@ -559,15 +590,15 @@ class HrAnalysisTests(unittest.TestCase):
 
         barrier = Barrier(3)
 
-        def analyze_candidate(prompt, **_kwargs):
+        def analyze_candidate(*, resume_content="", **_kwargs):
             barrier.wait(timeout=2)
-            if "候选人甲" in prompt:
+            if "候选人甲" in resume_content:
                 return analysis("候选人甲", 85)
-            if "候选人乙" in prompt:
+            if "候选人乙" in resume_content:
                 return analysis("候选人乙", 72)
             return analysis("候选人丙", 65)
 
-        with patch.object(backend.llm, "call_llm", side_effect=analyze_candidate) as call:
+        with patch.object(backend.screening_agent, "run_screening_agent", side_effect=analyze_candidate) as call:
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_ids": resume_ids, "job_id": job_id},
@@ -645,7 +676,7 @@ class HrAnalysisTests(unittest.TestCase):
             "api_key": "sk-second",
         }
 
-        with patch.object(backend.llm, "call_llm", return_value=model_result) as call:
+        with patch.object(backend.screening_agent, "run_screening_agent", return_value=model_result) as call:
             first = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_id": resume_id, "job_id": job_id, "ai_config": first_config},
