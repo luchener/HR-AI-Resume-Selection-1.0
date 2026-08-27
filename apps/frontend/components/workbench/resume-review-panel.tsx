@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   CameraIcon,
   DownloadIcon,
@@ -158,6 +158,10 @@ export default function ResumeReviewPanel({
       .catch((err) => setError(err instanceof Error ? err.message : '简历重点标记加载失败。'))
       .finally(() => setLoading(false));
   }
+
+  useEffect(() => {
+    loadReview();
+  }, []);
 
   const segments = review ? buildHighlightedSegments(rawContent, review.annotations) : [];
   const name = review ? (review.candidate_name || candidateName || '候选人') : '候选人';

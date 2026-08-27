@@ -448,6 +448,7 @@ export default function DashboardPage() {
             </div>
 
             <ResumeReviewPanel
+              key={data.resume_id}
               resumeId={data.resume_id}
               analysis={analysis}
               candidateName={data.candidate_name}
