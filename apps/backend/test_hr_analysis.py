@@ -87,11 +87,21 @@ class HrAnalysisTests(unittest.TestCase):
             "ai_deduction": 7,
             "summary": "核心经历匹配，表达略显模板化。",
             "basic_screening": {
-                "highest_education": "硕士",
-                "school_name": "复旦大学",
-                "school_tier": "985/211",
-                "major_match": "相关",
+                "native_place": "浙江杭州",
+                "age": "35",
+                "gender": "男",
+                "work_location": "上海",
+                "salary_expectation": "30K+",
             },
+            "education_history": [
+                {
+                    "degree": "硕士",
+                    "school_name": "复旦大学",
+                    "school_tier": "985/211",
+                    "major": "软件工程",
+                    "graduation_year": "2015",
+                }
+            ],
             "work_history": {"total_years": "8 年", "relevant_years": "6 年", "stability": "稳定"},
             "skill_match": {"hard_skills": ["AI 产品", "Python 熟练"], "project_match_points": ["AI Agent 项目对应岗位任务"], "soft_skills": ["跨部门协作"]},
             "bonus_items": ["量化提升 30%"],
@@ -118,9 +128,10 @@ class HrAnalysisTests(unittest.TestCase):
         self.assertEqual(result["recruitment_recommendation"], "优先面试")
         self.assertEqual(result["strengths"], model_result["strengths"])
         self.assertEqual(result["fit_tag"], "高匹配")
-        self.assertEqual(result["basic_screening"]["highest_education"], "硕士")
-        self.assertEqual(result["basic_screening"]["school_name"], "复旦大学")
-        self.assertEqual(result["basic_screening"]["school_tier"], "985/211")
+        self.assertEqual(result["education_history"][0]["degree"], "硕士")
+        self.assertEqual(result["education_history"][0]["school_name"], "复旦大学")
+        self.assertEqual(result["education_history"][0]["school_tier"], "985/211")
+        self.assertEqual(result["education_history"][0]["major"], "软件工程")
         self.assertEqual(response.get_json()["data"]["candidate_name"], "张三")
         self.assertIn("# Python AI 产品经理", response.get_json()["data"]["studio_markdown"])
         self.assertEqual(call.call_count, 1)

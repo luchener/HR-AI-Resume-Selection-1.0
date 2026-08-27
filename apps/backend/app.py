@@ -958,7 +958,7 @@ _BASIC_SCREENING_FIELDS = (
     "native_place", "age", "gender", "work_location", "salary_expectation",
 )
 _EDUCATION_HISTORY_FIELDS = (
-    "degree", "school_name", "school_tier", "education_type", "major_match", "graduation_year",
+    "degree", "school_name", "school_tier", "major", "graduation_year",
 )
 _WORK_HISTORY_FIELDS = (
     "total_years", "relevant_years", "industry_match", "company_background",
@@ -1001,8 +1001,7 @@ def _normalize_education_history(raw) -> list[dict]:
             "degree": degree,
             "school_name": _as_text(item.get("school_name")),
             "school_tier": _as_text(item.get("school_tier")),
-            "education_type": _as_text(item.get("education_type")),
-            "major_match": _as_text(item.get("major_match")),
+            "major": _as_text(item.get("major")),
             "graduation_year": _as_text(item.get("graduation_year")),
         }
         entries.append(entry)
@@ -1134,7 +1133,7 @@ def _hr_analysis_markdown(result: dict) -> str:
     skills = result["skill_match"]
     basic = result["basic_screening"]
     education_history = result.get("education_history") or []
-    edu_lines = [f"- 学历：{e['degree']} / {e['school_name']} / {e['school_tier']} / {e['education_type']} / {e['major_match']} / {e['graduation_year']}" for e in education_history] or ["- 教育经历：未提供"]
+    edu_lines = [f"- 学历：{e['degree']} / {e['school_name']} / {e['school_tier']} / {e['major']} / {e['graduation_year']}" for e in education_history] or ["- 教育经历：未提供"]
     history = result["work_history"]
     employment_records = history.get("employment_records") or []
     employment_lines = [

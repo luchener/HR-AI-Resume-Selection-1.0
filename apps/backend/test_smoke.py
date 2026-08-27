@@ -114,7 +114,8 @@ class SmokeTests(unittest.TestCase):
             "risk_points": ["无"],
             "recruitment_recommendation": "优先面试",
             "fit_tag": "高匹配",
-            "basic_screening": {"highest_education": "本科", "school_name": "XX 大学", "school_tier": "普通"},
+            "basic_screening": {"native_place": "上海", "age": "30", "gender": "男", "work_location": "上海", "salary_expectation": "30K+"},
+            "education_history": [{"degree": "本科", "school_name": "XX 大学", "school_tier": "普通", "major": "计算机", "graduation_year": "2018"}],
         }
         with patch.object(backend.screening_agent, "run_screening_agent", return_value=stub):
             analysis = self.client.post(

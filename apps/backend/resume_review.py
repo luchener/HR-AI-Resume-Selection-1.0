@@ -76,8 +76,12 @@ def _find_education_refs(content: str, education_history: list[dict] | None = No
             if isinstance(entry, dict):
                 degree = str(entry.get("degree") or "")
                 school = str(entry.get("school_name") or "")
+                major = str(entry.get("major") or "")
                 if school and school not in {"未提供", "未知", "无"}:
-                    refs.append(f"{degree}{school}")
+                    parts = [degree, school]
+                    if major and major not in {"未提供", "未知", "无"}:
+                        parts.append(major)
+                    refs.append("".join(parts))
     # 再补充简历原文中的学历相关行
     for line in content.splitlines():
         clean = line.strip()

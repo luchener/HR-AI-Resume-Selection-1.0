@@ -32,8 +32,7 @@ export interface HrAnalysis {
     degree: string;
     school_name: string;
     school_tier: string;
-    education_type: string;
-    major_match: string;
+    major: string;
     graduation_year: string;
   }>;
   work_history: {

@@ -369,16 +369,15 @@ export default function DashboardPage() {
                     <div className="mt-2 flex flex-col gap-3">
                       {analysis.education_history.map((edu, i) => (
                         <div key={i} className="rounded-md border border-[#e5e9ef] bg-[#fbfcfe] p-4">
-                          <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#3e6fd3]">
+                          <div className="flex items-center gap-2 text-xs font-semibold text-[#3e6fd3]">
                             <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-[#eaf0fb] text-[10px]">{i + 1}</span>
                             <span>{edu.degree}</span>
                             <span className="ml-auto text-[#65738a] font-normal">毕业时间：{edu.graduation_year}</span>
                           </div>
-                          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
-                            <div><dt className="text-[11px] text-[#8190a4]">院校</dt><dd className="text-sm text-[#2c394f]">{edu.school_name}</dd></div>
-                            <div><dt className="text-[11px] text-[#8190a4]">层次</dt><dd className="text-sm text-[#2c394f]">{edu.school_tier}</dd></div>
-                            <div><dt className="text-[11px] text-[#8190a4]">学历类型</dt><dd className="text-sm text-[#2c394f]">{edu.education_type}</dd></div>
-                            <div><dt className="text-[11px] text-[#8190a4]">专业匹配</dt><dd className="text-sm text-[#2c394f]">{edu.major_match}</dd></div>
+                          <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1.5">
+                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-[#8190a4]">院校</dt><dd className="text-sm text-[#2c394f]">{edu.school_name}</dd></div>
+                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-[#8190a4]">层次</dt><dd className="text-sm text-[#2c394f]">{edu.school_tier}</dd></div>
+                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-[#8190a4]">专业</dt><dd className="text-sm text-[#2c394f]">{edu.major}</dd></div>
                           </div>
                         </div>
                       ))}
