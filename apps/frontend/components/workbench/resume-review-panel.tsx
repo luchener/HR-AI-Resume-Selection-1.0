@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import html2canvas from 'html2canvas';
 import {
   CameraIcon,
   DownloadIcon,
@@ -105,29 +106,59 @@ table{border-collapse:collapse;width:100%;margin:6px 0 16px;font-size:13px}th,td
 </body></html>`;
 }
 
-// ── SVG（foreignObject 嵌入 HTML） ──────────────────────────────────────
+// ── 隐藏截图容器（html2canvas 使用） ──────────────────────────────────────
 
-function buildExportSvg(review: ResumeReviewData, rawContent: string, name: string): string {
-  const W = 780;
-  const html = buildExportHtml(review, rawContent, name);
-  // 取出 <body> 内容
-  const bodyMatch = html.match(/<body>([\s\S]*)<\/body>/);
-  const bodyContent = bodyMatch ? bodyMatch[1] : html;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="2400" font-family="Microsoft YaHei, PingFang SC, Arial, sans-serif">
-<rect width="${W}" height="2400" fill="#ffffff"/>
-<foreignObject x="0" y="0" width="${W}" height="2400">
-<html xmlns="http://www.w3.org/1999/xhtml"><head><style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;font-size:14px;line-height:1.8;color:#2c394f;padding:28px 32px;width:${W - 8}px}
-h1{font-size:20px;color:#253249;margin-bottom:4px}h2{font-size:15px;color:#3e6fd3;margin:16px 0 6px;border-bottom:1px solid #dce2eb;padding-bottom:4px}
-.meta{display:flex;gap:18px;flex-wrap:wrap;margin:8px 0 14px;font-size:13px;color:#65738a}
-.meta span b{color:#1d7f5c;font-size:22px;margin-right:3px}
-table{border-collapse:collapse;width:100%;margin:6px 0 14px;font-size:13px}th,td{border:1px solid #dce2eb;padding:6px 10px;text-align:left;vertical-align:top}th{background:#eaf0fb;color:#3e6fd3;font-weight:600;font-size:12px}
-.resume{white-space:pre-wrap;word-break:break-word;background:#fbfcfe;border:1px solid #e5e9ef;border-radius:6px;padding:14px;margin-top:6px;font-size:13px;line-height:1.9}
-.notice{margin-top:14px;font-size:11px;color:#8190a4}
-</style></head><body>${bodyContent}</body></html>
-</foreignObject>
-</svg>`;
+function ExportCaptureElement({ review, rawContent, name }: { review: ResumeReviewData; rawContent: string; name: string }) {
+  const segments = buildHighlightedSegments(rawContent, review.annotations);
+  const catBg = (c: ResumeReviewMarker['category']) =>
+    CATEGORY_STYLE[c].bg === 'bg-[#e6f7ee]' ? '#e6f7ee' :
+    CATEGORY_STYLE[c].bg === 'bg-[#eaf0fb]' ? '#eaf0fb' :
+    CATEGORY_STYLE[c].bg === 'bg-[#fdecec]' ? '#fdecec' :
+    CATEGORY_STYLE[c].bg === 'bg-[#f3f4f6]' ? '#f3f4f6' : '#fef6e6';
+  const catColor = (c: ResumeReviewMarker['category']) =>
+    CATEGORY_STYLE[c].text === 'text-[#1d7f5c]' ? '#1d7f5c' :
+    CATEGORY_STYLE[c].text === 'text-[#3e6fd3]' ? '#3e6fd3' :
+    CATEGORY_STYLE[c].text === 'text-[#b23b4e]' ? '#b23b4e' :
+    CATEGORY_STYLE[c].text === 'text-[#6b7280]' ? '#6b7280' : '#b0761a';
+
+  return (
+    <div style={{ width: 780, backgroundColor: '#fff', padding: '24px 30px', fontFamily: 'Microsoft YaHei, PingFang SC, Arial, sans-serif', fontSize: 13, lineHeight: 1.7, color: '#2c394f' }}>
+      <div style={{ fontSize: 20, color: '#253249', fontWeight: 600, marginBottom: 4 }}>简历重点标记 · {name}</div>
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', margin: '6px 0 12px', fontSize: 12, color: '#65738a' }}>
+        <span>综合得分：<b style={{ color: '#1d7f5c', fontSize: 20, marginRight: 3 }}>{review.summary.final_score}</b></span>
+        <span>招聘建议：{review.summary.recommendation}</span>
+        <span>匹配重点：{review.summary.highlights} 处</span>
+        <span>待核实：{review.summary.risks} 处</span>
+        <span>学历待核实：{review.summary.verify_count || 0} 处</span>
+      </div>
+      <div style={{ fontSize: 14, color: '#3e6fd3', fontWeight: 600, margin: '12px 0 4px', borderBottom: '1px solid #dce2eb', paddingBottom: 3 }}>标记清单</div>
+      <table style={{ borderCollapse: 'collapse', width: '100%', margin: '4px 0 12px', fontSize: 12 }}>
+        <thead><tr>
+          <th style={{ width: 90, border: '1px solid #dce2eb', padding: '5px 8px', textAlign: 'left', backgroundColor: '#eaf0fb', color: '#3e6fd3', fontWeight: 600, fontSize: 11 }}>类型</th>
+          <th style={{ border: '1px solid #dce2eb', padding: '5px 8px', textAlign: 'left', backgroundColor: '#eaf0fb', color: '#3e6fd3', fontWeight: 600, fontSize: 11 }}>引用原文</th>
+          <th style={{ width: 180, border: '1px solid #dce2eb', padding: '5px 8px', textAlign: 'left', backgroundColor: '#eaf0fb', color: '#3e6fd3', fontWeight: 600, fontSize: 11 }}>HR 说明</th>
+        </tr></thead>
+        <tbody>
+          {review.annotations.map((a, i) => (
+            <tr key={i}>
+              <td style={{ border: '1px solid #dce2eb', padding: '5px 8px', width: 90, fontWeight: 600, color: catColor(a.category) }}>{CATEGORY_STYLE[a.category].label}</td>
+              <td style={{ border: '1px solid #dce2eb', padding: '5px 8px', whiteSpace: 'pre-wrap' }}>{a.quote}</td>
+              <td style={{ border: '1px solid #dce2eb', padding: '5px 8px', width: 180, color: '#65738a', fontSize: 11 }}>{a.reason}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{ fontSize: 14, color: '#3e6fd3', fontWeight: 600, margin: '12px 0 4px', borderBottom: '1px solid #dce2eb', paddingBottom: 3 }}>原简历内容</div>
+      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', backgroundColor: '#fbfcfe', border: '1px solid #e5e9ef', borderRadius: 6, padding: 12, marginTop: 4, fontSize: 12, lineHeight: 1.8 }}>
+        {segments.map((seg, i) => seg.annotation ? (
+          <span key={i} style={{ backgroundColor: catBg(seg.annotation.category), borderRadius: 2, padding: '0 2px', fontWeight: 600 }}>{seg.text}</span>
+        ) : (
+          <span key={i}>{seg.text}</span>
+        ))}
+      </div>
+      <div style={{ marginTop: 12, fontSize: 10, color: '#8190a4' }}>{review.notice}</div>
+    </div>
+  );
 }
 
 export default function ResumeReviewPanel({
@@ -143,6 +174,7 @@ export default function ResumeReviewPanel({
   const [rawContent, setRawContent] = useState('');
   const [review, setReview] = useState<ResumeReviewData | null>(null);
   const [error, setError] = useState('');
+  const exportRef = useRef<HTMLDivElement>(null);
 
   function loadReview() {
     setLoading(true);
@@ -170,21 +202,13 @@ export default function ResumeReviewPanel({
   // ── 导出 ───────────────────────────────────────────────────────────────
 
   function exportPng() {
-    if (!review) return;
-    const svg = buildExportSvg(review, rawContent, name);
-    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      const scale = 2;
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth * scale;
-      canvas.height = img.naturalHeight * scale;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      ctx.scale(scale, scale);
-      ctx.drawImage(img, 0, 0);
+    if (!review || !exportRef.current) return;
+    html2canvas(exportRef.current, {
+      scale: 2,
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      logging: false,
+    }).then((canvas) => {
       canvas.toBlob((png) => {
         if (!png) return;
         const d = URL.createObjectURL(png);
@@ -194,9 +218,10 @@ export default function ResumeReviewPanel({
         a.click();
         URL.revokeObjectURL(d);
       }, 'image/png');
-    };
-    img.onerror = () => URL.revokeObjectURL(url);
-    img.src = url;
+    }).catch(() => {
+      // 截图失败回退到 print 对话框
+      exportPdf();
+    });
   }
 
   function exportPdf() {
@@ -368,6 +393,13 @@ export default function ResumeReviewPanel({
               </p>
             </aside>
           </div>
+        </div>
+      )}
+
+      {/* 隐藏截图容器：html2canvas 导出图片时使用 */}
+      {review && (
+        <div ref={exportRef} style={{ position: 'fixed', left: -9999, top: -9999, width: 780 }}>
+          <ExportCaptureElement review={review} rawContent={rawContent} name={name} />
         </div>
       )}
     </section>
