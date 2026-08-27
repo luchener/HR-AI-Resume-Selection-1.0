@@ -4,8 +4,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_MAX_ANNOTATIONS = 18
+_MAX_ANNOTATIONS = 24
 _MAX_QUOTE_LENGTH = 260
+
+# 教育相关关键词——命中时归类为 verify（待核实），因为学历无法从简历本身确认
+_EDUCATION_KEYWORDS = ("学历", "学位", "毕业", "院校", "大学", "学院", "硕士", "本科", "博士", "专科", "985", "211", "双非", "证书", "资格证", "学历认证", "学籍")
 
 
 def _terms(text: str) -> list[str]:
@@ -58,4 +61,33 @@ def build_review_markers(content: str, analysis: dict[str, Any], *, candidate_na
     _add_annotation(annotations, content, "match", "项目匹配点", "对应岗位职责或项目要求", skill_match.get("project_match_points") or [])
     _add_annotation(annotations, content, "match", "技能匹配", "对应岗位技能要求", skill_match.get("hard_skills") or [])
     _add_annotation(annotations, content, "risk", "待核实信息", "需要在面试或材料复核中进一步确认", analysis.get("risk_points") or [], "medium")
-    return {"candidate_name": candidate_name or "候选人", "annotations": annotations[:_MAX_ANNOTATIONS], "summary": {"final_score": analysis.get("final_score", 0), "recommendation": analysis.get("recruitment_recommendation", "储备观察"), "highlights": sum(1 for item in annotations if item["category"] in {"strength", "match"}), "risks": sum(1 for item in annotations if item["category"] == "risk")}, "notice": "标记仅用于辅助审阅，原简历内容未被修改。"}
+    # 学历/证书类风险自动归类为 verify——无法从简历本身确认真伪
+    _add_annotation(annotations, content, "verify", "学历待核实", "学历与证书无法从简历本身验证，建议在面试或背调阶段确认", _find_education_refs(content), "low")
+    return {"candidate_name": candidate_name or "候选人", "annotations": annotations[:_MAX_ANNOTATIONS], "summary": {"final_score": analysis.get("final_score", 0), "recommendation": analysis.get("recruitment_recommendation", "储备观察"), "highlights": sum(1 for item in annotations if item["category"] in {"strength", "match"}), "risks": sum(1 for item in annotations if item["category"] == "risk"), "verify_count": sum(1 for item in annotations if item["category"] == "verify")}, "notice": "标记仅用于辅助审阅，原简历内容未被修改。"}
+
+
+def _find_education_refs(content: str) -> list[str]:
+    """从简历原文中提取与学历/证书相关的短文本作为 verify 标记候选。"""
+    refs: list[str] = []
+    for line in content.splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        # 跳过明显是乱码或纯 ASCII 垃圾的行
+        if _is_ascii_garbage(clean):
+            continue
+        if any(kw in clean for kw in _EDUCATION_KEYWORDS):
+            refs.append(clean[:_MAX_QUOTE_LENGTH])
+    return refs
+
+
+def _is_ascii_garbage(line: str) -> bool:
+    """判断是否为 PDF 解析器残留的 ASCII 垃圾行。"""
+    if not line:
+        return True
+    if any("\u4e00" <= ch <= "\u9fff" for ch in line):
+        return False
+    # 纯 ASCII 且无中文，长度很短 → 乱码
+    if len(line) <= 4 and re.match(r"^[A-Za-z0-9 _\-]+$", line):
+        return True
+    return False

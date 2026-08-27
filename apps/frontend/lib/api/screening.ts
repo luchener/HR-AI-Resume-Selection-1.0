@@ -39,7 +39,7 @@ export interface ResumeReviewMarker {
 export interface ResumeReviewData {
   candidate_name: string;
   annotations: ResumeReviewMarker[];
-  summary: { final_score: number; recommendation: string; highlights: number; risks: number };
+  summary: { final_score: number; recommendation: string; highlights: number; risks: number; verify_count?: number };
   notice: string;
 }
 

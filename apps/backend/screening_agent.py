@@ -343,4 +343,16 @@ def run_screening_agent(*, job_content: str, resume_content: str, current_date: 
         "requirements_truncated": bool(incomplete),
         "incomplete_requirements": incomplete,
     })
-    return _safe_report(report, validation)
+    result = _safe_report(report, validation)
+    # 附加 Agent 分析过程，让前端可见
+    result["agent_trace"] = {
+        "steps": [
+            {"step": "需求抽取", "status": "完成" if not requirements.get("extraction_failed") else "失败", "detail": f"从岗位描述提取 {len(requirements.get('requirements', []))} 项要求"},
+            {"step": "经验匹配", "status": "完成", "detail": f"匹配到 {len(experiences)} 条简历经历"},
+            {"step": "报告生成", "status": "完成" if validation.get("passed") else "需修正", "detail": f"LLM 调用 {budget['calls']} 次"},
+            {"step": "报告校验", "status": "通过" if validation.get("passed") else "不通过", "detail": "; ".join(validation.get("issues", [])[:3]) or "无异常"},
+        ],
+        "requirements": [item.get("text", "") for item in requirements.get("requirements", [])[:10]],
+        "experiences": experiences[:5],
+    }
+    return result

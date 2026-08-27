@@ -60,6 +60,11 @@ export interface HrAnalysis {
   deduction_reasons: string[];
   recruitment_recommendation: '优先面试' | '储备观察' | '淘汰';
   fit_tag: '高匹配' | '部分匹配' | '不匹配';
+  agent_trace?: {
+    steps: Array<{ step: string; status: string; detail: string }>;
+    requirements?: string[];
+    experiences?: Array<{ text?: string; company?: string }>;
+  };
 }
 
 export interface AnalysisData {

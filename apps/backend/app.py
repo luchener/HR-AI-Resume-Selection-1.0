@@ -1074,6 +1074,7 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         ]
 
     summary = str(raw.get("summary") or "未提供综合判定说明。").strip()[:240]
+    agent_trace = raw.get("agent_trace") if isinstance(raw.get("agent_trace"), dict) else None
     return {
         "candidate_name": _as_text(raw.get("candidate_name")),
         "final_score": final_score,
@@ -1098,6 +1099,7 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         "deduction_reasons": _short_list(raw.get("deduction_reasons"), 3),
         "recruitment_recommendation": requested_recommendation,
         "fit_tag": requested_fit_tag,
+        "agent_trace": agent_trace,
     }
 
 
