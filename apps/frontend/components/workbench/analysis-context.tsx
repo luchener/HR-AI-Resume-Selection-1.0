@@ -61,6 +61,17 @@ export interface HrAnalysis {
   deduction_reasons: string[];
   recruitment_recommendation: '优先面试' | '储备观察' | '淘汰';
   fit_tag: '高匹配' | '部分匹配' | '不匹配';
+  agent_validation?: {
+    checked_rules: number;
+    issues: Array<{ rule: number; problem: string; fix: string }>;
+    passed: boolean;
+  };
+}
+
+export interface CandidateComparison {
+  ranking: Array<{ rank: number; name: string; score: number; difference: string }>;
+  pairwise: string[];
+  recommendation: string;
 }
 
 export interface AnalysisData {
@@ -73,6 +84,7 @@ export interface AnalysisData {
   studio_markdown?: string;
   batch_analyses?: AnalysisData[];
   batch_failures?: Array<{ resume_id: string; detail: string }>;
+  comparison?: CandidateComparison;
 }
 
 export interface AnalysisResult {

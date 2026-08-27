@@ -146,6 +146,70 @@ def _safe_report(report: Any, validation: dict) -> dict:
     }
 
 
+def _self_reflect(report: dict, job_content: str, resume_content: str, requirements: dict, experiences: list[dict], current_date: str, runtime_config: dict | None, budget: dict) -> tuple[dict, dict]:
+    """Self-check the report against 5 rules; revise if issues found."""
+    if budget["calls"] >= MAX_AGENT_LLM_CALLS - 2:
+        # Not enough budget left for reflection + potential revision
+        return report, {"checked_rules": 5, "issues": [], "passed": True}
+
+    req_text = json.dumps([{"id": r["id"], "text": r["text"]} for r in requirements.get("requirements", [])], ensure_ascii=False)
+
+    prompt = f"""你是招聘分析审核员。逐项核对以下 5 条规则，指出报告中违反的地方：
+
+【核查规则】
+
+1. 论断是否超出简历依据
+   例如：简历写"了解 Python"，报告断言"精通 Python"或"具备核心开发能力"——这是超出简历依据。
+
+2. 评分依据是否可追溯
+   例如：报告扣 15 分（中度 AI 美化），但没有引用具体句子作为证据——这是评分依据不可追溯。
+
+3. 加分项是否与岗位相关
+   例如：简历有"PMP 证书"，但岗位是纯前端开发，报告仍列为加分项——这是加分项与岗位无关。
+
+4. 缺失项是否标注了"未提供"
+   例如：简历未提及薪资期望，报告写成"符合预期"——这是编造缺失信息。
+
+5. 风险判断是否区分了"风险"和"未体现"
+   例如：简历未提及空窗期，报告写"无空窗期，稳定性好"——这是将未体现误判为事实。
+
+候选人分析：{json.dumps(report, ensure_ascii=False)}
+岗位要求：{req_text}
+
+只输出 JSON：{{
+  "issues": [
+    {{"rule": 1|2|3|4|5, "quote": "报告中违反规则的具体句子", "problem": "为什么违反", "suggested_fix": "建议修正为..."}}
+  ],
+  "should_revise": true|false
+}}"""
+
+    reflection = _call_json(prompt, max_tokens=1500, runtime_config=runtime_config, budget=budget)
+    issues = []
+    should_revise = False
+    if isinstance(reflection, dict):
+        raw = reflection.get("issues", [])
+        should_revise = bool(reflection.get("should_revise"))
+        if isinstance(raw, list):
+            issues = raw
+
+    revised = report
+    if should_revise and issues and budget["calls"] < MAX_AGENT_LLM_CALLS - 1:
+        repair = {"self_reflection": [{"rule": i.get("rule", 0), "problem": i.get("problem", ""), "suggested_fix": i.get("suggested_fix", "")} for i in issues]}
+        revised_prompt = _report_prompt(job_content, resume_content, requirements, experiences, current_date, repair)
+        revised = _call_json(revised_prompt, max_tokens=4000, runtime_config=runtime_config, budget=budget)
+
+    frontend_issues = [
+        {"rule": i.get("rule", 0), "problem": i.get("problem", ""), "fix": i.get("suggested_fix", "")}
+        for i in issues
+    ]
+
+    return revised, {
+        "checked_rules": 5,
+        "issues": frontend_issues,
+        "passed": not should_revise or not issues,
+    }
+
+
 def _extract_requirements(
     job_content: str,
     runtime_config: dict | None,
@@ -349,12 +413,20 @@ def run_screening_agent(*, job_content: str, resume_content: str, current_date: 
         "incomplete_requirements": incomplete,
     })
     result = _safe_report(report, validation)
+    # Self-reflection: check report against 5 rules, revise if needed
+    reflect_result, reflect_info = _self_reflect(
+        report, job_content, resume_content, requirements, experiences, current_date, runtime_config, budget
+    )
+    if reflect_result != report:
+        result = _safe_report(reflect_result, validation)
+    result["agent_validation"] = reflect_info
     result["agent_trace"] = {
         "steps": [
             {"step": "需求抽取", "status": "完成" if not requirements.get("extraction_failed") else "失败", "detail": f"从岗位描述提取 {len(requirements.get('requirements', []))} 项要求"},
             {"step": "经验匹配", "status": "完成", "detail": f"匹配到 {len(experiences)} 条简历经历"},
             {"step": "报告生成", "status": "完成" if validation.get("passed") else "需修正", "detail": f"LLM 调用 {budget['calls']} 次"},
             {"step": "报告校验", "status": "通过" if validation.get("passed") else "不通过", "detail": "; ".join(validation.get("issues", [])[:3]) or "无异常"},
+            {"step": "自校", "status": "通过" if reflect_info.get("passed") else "已修正", "detail": f"检出 {len(reflect_info.get('issues', []))} 个问题"},
         ],
         "requirements": [item.get("text", "") for item in requirements.get("requirements", [])[:10]],
         "experiences": experiences[:5],

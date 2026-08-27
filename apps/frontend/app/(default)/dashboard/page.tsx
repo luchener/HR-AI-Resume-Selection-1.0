@@ -18,6 +18,7 @@ import {
   ShieldAlertIcon,
   SparklesIcon,
   TargetIcon,
+  TrophyIcon,
   UserRoundIcon,
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
@@ -346,6 +347,89 @@ export default function DashboardPage() {
                 </div>
               ))}
             </div>
+
+            {/* 候选人排名 */}
+            {data.comparison && (
+              <Section eyebrow="Candidate ranking" title="候选人排名" icon={TrophyIcon}>
+                <div className="mt-4">
+                  <div className="overflow-x-auto rounded-md border border-[#e5e9ef]">
+                    <table className="w-full border-collapse text-sm">
+                      <thead>
+                        <tr className="bg-[#f7f8fa]">
+                          <th className="border-b border-[#e5e9ef] px-4 py-3 text-left text-xs font-semibold text-[#65738a]">排名</th>
+                          <th className="border-b border-[#e5e9ef] px-4 py-3 text-left text-xs font-semibold text-[#65738a]">得分</th>
+                          <th className="border-b border-[#e5e9ef] px-4 py-3 text-left text-xs font-semibold text-[#65738a]">候选人</th>
+                          <th className="border-b border-[#e5e9ef] px-4 py-3 text-left text-xs font-semibold text-[#65738a]">核心差异点</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.comparison.ranking.map((item) => {
+                          const medals = ['🥇', '🥈', '🥉'];
+                          const medal = item.rank <= 3 ? medals[item.rank - 1] : `${item.rank}`;
+                          return (
+                            <tr key={item.rank} className="border-b border-[#e5e9ef] last:border-b-0">
+                              <td className="px-4 py-3 font-semibold text-[#2c394f]">{medal}</td>
+                              <td className="px-4 py-3 font-semibold text-[#3e6fd3]">{item.score}</td>
+                              <td className="px-4 py-3 text-[#2c394f]">{item.name}</td>
+                              <td className="px-4 py-3 text-[#65738a]">{item.difference}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {data.comparison.recommendation && (
+                    <p className="mt-3 text-sm font-medium text-[#1d7f5c]">{data.comparison.recommendation}</p>
+                  )}
+                  {data.comparison.pairwise.length > 0 && (
+                    <ul className="mt-2 list-none space-y-1">
+                      {data.comparison.pairwise.map((p, i) => (
+                        <li key={i} className="text-xs text-[#65738a]">• {p}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </Section>
+            )}
+
+            {/* Agent 校验 */}
+            {analysis.agent_validation && analysis.agent_validation.issues.length > 0 && (
+              <Section eyebrow="Agent validation" title="Agent 校验" icon={ShieldAlertIcon}>
+                <div className="mt-3">
+                  <p className="mb-3 text-xs text-[#8190a4]">
+                    已校验 {analysis.agent_validation.checked_rules} 项要求，
+                    {analysis.agent_validation.passed ? '全部通过' : `检出 ${analysis.agent_validation.issues.length} 个问题并已修正`}
+                  </p>
+                  <div className="overflow-x-auto rounded-md border border-[#e5e9ef]">
+                    <table className="w-full border-collapse text-sm">
+                      <thead>
+                        <tr className="bg-[#f7f8fa]">
+                          <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">JD 要求</th>
+                          <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">问题</th>
+                          <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">修正</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {analysis.agent_validation.issues.map((issue, i) => {
+                          const ruleLabels = ['', '论断超出简历依据', '评分依据不可追溯', '加分项与岗位无关', '缺失项标注"未提供"', '风险与未体现混淆'];
+                          return (
+                            <tr key={i} className="border-b border-[#e5e9ef] last:border-b-0">
+                              <td className="px-4 py-2 text-xs text-[#2c394f]">
+                                <span className="inline-block rounded bg-[#fef6e6] px-1.5 py-0.5 text-[10px] text-[#b0761a]">规则 {issue.rule}</span>
+                                <span className="ml-1.5">{ruleLabels[issue.rule] || ''}</span>
+                              </td>
+                              <td className="px-4 py-2 text-xs text-[#b23b4e]">{issue.problem}</td>
+                              <td className="px-4 py-2 text-xs text-[#1d7f5c]">{issue.fix}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </Section>
+            )}
 
             <div className="mt-6 grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_310px]">
               <div className="space-y-6">

@@ -1099,6 +1099,7 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
 
     summary = str(raw.get("summary") or "未提供综合判定说明。").strip()[:240]
     agent_trace = raw.get("agent_trace") if isinstance(raw.get("agent_trace"), dict) else None
+    agent_validation = raw.get("agent_validation") if isinstance(raw.get("agent_validation"), dict) else None
     return {
         "candidate_name": _as_text(raw.get("candidate_name")),
         "final_score": final_score,
@@ -1125,6 +1126,7 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         "recruitment_recommendation": requested_recommendation,
         "fit_tag": requested_fit_tag,
         "agent_trace": agent_trace,
+        "agent_validation": agent_validation,
     }
 
 
@@ -1352,6 +1354,52 @@ def _run_hr_batch_analysis(
     return results, failures
 
 
+def _compare_candidates(analysis_results: list[dict], runtime_config: dict | None = None) -> dict | None:
+    """Compare multiple candidates. Returns None for single-candidate analysis."""
+    if len(analysis_results) < 2:
+        return None
+
+    items = []
+    for a in analysis_results:
+        if isinstance(a, dict):
+            items.append({
+                "candidate_name": a.get("candidate_name") or a.get("hr_analysis", {}).get("candidate_name") or "未提供",
+                "final_score": a.get("hr_analysis", {}).get("final_score", a.get("final_score", 0)),
+                "strengths": a.get("hr_analysis", {}).get("strengths", a.get("strengths", [])),
+                "weaknesses": a.get("hr_analysis", {}).get("weaknesses", a.get("weaknesses", [])),
+            })
+
+    candidates_json = json.dumps(items, ensure_ascii=False)
+    prompt = f"""你是招聘委员会主席。对比以下 {len(items)} 位候选人：
+{candidates_json}
+
+只输出 JSON：{{
+  "ranking": [
+    {{"rank": 1, "name": "...", "score": 82, "difference": "与岗位最相关的差异点"}}
+  ],
+  "pairwise": [
+    "张三 vs 李四：张三带过 15 人团队；李四技术更深但无管理经验"
+  ],
+  "recommendation": "优先面试：张三、李四"
+}}"""
+
+    result = llm.call_llm(prompt, expect_json=True, max_tokens=2000, runtime_config=runtime_config)
+    if isinstance(result, dict):
+        ranking = result.get("ranking")
+        if isinstance(ranking, list):
+            for item in ranking:
+                if isinstance(item, dict):
+                    item.setdefault("name", "")
+                    item.setdefault("score", 0)
+                    item.setdefault("difference", "")
+            return {
+                "ranking": ranking,
+                "pairwise": result.get("pairwise", []),
+                "recommendation": result.get("recommendation", ""),
+            }
+    return None
+
+
 def _candidate_name_from_resume(resume: dict, result: dict) -> str:
     analyzed_name = str(result.get("candidate_name") or "").strip()
     if analyzed_name and analyzed_name not in {"未提供", "未知", "无法识别"}:
@@ -1425,10 +1473,13 @@ def hr_analysis():
         ]
         if not analyses:
             raise ApiError("本批次所有简历的 AI 分析均失败，请重试。", 502, "resumes")
+        # Cross-candidate comparison
+        comparison = _compare_candidates(analyses, ai_config)
         payload = {
             **analyses[0],
             "batch_analyses": analyses,
             "batch_failures": failures,
+            "comparison": comparison,
         }
 
     return jsonify(
