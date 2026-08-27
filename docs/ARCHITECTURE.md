@@ -15,7 +15,8 @@
 5. [本地开发与测试](#五本地开发与测试)
 6. [Docker 构建与发布](#六docker-构建与发布)
 7. [云服务器部署步骤（腾讯云 Ubuntu 24.04）](#七云服务器部署步骤腾讯云-ubuntu-2404)
-8. [主要文件职责](#附主要文件职责)
+8. [简历重点标记模块](#八简历重点标记模块)
+9. [主要文件职责](#附主要文件职责)
 
 ---
 
@@ -54,6 +55,7 @@
 |----|------|------|
 | 前端框架 | Next.js (App Router) | 15.3.0 |
 | 前端 UI | React + Tailwind CSS + lucide-react | 19 / 4 / 0.501 |
+| 前端导出 | html2canvas（截图 → PNG 导出） | 1.4.1 |
 | 后端框架 | Flask | 3.0.* |
 | WSGI 服务器 | Gunicorn | 23.* |
 | LLM 调用 | openai SDK（兼容 DeepSeek 等） | 1.75.* |
@@ -67,15 +69,21 @@
 ```
 AIResumeSmartSelection1.0-CloudDeploymentVersion/
 ├── apps/
-│   ├── backend/          # Flask 后端（10 个核心 py 文件）
+│   ├── backend/          # Flask 后端（15 个核心 py 文件）
 │   │   ├── auth.py       # JWT、用户、密码和验证码
-│   │   ├── app.py        # 路由 + 分析编排
+│   │   ├── app.py        # 路由 + 分析编排（含 HR 分析 + 简历重点标记）
 │   │   ├── store.py      # JSON 存储（原子写）
 │   │   ├── config.py     # 配置（.env 读取）
 │   │   ├── mailer.py     # SMTP HTML/纯文本验证码邮件
 │   │   ├── reset_password_cli.py # 管理员重置无邮箱账号
-│   │   └── llm.py / parser.py / prompts.py / run.py
-│   │       # LLM 调用、文档解析、Prompt、启动辅助
+│   │   ├── llm.py        # LLM 调用 + JSON 容错解析
+│   │   ├── parser.py     # PDF/DOCX 文本提取
+│   │   ├── prompts.py    # HR 分析 Prompt 模板
+│   │   ├── resume_sanitize.py  # PDF 解析器 ASCII 垃圾过滤
+│   │   ├── resume_review.py    # 零 token 简历重点标记生成
+│   │   ├── screening_agent.py  # Agent 驱动招聘分析（需求抽取→经验匹配→报告→校验）
+│   │   ├── run.py        # 启动辅助
+│   │   └── test_*.py     # 单元测试（不进 Docker 镜像，见 .dockerignore）
 │   │   ├── .env          # 密钥（gitignore，不入库）
 │   │   └── Dockerfile
 │   └── frontend/         # Next.js 前端
@@ -445,8 +453,10 @@ Content-Type: application/json
 | `POST` | `/api/v1/jobs/upload` | 提交 JD，关联简历 |
 | `GET` | `/api/v1/jobs` | 获取当前用户 JD/任务 |
 | `GET` | `/api/v1/jobs/<job_id>` | 获取当前用户 JD |
-| `POST` | `/api/v1/resumes/hr-analysis` | 执行 HR 分析 |
+| `POST` | `/api/v1/resumes/hr-analysis` | 执行 HR 分析（单份或批量） |
 | `GET` | `/api/v1/resumes/hr-analysis` | 查询分析结果/缓存结果 |
+| `GET` | `/api/v1/resumes` | 获取简历内容（含自动 ASCII 垃圾过滤） |
+| `POST` | `/api/v1/resumes/review-markers` | 生成简历重点标记（匹配亮点/岗位匹配/待核实/学历待核实） |
 
 ### 4.5 错误状态码
 
@@ -527,7 +537,9 @@ docker compose logs -f backend
 
 ### 6.2 后端构建注意事项
 
-后端 Dockerfile 使用显式 `COPY` 文件列表，新模块必须加入 COPY 行；当前包含 `mailer.py` 和 `reset_password_cli.py`。
+后端 Dockerfile 使用 **通配符 `COPY apps/backend/*.py ./`** 复制所有 `.py` 文件，新增模块自动出现在构建上下文中，无需手动修改 COPY 列表。
+
+**`.dockerignore` 排除后端测试文件**（`test_*.py`、`smoke_test_*.py`、`*.log`），测试文件不进生产镜像。
 
 腾讯云访问官方 PyPI 可能出现 `ReadTimeoutError`。当前 Dockerfile 使用清华镜像：
 
@@ -713,6 +725,158 @@ sudo certbot --nginx -d www.luchenstudio.cn    # 自动 HTTPS
 
 ---
 
+---
+
+## 八、简历重点标记模块
+
+### 8.1 功能概述
+
+基于已有 HR 分析结果，在原简历正文上以**高亮标记**方式标注四类信息，不修改原简历内容，纯辅助审阅用途：
+
+| 标记类型 | 颜色 | 来源 | 说明 |
+|---|---|---|---|
+| `strength` | 绿色 | `strengths` | 匹配亮点：核心优势与岗位影响 |
+| `match` | 蓝色 | `skill_match.project_match_points` / `hard_skills` | 岗位匹配：项目或技能与 JD 的对应 |
+| `risk` | 红色 | `risk_points` | 待核实：需面试或材料复核 |
+| `verify` | 黄色 | 简历原文 + `education_history` | 学历待核实：无法从简历本身验证，建议背调 |
+
+### 8.2 架构与数据流
+
+```
+┌──────────┐     ┌──────────────┐     ┌──────────────────┐
+│ 用户请求  │ ──→ │ review-markers │ ──→ │ build_review_markers │
+│ POST     │     │ 路由          │     │ （零 token）      │
+│          │     │              │     │                  │
+│          │     │ fetchResume  │     │ ① 获取简历原文    │
+│          │     │ + fetchHR    │     │ ② 提取分析结果    │
+│          │     │              │     │ ③ 关键词匹配定位   │
+│          │     │              │     │ ④ 返回标注列表    │
+└──────────┘     └──────────────┘     └──────────────────┘
+                                              │
+                                              ▼
+                                     ┌──────────────────┐
+                                     │ 前端渲染面板       │
+                                     │                  │
+                                     │ 高亮原文          │
+                                     │ 综合得分 / 建议    │
+                                     │ 标记清单表格      │
+                                     │ 导出：图片/PDF/Word│
+                                     └──────────────────┘
+```
+
+### 8.3 实现细节
+
+#### 简历内容清洗（`resume_sanitize.py`）
+
+PDF 解析器（pdfminer）会在简历正文前后注入大量 ASCII 二进制垃圾：单字符碎片（`Bi`, `B`）、稀疏 ASCII 串（`B 4 0 9 y-F F d S x o m 6 W`）、Base64/MD5 哈希（`e6887c80f740582c1HB409y-FFdSxom6W`）。`sanitize_resume_content()` 通过正则逐行过滤：
+
+| 模式 | 正则 | 示例 |
+|---|---|---|
+| 短 ASCII | `^[A-Za-z0-9 _\-]{1,2}$` | `Bi`, `B`, `N` |
+| 稀疏 ASCII | `^([A-Za-z0-9\-]{1,4})( [A-Za-z0-9\-]{1,4}){1,}$` | `B 4 0 9 y-F F d S x o m 6 W` |
+| 长二进制 | `^[A-Za-z0-9+/=_\-]{15,}$` | `e6887c80f740582c1HB409y-FFdSxom6W` |
+
+清洗后仅保留中文、电话号码、邮箱等有效内容。
+
+#### 标记生成（`resume_review.py` → `build_review_markers`）
+
+**零 token 设计**：不依赖任何 LLM 调用，通过关键词匹配将分析结果映射到简历原文位置：
+
+```python
+def build_review_markers(content, analysis, *, candidate_name):
+    annotations = []
+    # 从分析结果中取出各类文本
+    _add_annotation(annotations, content, "strength", ..., analysis["strengths"])
+    _add_annotation(annotations, content, "match",  ..., skill_match["project_match_points"])
+    _add_annotation(annotations, content, "match",  ..., skill_match["hard_skills"])
+    _add_annotation(annotations, content, "risk",   ..., analysis["risk_points"])
+    _add_annotation(annotations, content, "verify", ..., _find_education_refs(content, education_history))
+    return {"candidate_name", "annotations", "summary", "notice"}
+```
+
+`_find_quote()` 用全文搜索 + 分词回退策略定位原文中的确切位置（`start`, `end`），确保所有标记引用均可在简历原文中追溯。
+
+#### Agent 分析驱动
+
+`screening_agent.run_screening_agent()` 执行 4 步 Agent 流程：
+
+```
+① 需求抽取    _extract_requirements     → 提取岗位要求清单（1 次 LLM）
+② 经验匹配    _find_resume_experiences  → 纯关键词匹配（0 次 LLM）
+③ 报告生成    _call_json(_report_prompt) → 生成 JSON 报告（1 次 LLM）
+④ 报告校验    _validate_report          → 校验 + 必要时重试（0~1 次 LLM）
+```
+
+### 8.4 批量分析 LLM 调用优化
+
+**核心问题**：同一 JD 分析 3 份简历时，`_extract_requirements`（仅依赖 `job_content`）被重复调用 3 次，浪费 2 次 LLM 调用。
+
+**优化方案**：`_run_hr_batch_analysis()` 在进入线程池之前预提取一次需求，将结果传入每个并发的分析任务：
+
+```python
+# 预提取一次（共享 JD）
+precomputed_requirements = screening_agent._extract_requirements(job_content, ai_config, _req_budget)
+
+# 并发分析时传入预提取结果，跳过重复抽取
+futures = {
+    executor.submit(
+        _run_hr_analysis, resume_id, job_id, user_id, ai_config,
+        precomputed_requirements=precomputed_requirements
+    ): resume_id
+    for resume_id in pending
+}
+```
+
+| 指标 | 优化前 | 优化后 | 降幅 |
+|---|---|---|---|
+| 调用次数（无重试） | 6 | 4 | **33%** |
+| 调用次数（全部重试） | 9 | 7 | **22%** |
+| Token 消耗 | ~14600 | ~10200 | **30%** |
+
+单份分析路径不受影响（`precomputed_requirements=None` 时走原有逻辑）。
+
+### 8.5 HR 分析输出字段
+
+#### `basic_screening`（基础信息筛选）
+
+| 字段 | 说明 |
+|---|---|
+| `native_place` | 籍贯 |
+| `age` | 年龄 |
+| `gender` | 性别 |
+| `work_location` | 工作所在地 |
+| `salary_expectation` | 期望薪资 |
+
+#### `education_history`（教育经历数组，按学历从高到低排序）
+
+| 字段 | 说明 |
+|---|---|
+| `degree` | 学历（博士/硕士/本科/专科/其他/未提供） |
+| `school_name` | 学校全称 |
+| `school_tier` | 层次（985/211/一本/二本/专科/其他） |
+| `major` | 学习专业名称（简历原文，不做匹配判断） |
+| `graduation_year` | 毕业时间 |
+
+**排序逻辑**（`_normalize_education_history`）：博士 > 硕士 > 本科 > 专科 > 大专 > 其他。
+
+### 8.6 前端导出功能
+
+三个导出按钮，均在前端无服务端依赖：
+
+| 按钮 | 技术 | 说明 |
+|---|---|---|
+| **导出图片** | `html2canvas` 截图隐藏 DOM → 2x 缩放 → PNG 下载 | 最稳，直接下载 |
+| **打印 PDF** | `window.open()` + `window.print()` | 浏览器打印对话框，需用户选"另存为 PDF" |
+| **导出 Word** | HTML + `xmlns:w` + `.doc` 扩展名 | Word 兼容 HTML，直接打开可编辑 |
+
+**PDF 手动另存为说明**：浏览器安全限制禁止静默下载 PDF，这是不可绕过的安全策略。UI 中按钮下方有提示文字说明。
+
+### 8.7 批量分析切换
+
+`ResumeReviewPanel` 使用 `key={data.resume_id}` 强制 React 在切换候选人时重新挂载组件，所有内部 state 重置；组件挂载时 `useEffect` 自动加载新候选人的简历重点标记。
+
+---
+
 ## 附：多用户改造文件清单
 
 | 文件 | 变更 |
@@ -727,6 +891,24 @@ sudo certbot --nginx -d www.luchenstudio.cn    # 自动 HTTPS
 | `apps/frontend/...` | 登录页、auth-context、API 鉴权头、移除模型配置、登出 |
 | `docker-compose.yml` | 端口 0.0.0.0；ENV 从 .env 读取 |
 | `package.json` / `.gitignore` | 构建脚本、忽略测试临时目录 |
+| `docs/ARCHITECTURE.md` | 📄 架构与部署文档 |
+
+### 简历重点标记模块文件清单
+
+| 文件 | 职责 |
+|------|------|
+| `apps/backend/resume_sanitize.py` | 🆕 PDF 解析 ASCII 垃圾过滤（短 ASCII/稀疏 ASCII/长二进制三模式） |
+| `apps/backend/resume_review.py` | 🆕 零 token 简历重点标记生成（关键词匹配 + 原文定位） |
+| `apps/backend/screening_agent.py` | 🆕 Agent 驱动招聘分析（需求抽取→经验匹配→报告→校验→重试） |
+| `apps/backend/app.py` | 集成清洗、标记路由、批量分析优化（预提取需求）、教育经历排序 |
+| `apps/backend/prompts.py` | Prompt 模板：新增 `education_history` 数组 schema |
+| `apps/frontend/components/workbench/resume-review-panel.tsx` | 🆕 简历重点标记面板（高亮渲染 + 三种导出） |
+| `apps/frontend/lib/api/screening.ts` | 新增 `fetchResumeReviewMarkers` / `fetchResumeView` API |
+| `apps/frontend/components/workbench/analysis-context.tsx` | `HrAnalysis` 类型：新增 `education_history` 数组 |
+| `apps/frontend/app/(default)/dashboard/page.tsx` | 基础信息筛选精简 + 教育经历模块（独立卡片，多段按学历排序） |
+| `.dockerignore` | 排除 `test_*.py` / `smoke_test_*.py` / `*.log`（不进生产镜像） |
+| `apps/backend/Dockerfile` | `COPY apps/backend/*.py ./`（通配符，新模块自动包含） |
+| `package.json`（前端） | + `html2canvas@1.4.1`（PNG 导出依赖） |
 
 一、基础信息筛选
 
