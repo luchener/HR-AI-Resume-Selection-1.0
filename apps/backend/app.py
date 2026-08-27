@@ -1230,6 +1230,7 @@ def _run_hr_analysis(
     job_id: str,
     user_id: str,
     ai_config: dict | None = None,
+    precomputed_requirements: dict | None = None,
 ) -> dict:
     config_fingerprint = llm.model_config_fingerprint(ai_config)
     cache_key = (_HR_ANALYSIS_VERSION, user_id, resume_id, job_id, config_fingerprint)
@@ -1251,6 +1252,7 @@ def _run_hr_analysis(
             resume_content=resume.get("content", ""),
             current_date=datetime.now().strftime("%Y-%m"),
             runtime_config=ai_config,
+            precomputed_requirements=precomputed_requirements,
         )
         result = _normalize_hr_analysis(
             raw,
@@ -1278,10 +1280,11 @@ def _run_hr_batch_analysis(
     user_id: str,
     ai_config: dict | None = None,
 ) -> tuple[dict[str, dict], list[dict]]:
-    """Run isolated candidate analyses concurrently to preserve single-resume quality."""
+    """Run isolated candidate analyses concurrently; pre-extract job requirements once to avoid redundant LLM calls."""
     results: dict[str, dict] = {}
     failures: list[dict] = []
     pending: list[str] = []
+    job: dict | None = None
     for resume_id in resume_ids:
         cache_key = (
             _HR_ANALYSIS_VERSION,
@@ -1299,14 +1302,34 @@ def _run_hr_batch_analysis(
             failures.append({"resume_id": resume_id, "detail": f"Resume not found: {resume_id}"})
             continue
         pending.append(resume_id)
+        if job is None:
+            job = store.get_job(job_id, user_id=user_id)
+            if not job:
+                for rid in pending:
+                    failures.append({"resume_id": rid, "detail": f"Job not found: {job_id}"})
+                return results, failures
 
     if not pending:
         return results, failures
 
+    # Pre-extract requirements once for the shared JD — saves N-1 LLM calls in batch mode
+    precomputed_requirements = None
+    if job and job.get("content"):
+        _req_budget = {"calls": 0}
+        precomputed_requirements = screening_agent._extract_requirements(
+            job.get("content", ""), ai_config, _req_budget
+        )
+        logger.info(
+            "Batch HR analysis: pre-extracted %s requirements for job %s (LLM calls=%s)",
+            len(precomputed_requirements.get("requirements", [])),
+            job_id,
+            _req_budget["calls"],
+        )
+
     started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=min(3, len(pending)), thread_name_prefix="hr-analysis") as executor:
         futures = {
-            executor.submit(_run_hr_analysis, resume_id, job_id, user_id, ai_config): resume_id
+            executor.submit(_run_hr_analysis, resume_id, job_id, user_id, ai_config, precomputed_requirements): resume_id
             for resume_id in pending
         }
         for future in as_completed(futures):

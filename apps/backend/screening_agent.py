@@ -312,8 +312,8 @@ def _validate_report(report: Any, requirements: dict, resume_content: str) -> di
     return {"passed": not issues, "issues": issues, "uncovered_requirements": uncovered}
 
 
-def run_screening_agent(*, job_content: str, resume_content: str, current_date: str, runtime_config: dict | None = None, on_event: Callable[[dict], None] | None = None) -> dict:
-    """Run the bounded screening workflow. It makes at most 4 logical LLM calls."""
+def run_screening_agent(*, job_content: str, resume_content: str, current_date: str, runtime_config: dict | None = None, on_event: Callable[[dict], None] | None = None, precomputed_requirements: dict | None = None) -> dict:
+    """Run the bounded screening workflow. If precomputed_requirements is provided, reuse it instead of re-extracting."""
     try:
         job_content = _clean_input(job_content, field="岗位描述")
         resume_content = _clean_input(resume_content, field="简历内容")
@@ -321,8 +321,11 @@ def run_screening_agent(*, job_content: str, resume_content: str, current_date: 
     except ValueError as exc:
         return _safe_report(None, {"passed": False, "issues": [str(exc)], "llm_calls": 0})
     budget = {"calls": 0}
-    _emit(on_event, "planning", "正在提取岗位硬性要求")
-    requirements = _extract_requirements(job_content, runtime_config, budget)
+    if precomputed_requirements is not None:
+        requirements = precomputed_requirements
+    else:
+        _emit(on_event, "planning", "正在提取岗位硬性要求")
+        requirements = _extract_requirements(job_content, runtime_config, budget)
     _emit(on_event, "retrieving", "正在查找简历中的相关经历")
     experiences = _find_resume_experiences(resume_content, requirements["requirements"])
     _emit(on_event, "generating", "正在生成招聘分析报告")
@@ -346,7 +349,6 @@ def run_screening_agent(*, job_content: str, resume_content: str, current_date: 
         "incomplete_requirements": incomplete,
     })
     result = _safe_report(report, validation)
-    # 附加 Agent 分析过程，让前端可见
     result["agent_trace"] = {
         "steps": [
             {"step": "需求抽取", "status": "完成" if not requirements.get("extraction_failed") else "失败", "detail": f"从岗位描述提取 {len(requirements.get('requirements', []))} 项要求"},

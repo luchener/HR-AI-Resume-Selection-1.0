@@ -564,12 +564,16 @@ class HrAnalysisTests(unittest.TestCase):
                 raise ValueError("invalid candidate output")
             return model_result
 
+        def mock_extract(*args, **_kwargs):
+            return {"requirements": [{"id": "req-1", "text": "Python 经验", "category": "skill", "hard": True, "logic": "required"}], "extraction_failed": False}
+
         with patch.object(backend.screening_agent, "run_screening_agent", side_effect=analyze_candidate) as call:
-            response = self.client.post(
-                "/api/v1/resumes/hr-analysis",
-                json={"resume_ids": resume_ids, "job_id": job_id},
-                headers=self.headers,
-            )
+            with patch.object(backend.screening_agent, "_extract_requirements", side_effect=mock_extract):
+                response = self.client.post(
+                    "/api/v1/resumes/hr-analysis",
+                    json={"resume_ids": resume_ids, "job_id": job_id},
+                    headers=self.headers,
+                )
 
         self.assertEqual(response.status_code, 200)
         data = response.get_json()["data"]
@@ -609,12 +613,16 @@ class HrAnalysisTests(unittest.TestCase):
                 return analysis("候选人乙", 72)
             return analysis("候选人丙", 65)
 
+        def mock_extract(*args, **_kwargs):
+            return {"requirements": [{"id": "req-1", "text": "后端开发经验", "category": "experience", "hard": True, "logic": "required"}], "extraction_failed": False}
+
         with patch.object(backend.screening_agent, "run_screening_agent", side_effect=analyze_candidate) as call:
-            response = self.client.post(
-                "/api/v1/resumes/hr-analysis",
-                json={"resume_ids": resume_ids, "job_id": job_id},
-                headers=self.headers,
-            )
+            with patch.object(backend.screening_agent, "_extract_requirements", side_effect=mock_extract):
+                response = self.client.post(
+                    "/api/v1/resumes/hr-analysis",
+                    json={"resume_ids": resume_ids, "job_id": job_id},
+                    headers=self.headers,
+                )
 
         self.assertEqual(response.status_code, 200)
         data = response.get_json()["data"]
