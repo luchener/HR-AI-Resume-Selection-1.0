@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 import {
+  CameraIcon,
   DownloadIcon,
   FileTextIcon,
   HighlighterIcon,
@@ -59,319 +60,236 @@ export default function ResumeReviewPanel({
   const [review, setReview] = useState<ResumeReviewData | null>(null);
   const [error, setError] = useState('');
 
-  // ── 导出辅助 ───────────────────────────────────────────────────────
-
-  function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  }
-  function escapeXml(s: string): string {
-    // 先把换行替换成 <w:br/>，再转义其余 XML 特殊字符
-    return s.replace(/\r\n/g, '\n').replace(/\n/g, '<w:br/>')
-            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
-  function categoryBg(cat: ResumeReviewMarker['category']): string {
-    return CATEGORY_STYLE[cat].bg === 'bg-[#e6f7ee]' ? '#e6f7ee' :
-           CATEGORY_STYLE[cat].bg === 'bg-[#eaf0fb]' ? '#eaf0fb' :
-           CATEGORY_STYLE[cat].bg === 'bg-[#fdecec]' ? '#fdecec' :
-           CATEGORY_STYLE[cat].bg === 'bg-[#f3f4f6]' ? '#f3f4f6' : '#fef6e6';
-  }
-  function categoryColor(cat: ResumeReviewMarker['category']): string {
-    return CATEGORY_STYLE[cat].text === 'text-[#1d7f5c]' ? '1D7F5C' :
-           CATEGORY_STYLE[cat].text === 'text-[#3e6fd3]' ? '3E6FD3' :
-           CATEGORY_STYLE[cat].text === 'text-[#b23b4e]' ? 'B23B4E' :
-           CATEGORY_STYLE[cat].text === 'text-[#6b7280]' ? '6B7280' : 'B0761A';
-  }
-
-  function docxRun(text: string, color?: string, bold?: boolean, sz?: string): string {
-    const rPr = (() => {
-      let inner = '';
-      if (bold) inner += '<w:b/><w:bCs/>';
-      if (color) inner += `<w:color w:val="${color}"/>`;
-      if (sz) inner += `<w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/>`;
-      return inner ? `<w:rPr>${inner}</w:rPr>` : '';
-    })();
-    return `<w:r>${rPr}<w:t xml:space="preserve">${text}</w:t></w:r>`;
-  }
-  function docxH(text: string, level: string): string {
-    return docxRun(escapeXml(text), '253249', true, level === '1' ? '32' : '28');
-  }
-  function docxP(...runs: string[]): string {
-    return `<w:p>${runs.join('')}</w:p>`;
-  }
-
-  function docxDocumentXml(paragraphs: string[]): string {
-    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
-            xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-            mc:Ignorable="wps">
-<w:body>${paragraphs.join('')}\n<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body>
-</w:document>`;
-  }
-
-  function docxStylesXml(): string {
-    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-<w:style w:type="paragraph" w:default="1" w:styleId="a">
-  <w:name w:val="Normal"/><w:qFormat/>
-  <w:rPr><w:rFonts w:ascii="Microsoft YaHei" w:eastAsia="Microsoft YaHei" w:hAnsi="Microsoft YaHei"/><w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr>
-</w:style></w:styles>`;
-  }
-
-  function docxContentTypesXml(): string {
-    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
-</Types>`;
-  }
-
-  function docxPackageRelsXml(): string {
-    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-</Relationships>`;
-  }
-
-  function docxDocumentRelsXml(): string {
-    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`;
-  }
-
-  // 纯 JS 最小 ZIP 实现（仅用于 DOCX 导出；DOCX 是 ZIP 容器）
-  class DocxZip {
-    private files: Array<{ name: string; data: string }> = [];
-    addFile(name: string, content: string): void {
-      this.files.push({ name, data: content });
-    }
-    generate(): Blob {
-      // UTF-8 → bytes
-      const encoder = new TextEncoder();
-      const compressed: Array<{ name: string; raw: Uint8Array; comp: Uint8Array | null; crc: number; rawSize: number }> = [];
-      for (const f of this.files) {
-        const raw = encoder.encode(f.data);
-        const comp = deflateRaw(raw);
-        compressed.push({ name: f.name, raw, comp: comp.length < raw.length ? comp : null, crc: crc32(raw), rawSize: raw.length });
-      }
-      let offset = 0;
-      const localHeaders: Array<{ offset: number; extraLen: number }> = [];
-      const localParts: Uint8Array[] = [];
-      for (const f of compressed) {
-        localHeaders.push({ offset, extraLen: 0 });
-        const nameBytes = encoder.encode(f.name);
-        const hdr = buildLocalHdr(f.name, f.rawSize, f.crc, f.comp ?? f.raw, nameBytes.length, 0);
-        localParts.push(hdr);
-        localParts.push(f.comp ?? f.raw);
-        offset += hdr.length + (f.comp ?? f.raw).length;
-      }
-      const centralOffset = offset;
-      const centralParts: Uint8Array[] = [];
-      for (let i = 0; i < compressed.length; i++) {
-        const f = compressed[i];
-        const nameBytes = encoder.encode(f.name);
-        const ch = buildCentralHdr(f.name, f.rawSize, f.crc, f.comp ?? f.raw, nameBytes.length, localHeaders[i].offset, 0);
-        centralParts.push(ch);
-      }
-      const centralBytes = concatUint8(centralParts);
-      const eocd = buildEocd(compressed.length, centralBytes.length, centralOffset);
-      const all = concatUint8([...localParts, centralBytes, eocd]);
-      return new Blob([all], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
-    }
-  }
-
-  // ── 二进制构建工具 ──────────────────────────────────────────────
-
-  function u16(v: number): Uint8Array { const b = new Uint8Array(2); b[0] = v & 0xff; b[1] = (v >>> 8) & 0xff; return b; }
-  function u32(v: number): Uint8Array { const b = new Uint8Array(4); b[0] = v & 0xff; b[1] = (v >>> 8) & 0xff; b[2] = (v >>> 16) & 0xff; b[3] = (v >>> 24) & 0xff; return b; }
-  function concatUint8(arrays: Uint8Array[]): Uint8Array {
-    const total = arrays.reduce((s, a) => s + a.length, 0);
-    const out = new Uint8Array(total);
-    let o = 0;
-    for (const a of arrays) { out.set(a, o); o += a.length; }
-    return out;
-  }
-
-  function buildLocalHdr(name: string, rawSize: number, crc: number, data: Uint8Array, nameLen: number, extraLen: number): Uint8Array {
-    const parts: Uint8Array[] = [
-      new Uint8Array([0x50, 0x4b, 0x03, 0x04]), // signature
-      u16(20), // version needed
-      u16(0),  // flags
-      u16(0),  // compression method (0 = stored) — we use stored since deflate may not shrink XML much
-      u16(0), u16(0), // mod time/date
-      u32(crc), u32(data.length), u32(rawSize),
-      u16(nameLen), u16(extraLen),
-      new TextEncoder().encode(name)
-    ];
-    return concatUint8(parts);
-  }
-
-  function buildCentralHdr(name: string, rawSize: number, crc: number, data: Uint8Array, nameLen: number, localOffset: number, extraLen: number): Uint8Array {
-    const parts: Uint8Array[] = [
-      new Uint8Array([0x50, 0x4b, 0x01, 0x02]),
-      u16(20), u16(20), // version made / needed
-      u16(0), u16(0),
-      u16(0), u16(0),
-      u32(crc), u32(data.length), u32(rawSize),
-      u16(nameLen), u16(extraLen), u16(0), u16(0), u32(0), u32(0),
-      u32(localOffset),
-      new TextEncoder().encode(name)
-    ];
-    return concatUint8(parts);
-  }
-
-  function buildEocd(count: number, centralSize: number, centralOffset: number): Uint8Array {
-    return concatUint8([
-      new Uint8Array([0x50, 0x4b, 0x05, 0x06]),
-      u16(0), u16(0),
-      u16(count), u16(count),
-      u32(centralSize), u32(centralOffset),
-      u16(0)
-    ]);
-  }
-
-  function crc32(data: Uint8Array): number {
-    let table = crc32.table;
-    if (!table) {
-      table = crc32.table = new Uint32Array(256);
-      for (let i = 0; i < 256; i++) {
-        let c = i;
-        for (let j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-        table[i] = c;
-      }
-    }
-    let crc = 0 ^ -1;
-    for (let i = 0; i < data.length; i++) crc = table[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
-    return (crc ^ -1) >>> 0;
-  }
-  crc32.table = null as unknown as Uint32Array;
-
-  // 极简 deflate stored block（不需要压缩，直接 stored）
-  function deflateRaw(_data: Uint8Array): Uint8Array {
-    // 使用 stored block（不压缩），因为 XML 体积很小，压缩收益不大，且实现完整 deflate 复杂度高
-    const len = _data.length;
-    const out = new Uint8Array(5 + len);
-    out[0] = 0x00; // BFINAL=0, BTYPE=00 (stored)
-    out[1] = len & 0xff; out[2] = (len >>> 8) & 0xff;
-    out[3] = (len ^ 0xffff) & 0xff; out[4] = ((len ^ 0xffff) >>> 8) & 0xff;
-    out.set(_data, 5);
-    return out;
-  }
-
-  const loadReview = useCallback(async () => {
+  function loadReview() {
     setLoading(true);
     setError('');
-    try {
-      const [content, markers] = await Promise.all([
-        fetchResumeView(resumeId),
-        fetchResumeReviewMarkers(resumeId, analysis as unknown as Record<string, unknown>, candidateName),
-      ]);
-      setRawContent(content || '未提供原简历内容');
-      setReview(markers);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '简历重点标记加载失败。');
-    } finally {
-      setLoading(false);
-    }
-  }, [resumeId, analysis, candidateName]);
-
-  const exportReview = useCallback(
-    (format: 'pdf' | 'docx') => {
-      if (!review) return;
-      const segments = buildHighlightedSegments(rawContent, review.annotations);
-      const name = review.candidate_name || candidateName || '候选人';
-
-      if (format === 'pdf') {
-        // 打开带样式的 HTML 窗口，触发浏览器打印 → 用户可保存为 PDF
-        const rows = review.annotations
-          .map((a) => `<tr><td>${CATEGORY_STYLE[a.category].label}</td><td>${escapeHtml(a.quote)}</td><td>${escapeHtml(a.reason)}</td></tr>`)
-          .join('');
-        const resumeHtml = segments
-          .map((seg) =>
-            seg.annotation
-              ? `<mark style="background:${categoryBg(seg.annotation.category)}">${escapeHtml(seg.text)}</mark>`
-              : escapeHtml(seg.text),
-          )
-          .join('');
-        const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>简历重点标记·${escapeHtml(name)}</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}body{font-family:"Microsoft YaHei",Arial,sans-serif;font-size:13px;line-height:1.7;color:#2c394f;padding:32px}
-h1{font-size:20px;color:#253249;margin-bottom:4px}h2{font-size:15px;color:#3e6fd3;margin:18px 0 8px;border-bottom:1px solid #dce2eb;padding-bottom:4px}
-.meta{display:flex;gap:24px;margin:8px 0 16px;font-size:13px;color:#65738a}.meta b{color:#1d7f5c;font-size:22px;margin-right:4px}
-table{border-collapse:collapse;width:100%;margin:8px 0 16px;font-size:12px}th,td{border:1px solid #dce2eb;padding:5px 8px;text-align:left}th{background:#eaf0fb;color:#3e6fd3}
-.resume{white-space:pre-wrap;word-break:break-word;background:#fbfcfe;border:1px solid #e5e9ef;border-radius:6px;padding:12px;margin-top:8px}
-mark{border-radius:2px;padding:0 2px}.page-break{page-break-before:always}
-@media print{body{padding:16px}.noprint{display:none}}
-</style></head><body>
-<h1>简历重点标记 · ${escapeHtml(name)}</h1>
-<div class="meta"><span>综合得分：<b>${review.summary.final_score}</b></span><span>招聘建议：${escapeHtml(review.summary.recommendation)}</span><span>匹配重点：${review.summary.highlights} 处</span><span>待核实：${review.summary.risks} 处</span></div>
-<h2>标记清单</h2>
-<table><thead><tr><th>类型</th><th>引用原文</th><th>HR 说明</th></tr></thead><tbody>${rows}</tbody></table>
-<h2>原简历内容</h2>
-<div class="resume">${resumeHtml}</div>
-<p style="margin-top:16px;font-size:11px;color:#8190a4">${escapeHtml(review.notice)}</p>
-</body></html>`;
-        const printWin = window.open('', '_blank', 'width=900,height=700');
-        if (printWin) {
-          printWin.document.write(html);
-          printWin.document.close();
-          printWin.focus();
-          setTimeout(() => { printWin.print(); }, 400);
-        }
-        return;
-      }
-
-      // ---- DOCX：构建真实 OOXML 压缩包 ----
-      const zip = new DocxZip();
-      const paragraphs: string[] = [];
-      paragraphs.push(docxP(docxH(name, '1'), docxRun(' 简历重点标记')));
-      paragraphs.push(docxP(docxRun(`综合得分：${review.summary.final_score}    招聘建议：${review.summary.recommendation}    匹配重点：${review.summary.highlights} 处    待核实：${review.summary.risks} 处`)));
-      paragraphs.push(docxP(docxH('标记清单', '2')));
-      for (const a of review.annotations) {
-        paragraphs.push(docxP(
-          docxRun(`【${CATEGORY_STYLE[a.category].label}】`, '#3e6fd3', true),
-          docxRun(` ${escapeXml(a.quote)}`),
-          docxRun(`（${escapeXml(a.reason)}）`),
-        ));
-      }
-      paragraphs.push(docxP(docxH('原简历内容', '2')));
-      for (const line of rawContent.split('\n')) {
-        paragraphs.push(docxP(docxRun(escapeXml(line))));
-      }
-
-      // 高亮段落：按段重新渲染
-      const highlightPara: string[] = [];
-      for (const seg of segments) {
-        if (seg.annotation) {
-          highlightPara.push(docxRun(escapeXml(seg.text), categoryColor(seg.annotation.category), true));
-        } else {
-          highlightPara.push(docxRun(escapeXml(seg.text)));
-        }
-      }
-      if (highlightPara.length) paragraphs.push(docxP(...highlightPara));
-
-      zip.addFile('[Content_Types].xml', docxContentTypesXml());
-      zip.addFile('_rels/.rels', docxPackageRelsXml());
-      zip.addFile('word/document.xml', docxDocumentXml(paragraphs));
-      zip.addFile('word/styles.xml', docxStylesXml());
-      zip.addFile('word/_rels/document.xml.rels', docxDocumentRelsXml());
-      const blob = zip.generate();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `简历重点标记-${name}.docx`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- DocxZip/docxH 为内部稳定引用
-    [review, rawContent, candidateName],
-  );
+    Promise.all([
+      fetchResumeView(resumeId),
+      fetchResumeReviewMarkers(resumeId, analysis as unknown as Record<string, unknown>, candidateName),
+    ])
+      .then(([content, markers]) => {
+        setRawContent(content || '未提供原简历内容');
+        setReview(markers);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : '简历重点标记加载失败。'))
+      .finally(() => setLoading(false));
+  }
 
   const segments = review ? buildHighlightedSegments(rawContent, review.annotations) : [];
+  const name = review ? (review.candidate_name || candidateName || '候选人') : '候选人';
+
+  // ── 构建通用 HTML 内容（打印用） ──────────────────────────────────────
+
+  function buildExportHtml(): string {
+    if (!review) return '';
+    const escapeHtml = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const catBg = (c: ResumeReviewMarker['category']) =>
+      CATEGORY_STYLE[c].bg === 'bg-[#e6f7ee]' ? '#e6f7ee' :
+      CATEGORY_STYLE[c].bg === 'bg-[#eaf0fb]' ? '#eaf0fb' :
+      CATEGORY_STYLE[c].bg === 'bg-[#fdecec]' ? '#fdecec' :
+      CATEGORY_STYLE[c].bg === 'bg-[#f3f4f6]' ? '#f3f4f6' : '#fef6e6';
+
+    const rows = review.annotations
+      .map((a) => `<tr><td>${CATEGORY_STYLE[a.category].label}</td><td>${escapeHtml(a.quote)}</td><td>${escapeHtml(a.reason)}</td></tr>`)
+      .join('');
+    const resumeHtml = segments
+      .map((seg) =>
+        seg.annotation
+          ? `<mark style="background:${catBg(seg.annotation.category)}">${escapeHtml(seg.text)}</mark>`
+          : escapeHtml(seg.text),
+      )
+      .join('');
+    return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>简历重点标记·${escapeHtml(name)}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:"Microsoft YaHei",Arial,sans-serif;font-size:14px;line-height:1.8;color:#2c394f;padding:40px 48px;background:#fff;width:750px;margin:0 auto}
+h1{font-size:22px;color:#253249;margin-bottom:4px}h2{font-size:16px;color:#3e6fd3;margin:20px 0 8px;border-bottom:1px solid #dce2eb;padding-bottom:4px}
+.meta{display:flex;gap:20px;flex-wrap:wrap;margin:10px 0 18px;font-size:13px;color:#65738a}.meta b{color:#1d7f5c;font-size:24px;margin-right:4px}
+table{border-collapse:collapse;width:100%;margin:8px 0 18px;font-size:13px}th,td{border:1px solid #dce2eb;padding:6px 10px;text-align:left}th{background:#eaf0fb;color:#3e6fd3}
+.resume{white-space:pre-wrap;word-break:break-word;background:#fbfcfe;border:1px solid #e5e9ef;border-radius:6px;padding:14px;margin-top:8px;font-size:13px;line-height:1.9}
+mark{border-radius:2px;padding:0 3px}.notice{margin-top:18px;font-size:11px;color:#8190a4}
+@media print{body{padding:16px 20px;width:auto}}
+</style></head><body>
+<h1>简历重点标记 · ${escapeHtml(name)}</h1>
+<div class="meta">
+  <span>综合得分：<b>${review.summary.final_score}</b></span>
+  <span>招聘建议：${escapeHtml(review.summary.recommendation)}</span>
+  <span>匹配重点：${review.summary.highlights} 处</span>
+  <span>待核实：${review.summary.risks} 处</span>
+</div>
+<h2>标记清单</h2>
+<table><thead><tr><th style="width:120px">类型</th><th>引用原文</th><th style="width:200px">HR 说明</th></tr></thead><tbody>${rows}</tbody></table>
+<h2>原简历内容</h2>
+<div class="resume">${resumeHtml}</div>
+<p class="notice">${escapeHtml(review.notice)}</p>
+</body></html>`;
+  }
+
+  // ── 构建 SVG 字符串（用于图片导出） ────────────────────────────────────
+
+  function buildExportSvg(): string {
+    if (!review) return '';
+    const W = 750, PAD = 36;
+    const catBg = (c: ResumeReviewMarker['category']) =>
+      CATEGORY_STYLE[c].bg === 'bg-[#e6f7ee]' ? '#e6f7ee' :
+      CATEGORY_STYLE[c].bg === 'bg-[#eaf0fb]' ? '#eaf0fb' :
+      CATEGORY_STYLE[c].bg === 'bg-[#fdecec]' ? '#fdecec' :
+      CATEGORY_STYLE[c].bg === 'bg-[#f3f4f6]' ? '#f3f4f6' : '#fef6e6';
+    const catColor = (c: ResumeReviewMarker['category']) =>
+      CATEGORY_STYLE[c].text === 'text-[#1d7f5c]' ? '#1d7f5c' :
+      CATEGORY_STYLE[c].text === 'text-[#3e6fd3]' ? '#3e6fd3' :
+      CATEGORY_STYLE[c].text === 'text-[#b23b4e]' ? '#b23b4e' :
+      CATEGORY_STYLE[c].text === 'text-[#6b7280]' ? '#6b7280' : '#b0761a';
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const lines: string[] = [];
+    let y = PAD;
+    const textX = PAD;
+    const fontSize = 13;
+    const lineH = fontSize * 1.6;
+
+    function add(text: string, opts?: { size?: number; color?: string; weight?: string; gap?: number }) {
+      const sz = opts?.size ?? fontSize;
+      const c = opts?.color ?? '#2c394f';
+      const w = opts?.weight ?? 'normal';
+      y += (opts?.gap ?? 0) + (sz === 22 ? 4 : 0);
+      lines.push(`<text x="${textX}" y="${y}" font-size="${sz}" fill="${c}" font-weight="${w}">${esc(text)}</text>`);
+      y += sz * 1.6;
+    }
+    function addSegmented(segs: Array<{ text: string; annotation?: ResumeReviewMarker }>, opts?: { gap?: number }) {
+      y += opts?.gap ?? 0;
+      let x = textX;
+      for (const seg of segs) {
+        if (!seg.annotation) {
+          lines.push(`<text x="${x}" y="${y}" font-size="${fontSize}" fill="#2c394f">${esc(seg.text)}</text>`);
+          x += Math.max(0.5 * fontSize * seg.text.length, fontSize);
+        } else {
+          const bg = catBg(seg.annotation.category);
+          const pad = 3;
+          const tw = Math.max(0.5 * fontSize * seg.text.length, fontSize);
+          lines.push(`<rect x="${x - pad}" y="${y - fontSize - 1}" width="${tw + pad * 2}" height="${fontSize + 2}" rx="2" fill="${bg}"/>`);
+          lines.push(`<text x="${x}" y="${y}" font-size="${fontSize}" fill="${catColor(seg.annotation.category)}" font-weight="600">${esc(seg.text)}</text>`);
+          x += tw;
+        }
+      }
+      y += lineH;
+    }
+    function addTableHeader() {
+      const cy = y - 2;
+      const cols = [
+        { x: textX, w: 100, label: '类型' },
+        { x: textX + 108, w: 340, label: '引用原文' },
+        { x: textX + 456, w: W - PAD * 2 - 456, label: 'HR 说明' },
+      ];
+      for (const col of cols) {
+        lines.push(`<rect x="${col.x}" y="${cy - 16}" width="${col.w}" height="20" fill="#eaf0fb" stroke="#dce2eb" stroke-width="1"/>`);
+        lines.push(`<text x="${col.x + 6}" y="${cy}" font-size="12" fill="#3e6fd3" font-weight="600">${esc(col.label)}</text>`);
+      }
+      y += 20;
+    }
+    function addTableRow(a: ResumeReviewMarker) {
+      const cy = y - 4;
+      const cols = [
+        { x: textX, w: 100, text: CATEGORY_STYLE[a.category].label, color: catColor(a.category), weight: '600' },
+        { x: textX + 108, w: 340, text: a.quote },
+        { x: textX + 456, w: W - PAD * 2 - 456, text: a.reason },
+      ];
+      for (const col of cols) {
+        lines.push(`<rect x="${col.x}" y="${cy - 12}" width="${col.w}" height="18" stroke="#e5e9ef" stroke-width="1" fill="none"/>`);
+        const c = col.color ?? '#2c394f';
+        const w = col.weight ?? 'normal';
+        lines.push(`<text x="${col.x + 4}" y="${cy}" font-size="11" fill="${c}" font-weight="${w}">${esc(col.text)}</text>`);
+      }
+      y += 20;
+    }
+
+    add(`简历重点标记 · ${name}`, { size: 22, color: '#253249', weight: '700', gap: 4 });
+    add(`综合得分：${review.summary.final_score}  招聘建议：${review.summary.recommendation}  匹配重点：${review.summary.highlights} 处  待核实：${review.summary.risks} 处`, { gap: 2 });
+
+    add('标记清单', { size: 15, color: '#3e6fd3', weight: '600', gap: 16 });
+    addTableHeader();
+    for (const a of review.annotations) addTableRow(a);
+
+    add('原简历内容', { size: 15, color: '#3e6fd3', weight: '600', gap: 16 });
+    addSegmented(segments, { gap: 2 });
+
+    y += 8;
+    lines.push(`<text x="${textX}" y="${y}" font-size="10" fill="#8190a4">${esc(review.notice)}</text>`);
+
+    const totalH = y + 20;
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${totalH}" viewBox="0 0 ${W} ${totalH}" font-family="Microsoft YaHei, Arial, sans-serif">
+<rect width="${W}" height="${totalH}" fill="#ffffff"/>
+${lines.join('\n')}
+</svg>`;
+  }
+
+  // ── 导出主入口 ─────────────────────────────────────────────────────────
+
+  function exportAs(format: 'png' | 'pdf' | 'doc') {
+    if (!review) return;
+
+    if (format === 'png') {
+      exportPng();
+    } else if (format === 'pdf') {
+      exportPdf();
+    } else {
+      exportWord();
+    }
+  }
+
+  function exportPng() {
+    const svg = buildExportSvg();
+    if (!svg) return;
+    const svgBlob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(svgBlob);
+    const img = new Image();
+    img.onload = () => {
+      const scale = 2;
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth * scale;
+      canvas.height = img.naturalHeight * scale;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const d = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = d;
+        a.download = `简历重点标记-${name}.png`;
+        a.click();
+        URL.revokeObjectURL(d);
+      }, 'image/png');
+    };
+    img.src = url;
+  }
+
+  function exportPdf() {
+    const html = buildExportHtml();
+    const win = window.open('', '_blank', 'width=900,height=700');
+    if (win) {
+      win.document.write(html);
+      win.document.close();
+      win.focus();
+      setTimeout(() => win.print(), 500);
+    }
+  }
+
+  function exportWord() {
+    // Word 兼容 HTML：生成标准 HTML 文件，用 .doc 扩展名保存
+    const html = buildExportHtml();
+    // 替换 DOCTYPE 让 Word 识别为 HTML
+    const wordHtml = html.replace('<!DOCTYPE html>', '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">');
+    const blob = new Blob(['\ufeff', wordHtml], { type: 'application/msword;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `简历重点标记-${name}.doc`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   return (
     <section className="mt-6 rounded-md border border-[#dce2eb] bg-white p-5 sm:p-8">
@@ -402,7 +320,7 @@ mark{border-radius:2px;padding:0 2px}.page-break{page-break-before:always}
 
       {review && (
         <div className="mt-5">
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
             <div className="rounded-md border border-[#e5e9ef] bg-[#fbfcfe] p-4">
               <div className="mb-2 flex flex-wrap gap-2">
                 {Object.entries(CATEGORY_STYLE).map(([key, style]) => (
@@ -442,22 +360,30 @@ mark{border-radius:2px;padding:0 2px}.page-break{page-break-before:always}
                 </p>
                 <p className="mt-1 text-xs leading-5 text-[#65738a]">{review.notice}</p>
               </div>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 <button
                   type="button"
-                  onClick={() => exportReview('pdf')}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[#3e6fd3] px-3 py-2 text-xs font-medium text-white"
+                  onClick={() => exportAs('png')}
+                  className="inline-flex items-center justify-center gap-1 rounded-md bg-[#3e6fd3] px-2 py-1.5 text-[11px] font-medium text-white"
                 >
-                  <DownloadIcon className="size-3.5" />
-                  导出 PDF
+                  <CameraIcon className="size-3" />
+                  图片
                 </button>
                 <button
                   type="button"
-                  onClick={() => exportReview('docx')}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-md border border-[#d5dde9] bg-white px-3 py-2 text-xs font-medium text-[#2c394f]"
+                  onClick={() => exportAs('pdf')}
+                  className="inline-flex items-center justify-center gap-1 rounded-md border border-[#d5dde9] bg-white px-2 py-1.5 text-[11px] font-medium text-[#2c394f]"
                 >
-                  <DownloadIcon className="size-3.5" />
-                  导出 Word
+                  <DownloadIcon className="size-3" />
+                  PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => exportAs('doc')}
+                  className="inline-flex items-center justify-center gap-1 rounded-md border border-[#d5dde9] bg-white px-2 py-1.5 text-[11px] font-medium text-[#2c394f]"
+                >
+                  <DownloadIcon className="size-3" />
+                  Word
                 </button>
               </div>
             </aside>
