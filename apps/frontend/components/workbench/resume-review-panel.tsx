@@ -197,7 +197,6 @@ export default function ResumeReviewPanel({
 
   const segments = review ? buildHighlightedSegments(rawContent, review.annotations) : [];
   const name = review ? (review.candidate_name || candidateName || '候选人') : '候选人';
-  const agentTrace = analysis.agent_trace;
 
   // ── 导出 ───────────────────────────────────────────────────────────────
 
@@ -250,47 +249,6 @@ export default function ResumeReviewPanel({
     URL.revokeObjectURL(url);
   }
 
-  // ── Agent 分析过程 ───────────────────────────────────────────────────
-
-  function renderAgentTrace() {
-    if (!agentTrace || !agentTrace.steps) return null;
-    return (
-      <div className="mt-3 rounded-md border border-[#e2d6f0] bg-[#fbf8ff] p-3">
-        <div className="flex items-center gap-2 text-xs font-semibold text-[#7c5da0]">
-          <span>🤖</span>
-          <span>Agent 分析过程</span>
-        </div>
-        <div className="mt-2 flex flex-col gap-1.5">
-          {agentTrace.steps.map((s, i) => (
-            <div key={i} className="flex items-start gap-2 text-xs">
-              <span className={`mt-0.5 inline-flex size-4 items-center justify-center rounded-full shrink-0 ${
-                s.status === '通过' || s.status === '完成' ? 'bg-[#e6f7ee] text-[#1d7f5c]' :
-                s.status === '不通过' || s.status === '失败' ? 'bg-[#fdecec] text-[#b23b4e]' :
-                'bg-[#fef6e6] text-[#b0761a]'
-              }`}>
-                {s.status === '通过' || s.status === '完成' ? '✓' : s.status === '不通过' || s.status === '失败' ? '✗' : '⟳'}
-              </span>
-              <span className="font-medium text-[#4a3a6b]">{s.step}：</span>
-              <span className="text-[#6b5d87]">{s.detail}</span>
-            </div>
-          ))}
-        </div>
-        {agentTrace.requirements && agentTrace.requirements.length > 0 && (
-          <div className="mt-2 pt-2 border-t border-[#e2d6f0] text-xs">
-            <span className="text-[#7c5da0] font-medium">提取的岗位要求（前 5 项）：</span>
-            <div className="mt-1 flex flex-wrap gap-1">
-              {agentTrace.requirements.slice(0, 5).map((r: string, i: number) => (
-                <span key={i} className="rounded px-1.5 py-0.5 bg-[#f0ebfa] text-[#7c5da0] text-[11px]">
-                  {r.length > 28 ? r.slice(0, 28) + '…' : r}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
     <section className="mt-6 rounded-md border border-[#dce2eb] bg-white p-5 sm:p-8">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -317,8 +275,6 @@ export default function ResumeReviewPanel({
       </div>
 
       {error && <p className="mt-4 rounded-md border border-[#f0c9c9] bg-[#fff5f5] p-3 text-xs text-[#b23b4e]">{error}</p>}
-
-      {renderAgentTrace()}
 
       {review && (
         <div className="mt-5">
