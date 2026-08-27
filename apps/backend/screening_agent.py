@@ -10,7 +10,7 @@ import llm
 from prompts import PROMPT_HR_RECRUITMENT_ANALYSIS
 
 MAX_AGENT_RETRIES = 1
-MAX_AGENT_LLM_CALLS = 4
+MAX_AGENT_LLM_CALLS = 5
 _MAX_JOB_CHARS = 6000
 _MAX_RESUME_CHARS = 8000
 _MAX_REQUIREMENT_COUNT = 24
@@ -148,8 +148,8 @@ def _safe_report(report: Any, validation: dict) -> dict:
 
 def _self_reflect(report: dict, job_content: str, resume_content: str, requirements: dict, experiences: list[dict], current_date: str, runtime_config: dict | None, budget: dict) -> tuple[dict, dict]:
     """Self-check the report against 5 rules; revise if issues found."""
-    if budget["calls"] >= MAX_AGENT_LLM_CALLS - 2:
-        # Not enough budget left for reflection + potential revision
+    if budget["calls"] >= MAX_AGENT_LLM_CALLS - 1:
+        # Not enough budget left for reflection
         return report, {"checked_rules": 5, "issues": [], "passed": True}
 
     req_text = json.dumps([{"id": r["id"], "text": r["text"]} for r in requirements.get("requirements", [])], ensure_ascii=False)
@@ -193,7 +193,7 @@ def _self_reflect(report: dict, job_content: str, resume_content: str, requireme
             issues = raw
 
     revised = report
-    if should_revise and issues and budget["calls"] < MAX_AGENT_LLM_CALLS - 1:
+    if should_revise and issues and budget["calls"] < MAX_AGENT_LLM_CALLS:
         repair = {"self_reflection": [{"rule": i.get("rule", 0), "problem": i.get("problem", ""), "suggested_fix": i.get("suggested_fix", "")} for i in issues]}
         revised_prompt = _report_prompt(job_content, resume_content, requirements, experiences, current_date, repair)
         revised = _call_json(revised_prompt, max_tokens=4000, runtime_config=runtime_config, budget=budget)
