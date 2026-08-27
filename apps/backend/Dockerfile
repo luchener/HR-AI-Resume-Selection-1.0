@@ -13,10 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY apps/backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
-# 复制后端源码（Flask 极简版，10 个文件；新增模块必须加入列表）
-COPY apps/backend/app.py apps/backend/auth.py apps/backend/config.py apps/backend/llm.py \
-     apps/backend/parser.py apps/backend/prompts.py apps/backend/run.py \
-     apps/backend/store.py apps/backend/mailer.py apps/backend/reset_password_cli.py ./
+# 复制后端源码（通配符；新增模块自动生效，无需修改 Dockerfile）
+COPY apps/backend/*.py ./
 
 # 数据与日志目录（卷管理交给 docker-compose）
 RUN mkdir -p /app/data /app/logs

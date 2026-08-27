@@ -63,3 +63,11 @@ assets/
 /*.docx
 /*.pdf
 /*.txt
+
+# ---- 后端测试脚本（不进生产镜像）----
+apps/backend/test_*.py
+apps/backend/smoke_test_*.py
+apps/backend/backend-*.log
+apps/backend/startup-*.log
+apps/backend/*.stderr.log
+apps/backend/*.stdout.log
