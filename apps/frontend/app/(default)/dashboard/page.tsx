@@ -40,11 +40,11 @@ function DetailGrid({
   compact?: boolean;
 }) {
   return (
-    <dl className={`mt-5 grid border-l border-t border-[#e2e7ee] ${compact ? 'grid-cols-2 xl:grid-cols-4' : 'sm:grid-cols-2 xl:grid-cols-3'}`}>
+    <dl className={`mt-5 grid border-l border-t border-line-soft ${compact ? 'grid-cols-2 xl:grid-cols-4' : 'sm:grid-cols-2 xl:grid-cols-3'}`}>
       {values.map(([label, value]) => (
-        <div key={label} className="min-w-0 border-b border-r border-[#e2e7ee] px-4 py-3.5">
-          <dt className="text-xs text-[#8290a3]">{label}</dt>
-          <dd className="mt-1 break-words text-sm font-medium leading-6 text-[#2c394f]">{value || EMPTY_VALUE}</dd>
+        <div key={label} className="min-w-0 border-b border-r border-line-soft px-4 py-3.5">
+          <dt className="text-xs text-sub">{label}</dt>
+          <dd className="mt-1 break-words text-sm font-medium leading-6 text-ink">{value || EMPTY_VALUE}</dd>
         </div>
       ))}
     </dl>
@@ -53,13 +53,13 @@ function DetailGrid({
 
 function EmploymentGapSummary({ value }: { value?: string }) {
   return (
-    <div className="mt-5 flex items-start gap-3 border-y border-[#e2e7ee] bg-[#f8fafc] px-4 py-3.5">
-      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-[#eaf0fb] text-[#4d6fae]">
+    <div className="mt-5 flex items-start gap-3 border-y border-line-soft bg-mist px-4 py-3.5">
+      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-brand-soft text-brand">
         <Clock3Icon className="size-4" />
       </span>
       <div className="min-w-0">
-        <p className="text-xs font-medium text-[#66758b]">空窗期核算</p>
-        <p className="mt-1 break-words text-sm font-medium leading-6 text-[#2c394f]">{value || EMPTY_VALUE}</p>
+        <p className="text-xs font-medium text-sub">空窗期核算</p>
+        <p className="mt-1 break-words text-sm font-medium leading-6 text-ink">{value || EMPTY_VALUE}</p>
       </div>
     </div>
   );
@@ -70,31 +70,31 @@ function EmploymentTimeline({ records }: { records?: EmploymentRecord[] }) {
   return (
     <div className="mt-6">
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <h3 className="text-sm font-semibold text-[#29364c]">工作经历明细</h3>
-        {rows.length > 0 && <p className="text-xs text-[#8290a3]">{rows.length} 段经历 · 按开始时间倒序</p>}
+        <h3 className="text-sm font-semibold text-ink">工作经历明细</h3>
+        {rows.length > 0 && <p className="text-xs text-sub">{rows.length} 段经历 · 按开始时间倒序</p>}
       </div>
-      <ol className="mt-3 divide-y divide-[#e5e9ef] border-y border-[#e2e7ee]">
+      <ol className="mt-3 divide-y divide-line-soft border-y border-line-soft">
         {rows.length ? rows.map((record, index) => (
           <li
             key={`${record.company_name}-${record.start_date}-${index}`}
             className="grid min-w-0 gap-3 py-4 sm:grid-cols-[minmax(0,1fr)_minmax(210px,auto)] sm:items-center"
           >
             <div className="min-w-0">
-              <p className="break-words text-sm font-semibold leading-6 text-[#243249]">{record.company_name || EMPTY_VALUE}</p>
-              <p className="mt-0.5 break-words text-sm leading-6 text-[#65738a]">{record.job_title || EMPTY_VALUE}</p>
+              <p className="break-words text-sm font-semibold leading-6 text-ink">{record.company_name || EMPTY_VALUE}</p>
+              <p className="mt-0.5 break-words text-sm leading-6 text-sub">{record.job_title || EMPTY_VALUE}</p>
             </div>
-            <div className="min-w-0 text-sm text-[#526178] sm:text-right">
+            <div className="min-w-0 text-sm text-body sm:text-right">
               <p className="inline-flex max-w-full items-center gap-2 leading-6">
-                <CalendarDaysIcon className="size-4 shrink-0 text-[#6c86bd]" />
+                <CalendarDaysIcon className="size-4 shrink-0 text-brand" />
                 <span className="break-words">{record.start_date || EMPTY_VALUE} 至 {record.end_date || EMPTY_VALUE}</span>
               </p>
               {record.duration && record.duration !== '未提供' && (
-                <p className="mt-0.5 text-xs text-[#8290a3]">任职 {record.duration}</p>
+                <p className="mt-0.5 text-xs text-sub">任职 {record.duration}</p>
               )}
             </div>
           </li>
         )) : (
-          <li className="py-4 text-sm leading-6 text-[#8290a3]">{EMPTY_VALUE}</li>
+          <li className="py-4 text-sm leading-6 text-sub">{EMPTY_VALUE}</li>
         )}
       </ol>
     </div>
@@ -104,10 +104,10 @@ function EmploymentTimeline({ records }: { records?: EmploymentRecord[] }) {
 function InsightList({ items, empty = '未发现明确证据' }: { items?: string[]; empty?: string }) {
   const rows = items?.length ? items : [empty];
   return (
-    <ul className="mt-4 divide-y divide-[#e7ebf1]">
+    <ul className="mt-4 divide-y divide-line-soft">
       {rows.map((item, index) => (
-        <li key={`${item}-${index}`} className="flex gap-3 py-3 text-sm leading-6 text-[#48566d] first:pt-0 last:pb-0">
-          <span className="mt-2 size-1.5 shrink-0 rounded-full bg-[#6f91e4]" />
+        <li key={`${item}-${index}`} className="flex gap-3 py-3 text-sm leading-6 text-body first:pt-0 last:pb-0">
+          <span className="mt-2 size-1.5 shrink-0 rounded-full bg-brand" />
           <span>{item}</span>
         </li>
       ))}
@@ -129,14 +129,14 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section id={id} className="scroll-mt-6 rounded-md border border-[#dce2eb] bg-white p-5 sm:p-6">
+    <section id={id} className="scroll-mt-6 rounded-md border border-line bg-white p-5 sm:p-6">
       <div className="flex items-start gap-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-[#edf3ff] text-[#496fc9]">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-brand-soft text-brand">
           <Icon className="size-4.5" />
         </span>
         <div>
-          <p className="text-[11px] font-semibold uppercase text-[#8290a3]">{eyebrow}</p>
-          <h2 className="mt-1 text-lg font-semibold text-[#1b273d]">{title}</h2>
+          <p className="text-[11px] font-semibold uppercase text-sub">{eyebrow}</p>
+          <h2 className="mt-1 text-lg font-semibold text-ink">{title}</h2>
         </div>
       </div>
       {children}
@@ -180,10 +180,10 @@ function ReportNav({ items }: { items: Array<{ id: string; label: string }> }) {
   }, [itemsKey]);
 
   return (
-    <section className="rounded-md border border-[#dce2eb] bg-white p-4">
+    <section className="rounded-md border border-line bg-white p-4">
       <div className="flex items-center gap-2">
-        <CompassIcon className="size-4 text-[#3e6fd3]" />
-        <p className="text-sm font-semibold text-[#253249]">报告导航</p>
+        <CompassIcon className="size-4 text-brand" />
+        <p className="text-sm font-semibold text-ink">报告导航</p>
       </div>
       <nav className="mt-3 grid gap-1" aria-label="报告页内导航">
         {items.map((item) => {
@@ -199,10 +199,10 @@ function ReportNav({ items }: { items: Array<{ id: string; label: string }> }) {
               }}
               aria-current={active ? 'true' : undefined}
               className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors ${
-                active ? 'bg-[#eef3ff] font-medium text-[#2c4a8a]' : 'text-[#435168] hover:bg-[#f3f6fa]'
+                active ? 'bg-brand-soft font-medium text-brand' : 'text-body hover:bg-soft'
               }`}
             >
-              <Icon className={`size-3.5 shrink-0 ${active ? 'text-[#3e6fd3]' : 'text-[#8290a3]'}`} />
+              <Icon className={`size-3.5 shrink-0 ${active ? 'text-brand' : 'text-sub'}`} />
               {item.label}
             </button>
           );
@@ -214,13 +214,13 @@ function ReportNav({ items }: { items: Array<{ id: string; label: string }> }) {
 
 function MarkdownReport({ content }: { content: string }) {
   return (
-    <div className="space-y-3 text-sm leading-7 text-[#45536a]">
+    <div className="space-y-3 text-sm leading-7 text-body">
       {content.split(/\r?\n/).filter(Boolean).map((line, index) => {
         const value = line.trim();
-        if (value.startsWith('### ')) return <h3 key={index} className="pt-4 text-base font-semibold text-[#1c2940]">{value.slice(4)}</h3>;
-        if (value.startsWith('## ')) return <h2 key={index} className="border-b border-[#e4e9ef] pb-3 pt-5 text-xl font-semibold text-[#17243a]">{value.slice(3)}</h2>;
-        if (value.startsWith('# ')) return <h1 key={index} className="border-b border-[#e4e9ef] pb-4 text-2xl font-semibold text-[#17243a]">{value.slice(2)}</h1>;
-        if (/^[-*+]\s/.test(value)) return <div key={index} className="flex gap-3"><span className="mt-3 size-1.5 shrink-0 rounded-full bg-[#6f91e4]" /><span>{value.slice(2)}</span></div>;
+        if (value.startsWith('### ')) return <h3 key={index} className="pt-4 text-base font-semibold text-ink">{value.slice(4)}</h3>;
+        if (value.startsWith('## ')) return <h2 key={index} className="border-b border-line-soft pb-3 pt-5 text-xl font-semibold text-ink">{value.slice(3)}</h2>;
+        if (value.startsWith('# ')) return <h1 key={index} className="border-b border-line-soft pb-4 text-2xl font-semibold text-ink">{value.slice(2)}</h1>;
+        if (/^[-*+]\s/.test(value)) return <div key={index} className="flex gap-3"><span className="mt-3 size-1.5 shrink-0 rounded-full bg-brand" /><span>{value.slice(2)}</span></div>;
         if (/^\d+[.)]\s/.test(value)) return <p key={index}>{value}</p>;
         return <p key={index}>{value.replace(/\*\*/g, '')}</p>;
       })}
@@ -254,7 +254,7 @@ export default function DashboardPage() {
   if (!isHydrated) {
     return (
       <AppShell active="report">
-        <div className="flex min-h-screen items-center justify-center text-sm text-[#6f7d91]">
+        <div className="flex min-h-screen items-center justify-center text-sm text-sub">
           <LoaderCircleIcon className="mr-2 size-4 animate-spin" /> 正在载入分析报告
         </div>
       </AppShell>
@@ -265,11 +265,11 @@ export default function DashboardPage() {
     return (
       <AppShell active="report">
         <div className="flex min-h-screen items-center justify-center px-5">
-          <div className="max-w-md rounded-md border border-[#dce2eb] bg-white p-8 text-center">
-            <FileSearch2Icon className="mx-auto size-9 text-[#6688d8]" />
-            <h1 className="mt-5 text-xl font-semibold text-[#1b273d]">暂无可展示的报告</h1>
-            <p className="mt-2 text-sm leading-6 text-[#738096]">请先添加简历和岗位描述，完成一次招聘分析。</p>
-            <button type="button" onClick={() => router.push('/')} className="mt-6 inline-flex h-10 items-center gap-2 rounded-md bg-[#1b2a45] px-5 text-sm font-medium text-white">
+          <div className="max-w-md rounded-md border border-line bg-white p-8 text-center">
+            <FileSearch2Icon className="mx-auto size-9 text-brand" />
+            <h1 className="mt-5 text-xl font-semibold text-ink">暂无可展示的报告</h1>
+            <p className="mt-2 text-sm leading-6 text-sub">请先添加简历和岗位描述，完成一次招聘分析。</p>
+            <button type="button" onClick={() => router.push('/')} className="mt-6 inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-5 text-sm font-medium text-white">
               <ArrowLeftIcon className="size-4" /> 返回分析工作台
             </button>
           </div>
@@ -355,35 +355,35 @@ export default function DashboardPage() {
   };
 
   const recommendationClass = analysis?.recruitment_recommendation === '优先面试'
-    ? 'bg-[#e8f7f0] text-[#177453]'
+    ? 'bg-good-soft text-good'
     : analysis?.recruitment_recommendation === '储备观察'
-      ? 'bg-[#fff5dc] text-[#8b6514]'
-      : 'bg-[#fff0ed] text-[#9a4035]';
+      ? 'bg-warn-soft text-warn'
+      : 'bg-bad-soft text-bad';
 
   return (
     <AppShell active="report">
       <div className="mx-auto w-full max-w-[1500px] px-5 py-8 sm:px-8 lg:px-10 lg:py-10 xl:px-14">
-        <header className="flex flex-col gap-5 border-b border-[#dce2eb] pb-7 xl:flex-row xl:items-start xl:justify-between">
+        <header className="flex flex-col gap-5 border-b border-line pb-7 xl:flex-row xl:items-start xl:justify-between">
           <div>
-            <button type="button" onClick={() => router.push('/')} className="mb-4 inline-flex items-center gap-2 text-sm font-medium text-[#5d6d84] hover:text-[#1e2d47]">
+            <button type="button" onClick={() => router.push('/')} className="mb-4 inline-flex items-center gap-2 text-sm font-medium text-body hover:text-ink">
               <ArrowLeftIcon className="size-4" /> 新建分析
             </button>
-            <p className="text-xs font-semibold uppercase text-[#5e7190]">候选人筛选报告</p>
-            <h1 className="mt-2 text-3xl font-semibold text-[#152137] sm:text-4xl">{analysis ? '候选人分析报告' : '深度优化简历'}</h1>
-            <p className="mt-3 text-sm text-[#6f7d91]">{candidateName} · 基于目标岗位要求生成</p>
+            <p className="text-xs font-semibold uppercase text-sub">候选人筛选报告</p>
+            <h1 className="mt-2 text-3xl font-semibold text-ink sm:text-4xl">{analysis ? '候选人分析报告' : '深度优化简历'}</h1>
+            <p className="mt-3 text-sm text-sub">{candidateName} · 基于目标岗位要求生成</p>
           </div>
           <div className="flex flex-wrap gap-2">
             {analysis ? (
               <>
-                <button type="button" disabled={busy} onClick={handleReanalyze} className="inline-flex h-10 items-center gap-2 rounded-md border border-[#d3dae5] bg-white px-4 text-sm font-medium text-[#334158] hover:bg-[#f8f9fb] disabled:opacity-50">
+                <button type="button" disabled={busy} onClick={handleReanalyze} className="inline-flex h-10 items-center gap-2 rounded-md border border-line-soft bg-white px-4 text-sm font-medium text-ink hover:bg-mist disabled:opacity-50">
                   {action === 'reanalyze' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />} 重新分析
                 </button>
-                <button type="button" disabled={busy} onClick={handleImprove} className="inline-flex h-10 items-center gap-2 rounded-md bg-[#1b2a45] px-4 text-sm font-medium text-white hover:bg-[#263a5e] disabled:opacity-50">
+                <button type="button" disabled={busy} onClick={handleImprove} className="inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-[#263a5e] disabled:opacity-50">
                   {action === 'improve' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <SparklesIcon className="size-4" />} 深度优化简历
                 </button>
               </>
             ) : (
-              <button type="button" disabled={busy} onClick={handleOpenEditor} className="inline-flex h-10 items-center gap-2 rounded-md bg-[#1b2a45] px-4 text-sm font-medium text-white hover:bg-[#263a5e] disabled:opacity-50">
+              <button type="button" disabled={busy} onClick={handleOpenEditor} className="inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-[#263a5e] disabled:opacity-50">
                 {action === 'editor' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <PencilIcon className="size-4" />} 在 Resume Studio 中编辑
               </button>
             )}
@@ -391,19 +391,19 @@ export default function DashboardPage() {
         </header>
 
         {(progress || error) && (
-          <div className={`mt-5 rounded-md border px-4 py-3 text-sm ${error ? 'border-[#efb5ad] bg-[#fff4f2] text-[#9d3e32]' : 'border-[#cdd9f2] bg-[#f1f5ff] text-[#3d5f9f]'}`}>
+          <div className={`mt-5 rounded-md border px-4 py-3 text-sm ${error ? 'border-[#efb5ad] bg-bad-soft text-bad' : 'border-brand bg-brand-soft text-brand'}`}>
             {progress && !error && <LoaderCircleIcon className="mr-2 inline size-4 animate-spin" />}{error || progress}
           </div>
         )}
 
         {batchAnalyses.length > 1 && (
-          <div className="mt-6 overflow-x-auto rounded-md border border-[#dce2eb] bg-white p-2">
+          <div className="mt-6 overflow-x-auto rounded-md border border-line bg-white p-2">
             <div className="flex min-w-max gap-2">
               {batchAnalyses.map((item, index) => {
                 const active = item.resume_id === data.resume_id;
                 const name = item.candidate_name || item.hr_analysis?.candidate_name || `候选人 ${index + 1}`;
                 return (
-                  <button type="button" key={item.resume_id} onClick={() => selectCandidate(item.resume_id)} className={`flex min-w-40 items-center justify-between gap-4 rounded-md px-4 py-3 text-left ${active ? 'bg-[#1b2a45] text-white' : 'text-[#4b596f] hover:bg-[#f3f6fa]'}`}>
+                  <button type="button" key={item.resume_id} onClick={() => selectCandidate(item.resume_id)} className={`flex min-w-40 items-center justify-between gap-4 rounded-md px-4 py-3 text-left ${active ? 'bg-brand-deep text-white' : 'text-body hover:bg-soft'}`}>
                     <span><span className="block text-xs opacity-60">0{index + 1}</span><span className="mt-0.5 block text-sm font-medium">{name}</span></span>
                     <span className="text-lg font-semibold">{item.hr_analysis?.final_score ?? '--'}</span>
                   </button>
@@ -414,31 +414,31 @@ export default function DashboardPage() {
         )}
 
         {batchFailures.length > 0 && (
-          <div className="mt-4 flex gap-3 rounded-md border border-[#efcf8a] bg-[#fff9e9] px-4 py-3 text-sm text-[#805f18]">
+          <div className="mt-4 flex gap-3 rounded-md border border-[#efcf8a] bg-warn-soft px-4 py-3 text-sm text-warn">
             <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" /> {batchFailures.length} 份简历未完成分析，其余结果已保留。
           </div>
         )}
 
         {analysis ? (
           <>
-            <div id="sec-overview" className="mt-6 grid scroll-mt-6 overflow-hidden rounded-md border border-[#dce2eb] bg-white sm:grid-cols-2 xl:grid-cols-4">
+            <div id="sec-overview" className="mt-6 grid scroll-mt-6 overflow-hidden rounded-md border border-line bg-white sm:grid-cols-2 xl:grid-cols-4">
               {[
-                { label: '岗位契合度', value: `${analysis.job_fit_percentage}%`, note: `基础分 ${analysis.job_fit_score}/100`, color: 'text-[#3e6fd3]' },
-                { label: '简历美化程度', value: analysis.ai_risk_level, note: `${analysis.ai_risk_label} · 扣 ${analysis.ai_deduction} 分`, color: 'text-[#995c87]' },
-                { label: '相关经验年限', value: analysis.work_history.relevant_years, note: `职责重合 ${analysis.work_history.responsibility_match}`, color: 'text-[#17243a]' },
-                { label: '跳槽稳定性', value: analysis.work_history.stability, note: `公司背景 ${analysis.work_history.company_background}`, color: 'text-[#17243a]' },
+                { label: '岗位契合度', value: `${analysis.job_fit_percentage}%`, note: `基础分 ${analysis.job_fit_score}/100`, color: 'text-brand' },
+                { label: '简历美化程度', value: analysis.ai_risk_level, note: `${analysis.ai_risk_label} · 扣 ${analysis.ai_deduction} 分`, color: 'text-violet' },
+                { label: '相关经验年限', value: analysis.work_history.relevant_years, note: `职责重合 ${analysis.work_history.responsibility_match}`, color: 'text-ink' },
+                { label: '跳槽稳定性', value: analysis.work_history.stability, note: `公司背景 ${analysis.work_history.company_background}`, color: 'text-ink' },
               ].map((metric) => (
-                <div key={metric.label} className="border-b border-[#e1e6ed] p-5 last:border-b-0 sm:[&:nth-child(odd)]:border-r xl:border-b-0 xl:border-r xl:last:border-r-0">
-                  <p className="text-xs text-[#8190a4]">{metric.label}</p>
+                <div key={metric.label} className="border-b border-line-soft p-5 last:border-b-0 sm:[&:nth-child(odd)]:border-r xl:border-b-0 xl:border-r xl:last:border-r-0">
+                  <p className="text-xs text-sub">{metric.label}</p>
                   <p className={`mt-2 text-2xl font-semibold ${metric.color}`}>{metric.value}</p>
-                  <p className="mt-1 text-xs text-[#65738a]">{metric.note}</p>
+                  <p className="mt-1 text-xs text-sub">{metric.note}</p>
                 </div>
               ))}
             </div>
 
             {/* 统一导出中心：整份报告 × 图片/PDF/Word */}
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#dce2eb] bg-white px-4 py-2.5">
-              <p className="text-xs text-[#8190a4]">导出整份报告（含排名、Agent 校验、标记要点）</p>
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-white px-4 py-2.5">
+              <p className="text-xs text-sub">导出整份报告（含排名、Agent 校验、标记要点）</p>
               <ReportExportCenter key={data.resume_id} analysis={analysis} candidateName={candidateName} comparison={data.comparison} resumeId={data.resume_id} />
             </div>
 
@@ -446,14 +446,14 @@ export default function DashboardPage() {
             {data.comparison && (
               <Section id="sec-ranking" eyebrow="全局对比" title="候选人排名" icon={TrophyIcon}>
                 <div className="mt-4">
-                  <div className="overflow-x-auto rounded-md border border-[#e5e9ef]">
+                  <div className="overflow-x-auto rounded-md border border-line-soft">
                     <table className="w-full border-collapse text-sm">
                       <thead>
-                        <tr className="bg-[#f7f8fa]">
-                          <th className="border-b border-[#e5e9ef] px-4 py-3 text-left text-xs font-semibold text-[#65738a]">排名</th>
-                          <th className="border-b border-[#e5e9ef] px-4 py-3 text-left text-xs font-semibold text-[#65738a]">得分</th>
-                          <th className="border-b border-[#e5e9ef] px-4 py-3 text-left text-xs font-semibold text-[#65738a]">候选人</th>
-                          <th className="border-b border-[#e5e9ef] px-4 py-3 text-left text-xs font-semibold text-[#65738a]">核心差异点</th>
+                        <tr className="bg-mist">
+                          <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">排名</th>
+                          <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">得分</th>
+                          <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">候选人</th>
+                          <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">核心差异点</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -467,13 +467,13 @@ export default function DashboardPage() {
                             <tr
                               key={item.rank}
                               onClick={() => target && selectCandidate(target.resume_id)}
-                              className={`border-b border-[#e5e9ef] last:border-b-0 ${target ? 'cursor-pointer transition-colors hover:bg-[#f3f6fa]' : ''}`}
+                              className={`border-b border-line-soft last:border-b-0 ${target ? 'cursor-pointer transition-colors hover:bg-soft' : ''}`}
                               title={target ? `点击切换到 ${item.name}` : undefined}
                             >
-                              <td className="px-4 py-3 font-semibold text-[#2c394f]">{medal}</td>
-                              <td className="px-4 py-3 font-semibold text-[#3e6fd3]">{item.score}</td>
-                              <td className="px-4 py-3 text-[#2c394f]">{item.name}</td>
-                              <td className="px-4 py-3 text-[#65738a]">{item.difference}</td>
+                              <td className="px-4 py-3 font-semibold text-ink">{medal}</td>
+                              <td className="px-4 py-3 font-semibold text-brand">{item.score}</td>
+                              <td className="px-4 py-3 text-ink">{item.name}</td>
+                              <td className="px-4 py-3 text-sub">{item.difference}</td>
                             </tr>
                           );
                         })}
@@ -482,12 +482,12 @@ export default function DashboardPage() {
                   </div>
 
                   {data.comparison.recommendation && (
-                    <p className="mt-3 text-sm font-medium text-[#1d7f5c]">{data.comparison.recommendation}</p>
+                    <p className="mt-3 text-sm font-medium text-good">{data.comparison.recommendation}</p>
                   )}
                   {data.comparison.pairwise.length > 0 && (
                     <ul className="mt-2 list-none space-y-1">
                       {data.comparison.pairwise.map((p, i) => (
-                        <li key={i} className="text-xs text-[#65738a]">• {p}</li>
+                        <li key={i} className="text-xs text-sub">• {p}</li>
                       ))}
                     </ul>
                   )}
@@ -498,43 +498,43 @@ export default function DashboardPage() {
             <div className="mt-6 grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_310px]">
               <div className="space-y-6">
                 <Section eyebrow="综合结论" title="核心判定" icon={TargetIcon}>
-                  <p className="mt-5 text-sm leading-7 text-[#435168]">{analysis.summary}</p>
+                  <p className="mt-5 text-sm leading-7 text-body">{analysis.summary}</p>
                 </Section>
 
                 {/* Agent 校验：折叠徽章，结论区之后按需展开 */}
                 {analysis.agent_validation && analysis.agent_validation.issues.length > 0 && (
-                  <section id="sec-validation" className="scroll-mt-6 rounded-md border border-[#e8dfd0] bg-[#fffcf5]">
+                  <section id="sec-validation" className="scroll-mt-6 rounded-md border border-[#e8dfd0] bg-warn-soft">
                     <button
                       type="button"
                       onClick={() => setShowAgentValidation((visible) => !visible)}
-                      className="flex w-full items-center gap-2 px-4 py-3 text-left text-xs font-medium text-[#8b6514]"
+                      className="flex w-full items-center gap-2 px-4 py-3 text-left text-xs font-medium text-warn"
                     >
                       <ShieldAlertIcon className="size-3.5 shrink-0" />
                       <span>
                         Agent 校验：已核查 {analysis.agent_validation.checked_rules} 项要求，检出 {analysis.agent_validation.issues.length} 个问题
                         {analysis.agent_validation.revised ? '并已修正' : ''}
                       </span>
-                      <span className="ml-auto shrink-0 text-[#b08d3e]">{showAgentValidation ? '收起 ▴' : '详情 ▾'}</span>
+                      <span className="ml-auto shrink-0 text-warn">{showAgentValidation ? '收起 ▴' : '详情 ▾'}</span>
                     </button>
                     {showAgentValidation && (
                       <div className="border-t border-[#eee3cd] px-4 pb-4 pt-3">
-                        <div className="overflow-x-auto rounded-md border border-[#e5e9ef]">
+                        <div className="overflow-x-auto rounded-md border border-line-soft">
                           <table className="w-full border-collapse text-sm">
                             <thead>
-                              <tr className="bg-[#f7f8fa]">
-                                <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">问题类型</th>
-                                <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">问题</th>
-                                <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">修正</th>
+                              <tr className="bg-mist">
+                                <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">问题类型</th>
+                                <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">问题</th>
+                                <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">修正</th>
                               </tr>
                             </thead>
                             <tbody>
                               {analysis.agent_validation.issues.map((issue, i) => (
-                                <tr key={i} className="border-b border-[#e5e9ef] last:border-b-0">
-                                  <td className="px-4 py-2 text-xs text-[#2c394f]">
-                                    <span className="inline-block rounded bg-[#fef6e6] px-1.5 py-0.5 text-[10px] text-[#b0761a]">{AGENT_RULE_LABELS[issue.rule] || ''}</span>
+                                <tr key={i} className="border-b border-line-soft last:border-b-0">
+                                  <td className="px-4 py-2 text-xs text-ink">
+                                    <span className="inline-block rounded bg-warn-soft px-1.5 py-0.5 text-[10px] text-warn">{AGENT_RULE_LABELS[issue.rule] || ''}</span>
                                   </td>
-                                  <td className="px-4 py-2 text-xs text-[#b23b4e]">{issue.problem}</td>
-                                  <td className="px-4 py-2 text-xs text-[#1d7f5c]">{issue.fix}</td>
+                                  <td className="px-4 py-2 text-xs text-bad">{issue.problem}</td>
+                                  <td className="px-4 py-2 text-xs text-good">{issue.fix}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -560,22 +560,22 @@ export default function DashboardPage() {
                   {analysis.education_history && analysis.education_history.length > 0 ? (
                     <div className="mt-2 flex flex-col gap-3">
                       {analysis.education_history.map((edu, i) => (
-                        <div key={i} className="rounded-md border border-[#e5e9ef] bg-[#fbfcfe] p-4">
-                          <div className="flex items-center gap-2 text-xs font-semibold text-[#3e6fd3]">
-                            <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-[#eaf0fb] text-[10px]">{i + 1}</span>
+                        <div key={i} className="rounded-md border border-line-soft bg-mist p-4">
+                          <div className="flex items-center gap-2 text-xs font-semibold text-brand">
+                            <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-brand-soft text-[10px]">{i + 1}</span>
                             <span>{edu.degree}</span>
-                            <span className="ml-auto text-[#65738a] font-normal">毕业时间：{edu.graduation_year}</span>
+                            <span className="ml-auto text-sub font-normal">毕业时间：{edu.graduation_year}</span>
                           </div>
                           <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1.5">
-                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-[#8190a4]">院校</dt><dd className="text-sm text-[#2c394f]">{edu.school_name}</dd></div>
-                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-[#8190a4]">层次</dt><dd className="text-sm text-[#2c394f]">{edu.school_tier}</dd></div>
-                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-[#8190a4]">专业</dt><dd className="text-sm text-[#2c394f]">{edu.major}</dd></div>
+                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">院校</dt><dd className="text-sm text-ink">{edu.school_name}</dd></div>
+                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">层次</dt><dd className="text-sm text-ink">{edu.school_tier}</dd></div>
+                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">专业</dt><dd className="text-sm text-ink">{edu.major}</dd></div>
                           </div>
                         </div>
                       ))}
                     </div>
                   ) : (
-                    <p className="mt-2 text-sm text-[#8190a4]">暂无教育经历信息。</p>
+                    <p className="mt-2 text-sm text-sub">暂无教育经历信息。</p>
                   )}
                 </Section>
 
@@ -600,27 +600,27 @@ export default function DashboardPage() {
                 <div id="sec-highlights" className="grid scroll-mt-6 gap-6 lg:grid-cols-2">
                   <Section eyebrow="优势证据" title="匹配亮点" icon={CheckCircle2Icon}>
                     <InsightList items={analysis.strengths} />
-                    <h3 className="mt-6 border-t border-[#e6eaf0] pt-5 text-sm font-semibold text-[#29364c]">项目匹配点</h3>
+                    <h3 className="mt-6 border-t border-line-soft pt-5 text-sm font-semibold text-ink">项目匹配点</h3>
                     <InsightList items={analysis.skill_match.project_match_points} />
                   </Section>
                   <Section eyebrow="缺口预警" title="短板与风险" icon={ShieldAlertIcon}>
-                    <h3 className="mt-5 text-sm font-semibold text-[#9a6b18]">短板不足</h3>
+                    <h3 className="mt-5 text-sm font-semibold text-warn">短板不足</h3>
                     <InsightList items={analysis.weaknesses} />
-                    <h3 className="mt-6 border-t border-[#e6eaf0] pt-5 text-sm font-semibold text-[#9a4338]">招聘风险预警</h3>
+                    <h3 className="mt-6 border-t border-line-soft pt-5 text-sm font-semibold text-bad">招聘风险预警</h3>
                     <InsightList items={analysis.risk_points} />
                   </Section>
                 </div>
 
                 <div className="grid gap-6 lg:grid-cols-2">
                   <Section eyebrow="能力核对" title="专业技能匹配" icon={BarChart3Icon}>
-                    <h3 className="mt-5 text-sm font-semibold text-[#29364c]">硬技能与工具</h3>
+                    <h3 className="mt-5 text-sm font-semibold text-ink">硬技能与工具</h3>
                     <InsightList items={analysis.skill_match.hard_skills} />
-                    <h3 className="mt-6 border-t border-[#e6eaf0] pt-5 text-sm font-semibold text-[#29364c]">软实力</h3>
+                    <h3 className="mt-6 border-t border-line-soft pt-5 text-sm font-semibold text-ink">软实力</h3>
                     <InsightList items={analysis.skill_match.soft_skills} />
                   </Section>
                   <Section eyebrow="加分信号" title="竞争力加分项" icon={SparklesIcon}>
                     <InsightList items={analysis.bonus_items} />
-                    <h3 className="mt-6 border-t border-[#e6eaf0] pt-5 text-sm font-semibold text-[#29364c]">证书资质</h3>
+                    <h3 className="mt-6 border-t border-line-soft pt-5 text-sm font-semibold text-ink">证书资质</h3>
                     <InsightList items={analysis.certificates} />
                   </Section>
                 </div>
@@ -636,21 +636,21 @@ export default function DashboardPage() {
               </div>
 
               <aside className="space-y-5 xl:sticky xl:top-6">
-                <section className="rounded-md border border-[#dce2eb] bg-white p-5">
-                  <p className="text-xs font-semibold uppercase text-[#8390a2]">招聘决策</p>
+                <section className="rounded-md border border-line bg-white p-5">
+                  <p className="text-xs font-semibold uppercase text-sub">招聘决策</p>
                   <div className={`mt-4 inline-flex rounded-full px-3 py-1.5 text-sm font-semibold ${recommendationClass}`}>{analysis.recruitment_recommendation}</div>
-                  <p className="mt-4 text-3xl font-semibold text-[#17243a]">{analysis.final_score}<span className="ml-1 text-sm font-normal text-[#8b96a7]">/ 100</span></p>
-                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-[#edf0f4]"><div className="h-full rounded-full bg-[#668de8]" style={{ width: `${Math.max(0, Math.min(100, analysis.final_score))}%` }} /></div>
-                  <dl className="mt-5 divide-y divide-[#e7ebf0] text-sm">
-                    <div className="flex justify-between gap-3 py-3"><dt className="text-[#7e8b9e]">适配标签</dt><dd className="font-medium text-[#2b384e]">{analysis.fit_tag}</dd></div>
-                    <div className="flex justify-between gap-3 py-3"><dt className="text-[#7e8b9e]">候选人</dt><dd className="max-w-36 truncate font-medium text-[#2b384e]">{candidateName}</dd></div>
+                  <p className="mt-4 text-3xl font-semibold text-ink">{analysis.final_score}<span className="ml-1 text-sm font-normal text-sub">/ 100</span></p>
+                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-mist"><div className="h-full rounded-full bg-brand" style={{ width: `${Math.max(0, Math.min(100, analysis.final_score))}%` }} /></div>
+                  <dl className="mt-5 divide-y divide-line-soft text-sm">
+                    <div className="flex justify-between gap-3 py-3"><dt className="text-sub">适配标签</dt><dd className="font-medium text-ink">{analysis.fit_tag}</dd></div>
+                    <div className="flex justify-between gap-3 py-3"><dt className="text-sub">候选人</dt><dd className="max-w-36 truncate font-medium text-ink">{candidateName}</dd></div>
                   </dl>
                   <button
                     type="button"
                     onClick={() => document.getElementById('resume-review-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-                    className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-[#d5dde9] bg-white px-3 py-2 text-xs font-medium text-[#334158] hover:bg-[#f3f6fa]"
+                    className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-line-soft bg-white px-3 py-2 text-xs font-medium text-ink hover:bg-soft"
                   >
-                    <HighlighterIcon className="size-3.5 text-[#3e6fd3]" />
+                    <HighlighterIcon className="size-3.5 text-brand" />
                     简历原文标记 ↓
                   </button>
                 </section>
@@ -669,7 +669,7 @@ export default function DashboardPage() {
             </div>
           </>
         ) : (
-          <section className="mt-6 rounded-md border border-[#dce2eb] bg-white p-5 sm:p-8">
+          <section className="mt-6 rounded-md border border-line bg-white p-5 sm:p-8">
             <MarkdownReport content={data.analysis_result || '暂无深度优化内容。'} />
           </section>
         )}

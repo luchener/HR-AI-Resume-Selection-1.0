@@ -8,23 +8,6 @@ import { fetchResumeReviewMarkers, type ResumeReviewData } from '@/lib/api/scree
 
 export const AGENT_RULE_LABELS = ['', '论断超出简历依据', '评分依据不可追溯', '加分项与岗位无关', '缺失项标注"未提供"', '风险与未体现混淆'];
 
-const BREAKDOWN_LABELS: Array<[string, string]> = [
-  ['hard_requirements', '硬性门槛'],
-  ['responsibility_overlap', '职责重合'],
-  ['skills_projects', '技能项目'],
-  ['industry_background', '行业背景'],
-  ['evidence_bonus', '证据加分'],
-];
-
-// 与后端 _validate_report 的 limits 保持一致：分项固定上限，合计须等于 job_fit_score
-const BREAKDOWN_LIMITS: Record<string, number> = {
-  hard_requirements: 25,
-  responsibility_overlap: 25,
-  skills_projects: 25,
-  industry_background: 15,
-  evidence_bonus: 10,
-};
-
 const MARKER_LABELS: Record<string, string> = {
   strength: '匹配亮点',
   match: '岗位匹配',
@@ -64,7 +47,6 @@ li{margin-bottom:3px}
 p.para{margin:4px 0;font-size:13px;line-height:1.8}
 td.lab{background:#f7f8fa;color:#66758b;font-size:11px;width:90px}
 td.val{text-align:center;width:25%}
-td .dim{color:#8190a4;font-size:10px;font-weight:normal;margin-left:2px}
 b.green,.green{color:#1d7f5c}
 .blue{color:#3e6fd3}
 .purple{color:#995c87}
@@ -95,7 +77,6 @@ function buildReportInner(opts: {
   <span>招聘建议：${esc(a.recruitment_recommendation)} · ${esc(a.fit_tag)}</span>
 </div>`);
 
-  const breakdown = (a.score_breakdown || {}) as Record<string, number>;
   out.push(`
 <h2>评估总览</h2>
 <table>
@@ -107,15 +88,6 @@ function buildReportInner(opts: {
     <td class="val"><b class="blue">${esc(a.job_fit_percentage)}%</b><br><span class="sub">基础分 ${esc(a.job_fit_score)}/100</span></td>
     <td class="val"><b class="purple">${esc(a.ai_risk_level)}</b><br><span class="sub">${esc(a.ai_risk_label)} · 扣 ${esc(a.ai_deduction)} 分</span></td>
     <td class="val"><b>${esc(a.recruitment_recommendation)}</b><br><span class="sub">${esc(a.fit_tag)}</span></td>
-  </tr>
-</table>
-<table>
-  <tr><th colspan="${BREAKDOWN_LABELS.length}">评分构成</th></tr>
-  <tr>${BREAKDOWN_LABELS.map(([, label]) => `<td class="lab">${label}</td>`).join('')}</tr>
-  <tr>${BREAKDOWN_LABELS.map(([key]) => `<td class="val"><b class="blue">${esc(breakdown[key] ?? 0)}</b><span class="dim">/ ${BREAKDOWN_LIMITS[key] ?? 0}</span></td>`).join('')}</tr>
-  <tr>
-    <td class="lab">合计</td>
-    <td class="val" colspan="${BREAKDOWN_LABELS.length - 1}"><b class="blue">${esc(a.job_fit_score ?? 0)}</b><span class="dim">/ 100</span></td>
   </tr>
 </table>`);
 

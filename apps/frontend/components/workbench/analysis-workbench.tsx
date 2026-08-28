@@ -106,29 +106,29 @@ export default function AnalysisWorkbench() {
   return (
     <AppShell active="home">
       <div className="mx-auto w-full max-w-[1480px] px-5 py-8 sm:px-8 lg:px-10 lg:py-10 xl:px-14">
-        <header className="border-b border-[#dce2eb] pb-6">
-          <h1 className="text-2xl font-semibold text-[#152137] sm:text-3xl">AI 简历智选 · 全维度量化人才评估</h1>
-          <p className="mt-2 text-sm leading-6 text-[#6d7b91]">上传简历并粘贴岗位描述，生成可直接用于招聘决策的标准化分析报告</p>
+        <header className="border-b border-line pb-6">
+          <h1 className="text-2xl font-semibold text-ink sm:text-3xl">AI 简历智选 · 全维度量化人才评估</h1>
+          <p className="mt-2 text-sm leading-6 text-sub">上传简历并粘贴岗位描述，生成可直接用于招聘决策的标准化分析报告</p>
         </header>
 
-        <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border border-[#dce2eb] bg-white px-5 py-3">
-          <span className="text-xs font-semibold text-[#8290a3]">分析流程</span>
+        <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border border-line bg-white px-5 py-3">
+          <span className="text-xs font-semibold text-sub">分析流程</span>
           {['解析硬性门槛', '比对履历证据', '生成招聘建议'].map((label, index) => (
             <span key={label} className="flex items-center gap-2">
-              <span className="flex size-5 items-center justify-center rounded-full bg-[#eaf0fb] text-[10px] font-semibold text-[#3e6fd3]">{index + 1}</span>
-              <span className="text-xs text-[#435168]">{label}</span>
+              <span className="flex size-5 items-center justify-center rounded-full bg-brand-soft text-[10px] font-semibold text-brand">{index + 1}</span>
+              <span className="text-xs text-body">{label}</span>
             </span>
           ))}
         </div>
 
         <div className="mt-5 grid gap-6 xl:grid-cols-[minmax(340px,0.82fr)_minmax(500px,1.18fr)]">
-          <section className="flex min-h-[550px] flex-col rounded-md border border-[#dce2eb] bg-white p-5 sm:p-7">
+          <section className="flex min-h-[550px] flex-col rounded-md border border-line bg-white p-5 sm:p-7">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-semibold uppercase text-[#5273c6]">01 · Resume files</p>
-                <h2 className="mt-2 text-xl font-semibold text-[#18243a]">添加候选人简历</h2>
+                <p className="text-xs font-semibold uppercase text-brand">01 · Resume files</p>
+                <h2 className="mt-2 text-xl font-semibold text-ink">添加候选人简历</h2>
               </div>
-              <span className="rounded-full bg-[#eef3ff] px-3 py-1 text-xs font-medium text-[#4268c6]">{files.length}/{MAX_FILES}</span>
+              <span className="rounded-full bg-brand-soft px-3 py-1 text-xs font-medium text-brand">{files.length}/{MAX_FILES}</span>
             </div>
 
             <div
@@ -142,30 +142,30 @@ export default function AnalysisWorkbench() {
               onDragOver={(event) => event.preventDefault()}
               onDragLeave={() => setIsDragging(false)}
               onDrop={handleDrop}
-              className={`mt-6 flex min-h-64 cursor-pointer flex-col items-center justify-center rounded-md border border-dashed px-6 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#789cf2] ${isDragging ? 'border-[#4774db] bg-[#eef3ff]' : 'border-[#cfd7e4] bg-[#f8fafd] hover:border-[#7999df] hover:bg-[#f3f6fc]'} ${busy ? 'pointer-events-none opacity-60' : ''}`}
+              className={`mt-6 flex min-h-64 cursor-pointer flex-col items-center justify-center rounded-md border border-dashed px-6 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand ${isDragging ? 'border-brand bg-brand-soft' : 'border-line bg-mist hover:border-brand hover:bg-soft'} ${busy ? 'pointer-events-none opacity-60' : ''}`}
             >
               <input ref={inputRef} type="file" accept=".pdf,.docx" multiple className="hidden" onChange={handleFileInput} />
-              <span className="flex size-14 items-center justify-center rounded-md bg-[#17243b] text-white">
+              <span className="flex size-14 items-center justify-center rounded-md bg-brand-deep text-white">
                 <UploadCloudIcon className="size-6" aria-hidden="true" />
               </span>
-              <p className="mt-7 text-lg font-semibold text-[#1a263b]">拖放简历到这里</p>
-              <p className="mt-2 text-sm text-[#7a879a]">PDF / DOCX · 每份最大 30 MB</p>
-              <button type="button" className="mt-5 rounded-md border border-[#d9e0e9] bg-white px-4 py-2 text-sm font-medium text-[#26344b]">选择文件</button>
+              <p className="mt-7 text-lg font-semibold text-ink">拖放简历到这里</p>
+              <p className="mt-2 text-sm text-sub">PDF / DOCX · 每份最大 30 MB</p>
+              <button type="button" className="mt-5 rounded-md border border-line-soft bg-white px-4 py-2 text-sm font-medium text-ink">选择文件</button>
             </div>
 
             <div className="mt-5 space-y-2" aria-live="polite">
               {files.length === 0 ? (
-                <div className="flex items-center gap-3 rounded-md border border-[#edf0f4] px-4 py-3 text-sm text-[#7b8798]">
-                  <ShieldCheckIcon className="size-4 text-[#2b936b]" /> 文件仅用于本次招聘分析
+                <div className="flex items-center gap-3 rounded-md border border-line-soft px-4 py-3 text-sm text-sub">
+                  <ShieldCheckIcon className="size-4 text-good" /> 文件仅用于本次招聘分析
                 </div>
               ) : files.map((file, index) => (
-                <div key={`${file.name}-${file.lastModified}`} className="flex items-center gap-3 rounded-md border border-[#e1e6ed] px-3 py-3">
-                  <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-[#eef3ff] text-[#4d72cf]"><FileTextIcon className="size-4" /></span>
+                <div key={`${file.name}-${file.lastModified}`} className="flex items-center gap-3 rounded-md border border-line-soft px-3 py-3">
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-brand-soft text-brand"><FileTextIcon className="size-4" /></span>
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-[#253249]">{file.name}</p>
-                    <p className="mt-0.5 text-xs text-[#8793a4]">候选人 {index + 1} · {formatSize(file.size)}</p>
+                    <p className="truncate text-sm font-medium text-ink">{file.name}</p>
+                    <p className="mt-0.5 text-xs text-sub">候选人 {index + 1} · {formatSize(file.size)}</p>
                   </div>
-                  <button type="button" disabled={busy} onClick={(event) => { event.stopPropagation(); setFiles((current) => current.filter((item) => item !== file)); }} className="flex size-8 items-center justify-center rounded-md text-[#8290a3] hover:bg-[#f1f3f6] hover:text-[#253249]" aria-label={`移除 ${file.name}`}>
+                  <button type="button" disabled={busy} onClick={(event) => { event.stopPropagation(); setFiles((current) => current.filter((item) => item !== file)); }} className="flex size-8 items-center justify-center rounded-md text-sub hover:bg-mist hover:text-ink" aria-label={`移除 ${file.name}`}>
                     <XIcon className="size-4" />
                   </button>
                 </div>
@@ -173,36 +173,36 @@ export default function AnalysisWorkbench() {
             </div>
           </section>
 
-          <section className="flex min-h-[550px] flex-col rounded-md border border-[#dce2eb] bg-white p-5 sm:p-7">
+          <section className="flex min-h-[550px] flex-col rounded-md border border-line bg-white p-5 sm:p-7">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-semibold uppercase text-[#5273c6]">02 · Job description</p>
-                <h2 className="mt-2 text-xl font-semibold text-[#18243a]">输入目标岗位描述</h2>
+                <p className="text-xs font-semibold uppercase text-brand">02 · Job description</p>
+                <h2 className="mt-2 text-xl font-semibold text-ink">输入目标岗位描述</h2>
               </div>
-              <BriefcaseBusinessIcon className="size-5 text-[#6f7e92]" />
+              <BriefcaseBusinessIcon className="size-5 text-sub" />
             </div>
 
-            <label htmlFor="job-description" className="mt-6 text-sm font-medium text-[#344158]">岗位职责与任职要求</label>
+            <label htmlFor="job-description" className="mt-6 text-sm font-medium text-ink">岗位职责与任职要求</label>
             <textarea
               id="job-description"
               value={jobDescription}
               onChange={(event) => setJobDescription(event.target.value)}
               disabled={busy}
               placeholder="粘贴完整 JD，包括岗位职责、经验年限、技能要求、学历与地点等信息..."
-              className="mt-2 min-h-56 w-full resize-y rounded-md border border-[#cfd7e2] bg-[#fbfcfe] p-4 text-sm leading-6 text-[#253249] outline-none transition focus:border-[#6488df] focus:ring-2 focus:ring-[#dce7ff] disabled:opacity-60"
+              className="mt-2 min-h-56 w-full resize-y rounded-md border border-line bg-mist p-4 text-sm leading-6 text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand disabled:opacity-60"
             />
-            <div className="mt-2 flex items-center justify-between text-xs text-[#8a96a7]">
+            <div className="mt-2 flex items-center justify-between text-xs text-sub">
               <span>{jobDescription.trim().length < 20 ? '至少输入 20 个字符' : '岗位信息已就绪'}</span>
               <span>{jobDescription.length} 字</span>
             </div>
 
-            <div className="mt-auto border-t border-[#e5e9ef] pt-5">
-              {error && <div role="alert" className="mb-4 rounded-md border border-[#efb5ad] bg-[#fff4f2] px-4 py-3 text-sm text-[#9d3e32]">{error}</div>}
+            <div className="mt-auto border-t border-line-soft pt-5">
+              {error && <div role="alert" className="mb-4 rounded-md border border-[#efb5ad] bg-bad-soft px-4 py-3 text-sm text-bad">{error}</div>}
               <button
                 type="button"
                 disabled={!canAnalyze}
                 onClick={handleAnalyze}
-                className="flex h-12 w-full items-center justify-center gap-2 rounded-md bg-[#1b2a45] px-5 text-sm font-semibold text-white transition-colors hover:bg-[#263a5e] disabled:cursor-not-allowed disabled:bg-[#b8c0cc]"
+                className="flex h-12 w-full items-center justify-center gap-2 rounded-md bg-brand-deep px-5 text-sm font-semibold text-white transition-colors hover:bg-[#263a5e] disabled:cursor-not-allowed disabled:bg-[#b8c0cc]"
               >
                 {busy ? <LoaderCircleIcon className="size-4 animate-spin" /> : <SparklesIcon className="size-4" />}
                 {phaseLabel}
@@ -217,17 +217,17 @@ export default function AnalysisWorkbench() {
                     const label = stepPhase === 'uploading' ? '读取简历' : stepPhase === 'job' ? '解析岗位' : '生成分析';
                     return (
                       <li key={stepPhase} className="flex min-w-0 flex-1 items-center gap-2">
-                        <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${done ? 'bg-[#e6f7ee] text-[#1d7f5c]' : active ? 'bg-[#eaf0fb] text-[#3e6fd3]' : 'bg-[#f1f3f6] text-[#8290a3]'}`}>
+                        <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${done ? 'bg-good-soft text-good' : active ? 'bg-brand-soft text-brand' : 'bg-mist text-sub'}`}>
                           {done ? <CheckIcon className="size-3" /> : active ? <LoaderCircleIcon className="size-3 animate-spin" /> : index + 1}
                         </span>
-                        <span className={`truncate text-xs ${active ? 'font-medium text-[#2c394f]' : 'text-[#8290a3]'}`}>{label}</span>
+                        <span className={`truncate text-xs ${active ? 'font-medium text-ink' : 'text-sub'}`}>{label}</span>
                       </li>
                     );
                   })}
                 </ol>
               ) : (
-                <p className="mt-3 flex items-center justify-center gap-2 text-xs text-[#7e8a9d]">
-                  <CheckIcon className="size-3.5 text-[#2b936b]" /> 分析将覆盖履历、技能、项目、稳定性与招聘风险
+                <p className="mt-3 flex items-center justify-center gap-2 text-xs text-sub">
+                  <CheckIcon className="size-3.5 text-good" /> 分析将覆盖履历、技能、项目、稳定性与招聘风险
                 </p>
               )}
             </div>

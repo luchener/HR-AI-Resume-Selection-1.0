@@ -68,7 +68,7 @@ export default function AppShell({ active, children }: AppShellProps) {
 
   return (
     <div className="min-h-screen bg-[#f3f6fa] lg:grid lg:grid-cols-[272px_minmax(0,1fr)]">
-      <aside className="relative overflow-hidden bg-[#111c31] px-5 py-5 text-white lg:sticky lg:top-0 lg:flex lg:h-screen lg:flex-col lg:px-7 lg:py-8">
+      <aside className="relative overflow-hidden bg-navy px-5 py-5 text-white lg:sticky lg:top-0 lg:flex lg:h-screen lg:flex-col lg:px-7 lg:py-8">
         <div className="flex items-center gap-3">
           <Image
             src="/brand/resume-screening-logo.svg"
@@ -84,12 +84,7 @@ export default function AppShell({ active, children }: AppShellProps) {
           </div>
         </div>
 
-        <div className="mt-8 hidden lg:block">
-          <p className="text-xs font-semibold uppercase text-[#78a0ff]">Screening flow</p>
-          <p className="mt-3 text-2xl font-semibold leading-9 text-white">💼</p>
-        </div>
-
-        <nav className="mt-6 grid grid-cols-2 gap-2 lg:mt-12 lg:grid-cols-1" aria-label="页面导航">
+        <nav className="mt-8 grid grid-cols-2 gap-2 lg:grid-cols-1" aria-label="页面导航">
           {navigation.map((item, index) => {
             const Icon = item.icon;
             const isActive = item.id === active;
@@ -118,10 +113,9 @@ export default function AppShell({ active, children }: AppShellProps) {
 
         <div className="mt-auto space-y-4">
           <div className="hidden rounded-md border border-white/10 bg-white/5 p-4 lg:block">
-            <div className="flex items-center gap-2 text-xs font-medium">
-              <span className="size-2 rounded-full bg-emerald-400" />
-              ©Ai简历智选 1.0<br />Develop By WickLu<br />Mail：luchenstudio@163.com
-            </div>
+            <p className="text-xs font-medium text-slate-200">AI 简历智选 1.0</p>
+            <p className="mt-1 text-[11px] leading-5 text-slate-500">Develop By WickLu</p>
+            <p className="text-[11px] leading-5 text-slate-500">luchenstudio@163.com</p>
           </div>
           <div className="flex items-center gap-3 rounded-md border border-white/10 bg-white/5 px-3 py-3">
             <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#78a0ff] text-xs font-bold text-[#11203b]">
@@ -226,7 +220,7 @@ export default function AppShell({ active, children }: AppShellProps) {
                 type="button"
                 disabled={pwdLoading}
                 onClick={handleChangePassword}
-                className="w-full rounded-md bg-[#111c31] py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#1c2c4d] disabled:cursor-not-allowed disabled:opacity-60"
+                className="w-full rounded-md bg-navy py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#1c2c4d] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {pwdLoading ? '提交中…' : '确认修改'}
               </button>

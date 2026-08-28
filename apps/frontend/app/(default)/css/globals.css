@@ -2,6 +2,29 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* 品牌语义色令牌：两个核心页（工作台/报告页）统一从这里取色。
+   sub 在白底对比度 4.9:1（WCAG AA）；改品牌色只动这里。 */
+@theme {
+  --color-ink: #1b273d;        /* 标题/主文字 */
+  --color-body: #435168;       /* 正文 */
+  --color-sub: #5e7190;        /* 次要文字（过 AA） */
+  --color-line: #dce2eb;       /* 卡片主边框 */
+  --color-line-soft: #e5e9ef;  /* 内部分隔线/次边框 */
+  --color-soft: #f3f6fa;       /* 悬停底/页面底 */
+  --color-mist: #f7f8fa;       /* 表头/浅灰底 */
+  --color-brand: #3e6fd3;      /* 品牌蓝 */
+  --color-brand-soft: #eaf0fb; /* 品牌蓝浅底 */
+  --color-brand-deep: #1b2a45; /* 主按钮深蓝 */
+  --color-navy: #111c31;       /* 侧栏底色 */
+  --color-good: #1d7f5c;
+  --color-good-soft: #e6f7ee;
+  --color-bad: #b23b4e;
+  --color-bad-soft: #fff4f2;
+  --color-warn: #8b6514;
+  --color-warn-soft: #fffcf5;
+  --color-violet: #995c87;
+}
+
 /* In your global CSS file (e.g., globals.css) */
 @tailwind base;
 @tailwind components;
