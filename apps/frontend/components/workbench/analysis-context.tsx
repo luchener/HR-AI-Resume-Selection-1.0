@@ -16,6 +16,13 @@ export interface HrAnalysis {
   fit_grade: string;
   job_fit_score: number;
   job_fit_percentage: number;
+  score_breakdown?: {
+    hard_requirements: number;
+    responsibility_overlap: number;
+    skills_projects: number;
+    industry_background: number;
+    evidence_bonus: number;
+  };
   ai_risk: 'none' | 'light' | 'medium' | 'high';
   ai_risk_level: string;
   ai_risk_label: string;

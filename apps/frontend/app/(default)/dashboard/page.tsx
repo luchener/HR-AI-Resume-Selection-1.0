@@ -12,6 +12,7 @@ import {
   Clock3Icon,
   FileSearch2Icon,
   GraduationCapIcon,
+  HighlighterIcon,
   LoaderCircleIcon,
   PencilIcon,
   RefreshCwIcon,
@@ -24,6 +25,7 @@ import {
 import AppShell from '@/components/workbench/app-shell';
 import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analysis-context';
 import ResumeReviewPanel from '@/components/workbench/resume-review-panel';
+import ReportExportCenter, { AGENT_RULE_LABELS } from '@/components/workbench/report-export';
 import { analyzeResumes, fetchImprovedMarkdown, improveResumeStream } from '@/lib/api/screening';
 
 type Action = 'reanalyze' | 'improve' | 'editor' | null;
@@ -162,6 +164,7 @@ export default function DashboardPage() {
   const [action, setAction] = useState<Action>(null);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
+  const [showAgentValidation, setShowAgentValidation] = useState(false);
 
   if (!isHydrated) {
     return (
@@ -348,6 +351,12 @@ export default function DashboardPage() {
               ))}
             </div>
 
+            {/* 统一导出中心：整份报告 × 图片/PDF/Word */}
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#dce2eb] bg-white px-4 py-2.5">
+              <p className="text-xs text-[#8190a4]">导出整份报告（含排名、Agent 校验、标记要点）</p>
+              <ReportExportCenter key={data.resume_id} analysis={analysis} candidateName={candidateName} comparison={data.comparison} resumeId={data.resume_id} />
+            </div>
+
             {/* 候选人排名 */}
             {data.comparison && (
               <Section eyebrow="Candidate ranking" title="候选人排名" icon={TrophyIcon}>
@@ -366,8 +375,16 @@ export default function DashboardPage() {
                         {data.comparison.ranking.map((item) => {
                           const medals = ['🥇', '🥈', '🥉'];
                           const medal = item.rank <= 3 ? medals[item.rank - 1] : `${item.rank}`;
+                          const target = batchAnalyses.find(
+                            (batch) => (batch.candidate_name || batch.hr_analysis?.candidate_name) === item.name,
+                          );
                           return (
-                            <tr key={item.rank} className="border-b border-[#e5e9ef] last:border-b-0">
+                            <tr
+                              key={item.rank}
+                              onClick={() => target && selectCandidate(target.resume_id)}
+                              className={`border-b border-[#e5e9ef] last:border-b-0 ${target ? 'cursor-pointer transition-colors hover:bg-[#f3f6fa]' : ''}`}
+                              title={target ? `点击切换到 ${item.name}` : undefined}
+                            >
                               <td className="px-4 py-3 font-semibold text-[#2c394f]">{medal}</td>
                               <td className="px-4 py-3 font-semibold text-[#3e6fd3]">{item.score}</td>
                               <td className="px-4 py-3 text-[#2c394f]">{item.name}</td>
@@ -393,50 +410,55 @@ export default function DashboardPage() {
               </Section>
             )}
 
-            {/* Agent 校验 */}
-            {analysis.agent_validation && analysis.agent_validation.issues.length > 0 && (
-              <Section eyebrow="Agent validation" title="Agent 校验" icon={ShieldAlertIcon}>
-                <div className="mt-3">
-                  <p className="mb-3 text-xs text-[#8190a4]">
-                    已校验 {analysis.agent_validation.checked_rules} 项要求，
-                    {analysis.agent_validation.passed
-                      ? '全部通过'
-                      : `检出 ${analysis.agent_validation.issues.length} 个问题${analysis.agent_validation.revised ? '并已修正' : ''}`}
-                  </p>
-                  <div className="overflow-x-auto rounded-md border border-[#e5e9ef]">
-                    <table className="w-full border-collapse text-sm">
-                      <thead>
-                        <tr className="bg-[#f7f8fa]">
-                          <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">JD 要求</th>
-                          <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">问题</th>
-                          <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">修正</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {analysis.agent_validation.issues.map((issue, i) => {
-                          const ruleLabels = ['', '论断超出简历依据', '评分依据不可追溯', '加分项与岗位无关', '缺失项标注"未提供"', '风险与未体现混淆'];
-                          return (
-                            <tr key={i} className="border-b border-[#e5e9ef] last:border-b-0">
-                              <td className="px-4 py-2 text-xs text-[#2c394f]">
-                                <span className="inline-block rounded bg-[#fef6e6] px-1.5 py-0.5 text-[10px] text-[#b0761a]">问题类型：{ruleLabels[issue.rule] || ''}</span>
-                              </td>
-                              <td className="px-4 py-2 text-xs text-[#b23b4e]">{issue.problem}</td>
-                              <td className="px-4 py-2 text-xs text-[#1d7f5c]">{issue.fix}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </Section>
-            )}
-
             <div className="mt-6 grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_310px]">
               <div className="space-y-6">
                 <Section eyebrow="Decision summary" title="核心判定" icon={TargetIcon}>
                   <p className="mt-5 text-sm leading-7 text-[#435168]">{analysis.summary}</p>
                 </Section>
+
+                {/* Agent 校验：折叠徽章，结论区之后按需展开 */}
+                {analysis.agent_validation && analysis.agent_validation.issues.length > 0 && (
+                  <section className="rounded-md border border-[#e8dfd0] bg-[#fffcf5]">
+                    <button
+                      type="button"
+                      onClick={() => setShowAgentValidation((visible) => !visible)}
+                      className="flex w-full items-center gap-2 px-4 py-3 text-left text-xs font-medium text-[#8b6514]"
+                    >
+                      <ShieldAlertIcon className="size-3.5 shrink-0" />
+                      <span>
+                        Agent 校验：已核查 {analysis.agent_validation.checked_rules} 项要求，检出 {analysis.agent_validation.issues.length} 个问题
+                        {analysis.agent_validation.revised ? '并已修正' : ''}
+                      </span>
+                      <span className="ml-auto shrink-0 text-[#b08d3e]">{showAgentValidation ? '收起 ▴' : '详情 ▾'}</span>
+                    </button>
+                    {showAgentValidation && (
+                      <div className="border-t border-[#eee3cd] px-4 pb-4 pt-3">
+                        <div className="overflow-x-auto rounded-md border border-[#e5e9ef]">
+                          <table className="w-full border-collapse text-sm">
+                            <thead>
+                              <tr className="bg-[#f7f8fa]">
+                                <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">问题类型</th>
+                                <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">问题</th>
+                                <th className="border-b border-[#e5e9ef] px-4 py-2 text-left text-xs font-semibold text-[#65738a]">修正</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {analysis.agent_validation.issues.map((issue, i) => (
+                                <tr key={i} className="border-b border-[#e5e9ef] last:border-b-0">
+                                  <td className="px-4 py-2 text-xs text-[#2c394f]">
+                                    <span className="inline-block rounded bg-[#fef6e6] px-1.5 py-0.5 text-[10px] text-[#b0761a]">{AGENT_RULE_LABELS[issue.rule] || ''}</span>
+                                  </td>
+                                  <td className="px-4 py-2 text-xs text-[#b23b4e]">{issue.problem}</td>
+                                  <td className="px-4 py-2 text-xs text-[#1d7f5c]">{issue.fix}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </section>
+                )}
 
                 <Section eyebrow="Basic screening" title="基础信息筛选" icon={GraduationCapIcon}>
                   <DetailGrid values={[
@@ -530,6 +552,14 @@ export default function DashboardPage() {
                     <div className="flex justify-between gap-3 py-3"><dt className="text-[#7e8b9e]">美化程度</dt><dd className="font-medium text-[#2b384e]">{analysis.ai_risk_level}</dd></div>
                     <div className="flex justify-between gap-3 py-3"><dt className="text-[#7e8b9e]">候选人</dt><dd className="max-w-36 truncate font-medium text-[#2b384e]">{candidateName}</dd></div>
                   </dl>
+                  <button
+                    type="button"
+                    onClick={() => document.getElementById('resume-review-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                    className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-[#d5dde9] bg-white px-3 py-2 text-xs font-medium text-[#334158] hover:bg-[#f3f6fa]"
+                  >
+                    <HighlighterIcon className="size-3.5 text-[#3e6fd3]" />
+                    简历原文标记 ↓
+                  </button>
                 </section>
 
                 <section className="rounded-md border border-[#dce2eb] bg-white p-5">
@@ -546,12 +576,14 @@ export default function DashboardPage() {
               </aside>
             </div>
 
-            <ResumeReviewPanel
-              key={data.resume_id}
-              resumeId={data.resume_id}
-              analysis={analysis}
-              candidateName={data.candidate_name}
-            />
+            <div id="resume-review-panel" className="scroll-mt-6">
+              <ResumeReviewPanel
+                key={data.resume_id}
+                resumeId={data.resume_id}
+                analysis={analysis}
+                candidateName={data.candidate_name}
+              />
+            </div>
           </>
         ) : (
           <section className="mt-6 rounded-md border border-[#dce2eb] bg-white p-5 sm:p-8">
