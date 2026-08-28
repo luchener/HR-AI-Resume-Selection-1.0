@@ -16,6 +16,15 @@ const BREAKDOWN_LABELS: Array<[string, string]> = [
   ['evidence_bonus', '证据加分'],
 ];
 
+// 与后端 _validate_report 的 limits 保持一致：分项固定上限，合计须等于 job_fit_score
+const BREAKDOWN_LIMITS: Record<string, number> = {
+  hard_requirements: 25,
+  responsibility_overlap: 25,
+  skills_projects: 25,
+  industry_background: 15,
+  evidence_bonus: 10,
+};
+
 const MARKER_LABELS: Record<string, string> = {
   strength: '匹配亮点',
   match: '岗位匹配',
@@ -55,6 +64,7 @@ li{margin-bottom:3px}
 p.para{margin:4px 0;font-size:13px;line-height:1.8}
 td.lab{background:#f7f8fa;color:#66758b;font-size:11px;width:90px}
 td.val{text-align:center;width:25%}
+td .dim{color:#8190a4;font-size:10px;font-weight:normal;margin-left:2px}
 b.green,.green{color:#1d7f5c}
 .blue{color:#3e6fd3}
 .purple{color:#995c87}
@@ -102,7 +112,11 @@ function buildReportInner(opts: {
 <table>
   <tr><th colspan="${BREAKDOWN_LABELS.length}">评分构成</th></tr>
   <tr>${BREAKDOWN_LABELS.map(([, label]) => `<td class="lab">${label}</td>`).join('')}</tr>
-  <tr>${BREAKDOWN_LABELS.map(([key]) => `<td class="val"><b class="blue">${esc(breakdown[key] ?? 0)}</b></td>`).join('')}</tr>
+  <tr>${BREAKDOWN_LABELS.map(([key]) => `<td class="val"><b class="blue">${esc(breakdown[key] ?? 0)}</b><span class="dim">/ ${BREAKDOWN_LIMITS[key] ?? 0}</span></td>`).join('')}</tr>
+  <tr>
+    <td class="lab">合计</td>
+    <td class="val" colspan="${BREAKDOWN_LABELS.length - 1}"><b class="blue">${esc(a.job_fit_score ?? 0)}</b><span class="dim">/ 100</span></td>
+  </tr>
 </table>`);
 
   if (comparison && Array.isArray(comparison.ranking) && comparison.ranking.length > 0) {

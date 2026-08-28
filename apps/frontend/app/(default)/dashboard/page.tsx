@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   AlertTriangleIcon,
@@ -10,6 +10,7 @@ import {
   CalendarDaysIcon,
   CheckCircle2Icon,
   Clock3Icon,
+  CompassIcon,
   FileSearch2Icon,
   GraduationCapIcon,
   HighlighterIcon,
@@ -143,6 +144,74 @@ function Section({
   );
 }
 
+const NAV_SECTION_ICONS: Record<string, typeof FileSearch2Icon> = {
+  'sec-overview': BarChart3Icon,
+  'sec-ranking': TrophyIcon,
+  'sec-validation': ShieldAlertIcon,
+  'sec-education': GraduationCapIcon,
+  'sec-highlights': CheckCircle2Icon,
+  'resume-review-panel': HighlighterIcon,
+};
+
+function ReportNav({ items }: { items: Array<{ id: string; label: string }> }) {
+  const [activeId, setActiveId] = useState(items[0]?.id ?? '');
+
+  const itemsKey = items.map((item) => item.id).join(',');
+
+  useEffect(() => {
+    setActiveId((current) => (items.some((item) => item.id === current) ? current : items[0]?.id ?? ''));
+    const sections = itemsKey
+      .split(',')
+      .map((id) => document.getElementById(id))
+      .filter((node): node is HTMLElement => node !== null);
+    if (sections.length === 0) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible[0]) setActiveId(visible[0].target.id);
+      },
+      { rootMargin: '-20% 0px -65% 0px' },
+    );
+    sections.forEach((node) => observer.observe(node));
+    return () => observer.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemsKey]);
+
+  return (
+    <section className="rounded-md border border-[#dce2eb] bg-white p-4">
+      <div className="flex items-center gap-2">
+        <CompassIcon className="size-4 text-[#3e6fd3]" />
+        <p className="text-sm font-semibold text-[#253249]">报告导航</p>
+      </div>
+      <nav className="mt-3 grid gap-1" aria-label="报告页内导航">
+        {items.map((item) => {
+          const Icon = NAV_SECTION_ICONS[item.id] ?? FileSearch2Icon;
+          const active = item.id === activeId;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                setActiveId(item.id);
+                document.getElementById(item.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+              aria-current={active ? 'true' : undefined}
+              className={`flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13px] transition-colors ${
+                active ? 'bg-[#eef3ff] font-medium text-[#2c4a8a]' : 'text-[#435168] hover:bg-[#f3f6fa]'
+              }`}
+            >
+              <Icon className={`size-3.5 shrink-0 ${active ? 'text-[#3e6fd3]' : 'text-[#8290a3]'}`} />
+              {item.label}
+            </button>
+          );
+        })}
+      </nav>
+    </section>
+  );
+}
+
 function MarkdownReport({ content }: { content: string }) {
   return (
     <div className="space-y-3 text-sm leading-7 text-[#45536a]">
@@ -166,6 +235,21 @@ export default function DashboardPage() {
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [showAgentValidation, setShowAgentValidation] = useState(false);
+
+  const reportNavItems = useMemo(() => {
+    const current = analysisResult?.data;
+    if (!current?.hr_analysis) return [];
+    return [
+      { id: 'sec-overview', label: '评估总览' },
+      ...(current.comparison ? [{ id: 'sec-ranking', label: '候选人排名' }] : []),
+      ...(current.hr_analysis.agent_validation && current.hr_analysis.agent_validation.issues.length > 0
+        ? [{ id: 'sec-validation', label: 'Agent 校验' }]
+        : []),
+      { id: 'sec-education', label: '教育与履历' },
+      { id: 'sec-highlights', label: '亮点与风险' },
+      { id: 'resume-review-panel', label: '简历原文标记' },
+    ];
+  }, [analysisResult]);
 
   if (!isHydrated) {
     return (
@@ -571,29 +655,7 @@ export default function DashboardPage() {
                   </button>
                 </section>
 
-                <section className="rounded-md border border-[#dce2eb] bg-white p-5">
-                  <p className="text-xs font-semibold uppercase text-[#8390a2]">页内导航</p>
-                  <nav className="mt-3 grid gap-0.5" aria-label="报告页内导航">
-                    {[
-                      { id: 'sec-overview', label: '评估总览' },
-                      ...(data.comparison ? [{ id: 'sec-ranking', label: '候选人排名' }] : []),
-                      ...(analysis.agent_validation && analysis.agent_validation.issues.length > 0 ? [{ id: 'sec-validation', label: 'Agent 校验' }] : []),
-                      { id: 'sec-education', label: '教育与履历' },
-                      { id: 'sec-highlights', label: '亮点与风险' },
-                      { id: 'resume-review-panel', label: '简历原文标记' },
-                    ].map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => document.getElementById(item.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-                        className="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-xs text-[#435168] transition-colors hover:bg-[#f3f6fa]"
-                      >
-                        <span className="size-1 shrink-0 rounded-full bg-[#6f91e4]" />
-                        {item.label}
-                      </button>
-                    ))}
-                  </nav>
-                </section>
+                <ReportNav items={reportNavItems} />
               </aside>
             </div>
 
