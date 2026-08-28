@@ -146,13 +146,80 @@ def _safe_report(report: Any, validation: dict) -> dict:
     }
 
 
+_SALARY_RESUME_PATTERN = re.compile(r"薪资|薪酬|工资|月薪|年薪|待遇|\d+\s*[kK万]|[0-9一二三四五六七八九十]+\s*[万千]")
+_SALARY_PLACEHOLDERS = {"未提供", "暂未提供", "面议", "无", "未知", "未填写", "待沟通"}
+_STRONG_CLAIM_WORDS = ("精通", "资深", "主导", "全面负责", "丰富经验", "深入掌握", "核心开发", "独立完成")
+
+
+def _precheck_findings(report: dict, requirements: dict, resume_content: str) -> list[dict]:
+    """Deterministic checks for rules 1/2/4. Findings act as triggers for deep LLM validation.
+
+    High-precision heuristics only: a clean pre-check means the report is very likely fine,
+    allowing the (more expensive) LLM reflection step to be skipped entirely.
+    """
+    findings: list[dict] = []
+    resume_text = str(resume_content or "")
+
+    # 规则 4：缺失项疑似编造（报告写了薪资，但简历原文没有任何薪资字样）
+    basic = report.get("basic_screening") if isinstance(report.get("basic_screening"), dict) else {}
+    salary = str(basic.get("salary_expectation") or "").strip()
+    if salary and salary not in _SALARY_PLACEHOLDERS:
+        if not _SALARY_RESUME_PATTERN.search(resume_text):
+            findings.append({
+                "rule": 4,
+                "problem": f"报告薪资期望为“{salary[:30]}”，但简历原文未检索到薪资字样",
+                "fix": "核实简历原文；无法确认时应标注“未提供”",
+            })
+
+    # 规则 2：扣了 AI 美化分但没有任何扣分依据
+    try:
+        deduction_value = float(report.get("ai_deduction"))
+    except (TypeError, ValueError):
+        deduction_value = 0.0
+    reasons = report.get("deduction_reasons") if isinstance(report.get("deduction_reasons"), list) else []
+    if deduction_value > 0 and not any(str(item).strip() for item in reasons):
+        findings.append({
+            "rule": 2,
+            "problem": f"AI 美化扣 {int(deduction_value)} 分但未给出扣分依据",
+            "fix": "补充扣分理由，或将扣分调整为 0",
+        })
+
+    # 规则 1：强断言（精通/资深/主导…）里的技术项在简历原文完全没有出现
+    strengths = report.get("strengths") if isinstance(report.get("strengths"), list) else []
+    for item in strengths[:6]:
+        text = str(item).strip()
+        if not text or not any(word in text for word in _STRONG_CLAIM_WORDS):
+            continue
+        tech_terms = re.findall(r"[A-Za-z][A-Za-z0-9+#.-]{2,}", text)
+        if tech_terms and not any(term in resume_text for term in tech_terms):
+            findings.append({
+                "rule": 1,
+                "problem": f"优势“{text[:40]}”中的技术项在简历原文未出现",
+                "fix": "核实简历原文；超出简历依据的论断应删除或降级表述",
+            })
+    return findings
+
+
 def _self_reflect(report: dict, job_content: str, resume_content: str, requirements: dict, experiences: list[dict], current_date: str, runtime_config: dict | None, budget: dict) -> tuple[dict, dict]:
-    """Self-check the report against 5 rules; revise if issues found."""
+    """Tiered self-check: deterministic pre-check first, LLM deep validation only when suspicious.
+
+    Returns (report, agent_validation). agent_validation carries `mode` ("预检" | "深度")
+    and `revised` (whether a regenerated report was actually applied).
+    """
+    precheck = _precheck_findings(report, requirements, resume_content)
+    risk = str(report.get("ai_risk") or "none").strip().lower()
+
+    # 干净报告 + 无美化风险：跳过 LLM 反思，直接通过
+    if not precheck and risk not in {"medium", "high"}:
+        return report, {"checked_rules": 5, "issues": [], "passed": True, "mode": "预检", "revised": False}
+
+    # 预检发现疑点但预算不足：退而求其次，直接呈现确定性疑点
     if budget["calls"] >= MAX_AGENT_LLM_CALLS - 1:
-        # Not enough budget left for reflection
-        return report, {"checked_rules": 5, "issues": [], "passed": True}
+        return report, {"checked_rules": 5, "issues": precheck, "passed": not precheck, "mode": "预检", "revised": False}
 
     req_text = json.dumps([{"id": r["id"], "text": r["text"]} for r in requirements.get("requirements", [])], ensure_ascii=False)
+    exp_text = json.dumps(experiences[:8], ensure_ascii=False)
+    precheck_note = "\n预检发现以下疑点，请重点核实：\n" + json.dumps(precheck, ensure_ascii=False) if precheck else ""
 
     prompt = f"""你是招聘分析审核员。逐项核对以下 5 条规则，指出报告中违反的地方：
 
@@ -174,7 +241,8 @@ def _self_reflect(report: dict, job_content: str, resume_content: str, requireme
    例如：简历未提及空窗期，报告写"无空窗期，稳定性好"——这是将未体现误判为事实。
 
 候选人分析：{json.dumps(report, ensure_ascii=False)}
-岗位要求：{req_text}
+简历相关经历（原文摘录，论断必须以此为依据核对）：{exp_text}
+岗位要求：{req_text}{precheck_note}
 
 只输出 JSON：{{
   "issues": [
@@ -190,23 +258,28 @@ def _self_reflect(report: dict, job_content: str, resume_content: str, requireme
         raw = reflection.get("issues", [])
         should_revise = bool(reflection.get("should_revise"))
         if isinstance(raw, list):
-            issues = raw
+            issues = [item for item in raw if isinstance(item, dict)]
 
-    revised = report
+    revised = False
     if should_revise and issues and budget["calls"] < MAX_AGENT_LLM_CALLS:
         repair = {"self_reflection": [{"rule": i.get("rule", 0), "problem": i.get("problem", ""), "suggested_fix": i.get("suggested_fix", "")} for i in issues]}
         revised_prompt = _report_prompt(job_content, resume_content, requirements, experiences, current_date, repair)
-        revised = _call_json(revised_prompt, max_tokens=4000, runtime_config=runtime_config, budget=budget)
+        revised_report = _call_json(revised_prompt, max_tokens=4000, runtime_config=runtime_config, budget=budget)
+        if isinstance(revised_report, dict) and revised_report.get("job_fit_score") is not None:
+            report = revised_report
+            revised = True
 
     frontend_issues = [
         {"rule": i.get("rule", 0), "problem": i.get("problem", ""), "fix": i.get("suggested_fix", "")}
         for i in issues
     ]
 
-    return revised, {
+    return report, {
         "checked_rules": 5,
         "issues": frontend_issues,
         "passed": not should_revise or not issues,
+        "mode": "深度",
+        "revised": revised,
     }
 
 
@@ -405,6 +478,18 @@ def run_screening_agent(*, job_content: str, resume_content: str, current_date: 
         report = _call_json(_report_prompt(job_content, resume_content, requirements, experiences, current_date, validation), max_tokens=4000, runtime_config=runtime_config, budget=budget)
         validation = _validate_report(report, requirements, resume_content)
     incomplete = [item["id"] for item in requirements["requirements"] if item.get("truncated") or _looks_incomplete(item["text"])]
+    # 自校（分层）：确定性预检通过则跳过 LLM，疑点触发深度校验
+    reflect_result, reflect_info = _self_reflect(
+        report, job_content, resume_content, requirements, experiences, current_date, runtime_config, budget
+    )
+    if reflect_info.get("revised") and reflect_result != report:
+        # 修订稿必须重新过结构校验；不通过则回退保留原报告
+        revised_validation = _validate_report(reflect_result, requirements, resume_content)
+        if revised_validation.get("passed") and not requirements.get("extraction_failed"):
+            report = reflect_result
+            validation = revised_validation
+        else:
+            reflect_info["revised"] = False
     validation.update({
         "retry_count": retry_count,
         "requirements_count": len(requirements["requirements"]),
@@ -413,12 +498,6 @@ def run_screening_agent(*, job_content: str, resume_content: str, current_date: 
         "incomplete_requirements": incomplete,
     })
     result = _safe_report(report, validation)
-    # Self-reflection: check report against 5 rules, revise if needed
-    reflect_result, reflect_info = _self_reflect(
-        report, job_content, resume_content, requirements, experiences, current_date, runtime_config, budget
-    )
-    if reflect_result != report:
-        result = _safe_report(reflect_result, validation)
     result["agent_validation"] = reflect_info
     result["agent_trace"] = {
         "steps": [
@@ -426,7 +505,7 @@ def run_screening_agent(*, job_content: str, resume_content: str, current_date: 
             {"step": "经验匹配", "status": "完成", "detail": f"匹配到 {len(experiences)} 条简历经历"},
             {"step": "报告生成", "status": "完成" if validation.get("passed") else "需修正", "detail": f"LLM 调用 {budget['calls']} 次"},
             {"step": "报告校验", "status": "通过" if validation.get("passed") else "不通过", "detail": "; ".join(validation.get("issues", [])[:3]) or "无异常"},
-            {"step": "自校", "status": "通过" if reflect_info.get("passed") else "已修正", "detail": f"检出 {len(reflect_info.get('issues', []))} 个问题"},
+            {"step": "自校", "status": "通过" if reflect_info.get("passed") else ("已修正" if reflect_info.get("revised") else "发现问题"), "detail": f"{reflect_info.get('mode', '深度')}校验，检出 {len(reflect_info.get('issues', []))} 个问题"},
         ],
         "requirements": [item.get("text", "") for item in requirements.get("requirements", [])[:10]],
         "experiences": experiences[:5],

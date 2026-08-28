@@ -805,10 +805,10 @@ def build_review_markers(content, analysis, *, candidate_name):
 ② 经验匹配    _find_resume_experiences      → 纯关键词匹配（0 次 LLM）
 ③ 报告生成    _call_json(_report_prompt)    → 生成 JSON 报告（1 次 LLM）
 ④ 报告校验    _validate_report              → 校验 + 必要时重试（0~1 次 LLM）
-⑤ 自校        _self_reflect                 → 5 项规则核查 + 必要时修订（1~2 次 LLM）
+⑤ 自校        _self_reflect                 → 分层：预检通过即跳过；疑点触发深度核查（0~2 次 LLM）
 ```
 
-**自校步骤**（`_self_reflect`）在报告校验通过后执行，仅当剩余 LLM 调用预算充足时触发（`budget["calls"] < MAX_AGENT_LLM_CALLS - 1`，其中 `MAX_AGENT_LLM_CALLS=5`）。核查 5 条规则，发现违反项则用修正提示重新生成报告：
+**自校步骤**（`_self_reflect`）为分层设计：先跑确定性预检 `_precheck_findings`（0 次 LLM），预检干净且 `ai_risk` 非 medium/high 时直接通过（跳过 LLM）；预检发现疑点或报告自报美化风险时，才发起 LLM 深度核查（包含简历原文摘录 `experiences` 作为论断依据，预算门槛 `budget["calls"] < MAX_AGENT_LLM_CALLS - 1`，`MAX_AGENT_LLM_CALLS=5`）。深度核查发现违反项则用修正提示重新生成报告，**修订稿必须重新过 `_validate_report` 结构校验，不通过则回退保留原报告**：
 
 | 规则编号 | 规则名称 | 示例 |
 |---|---|---|
@@ -818,14 +818,16 @@ def build_review_markers(content, analysis, *, candidate_name):
 | 4 | 缺失项是否标注"未提供" | 简历未提及薪资，报告写成"符合预期" |
 | 5 | 风险判断是否区分"风险"和"未体现" | 简历未提及空窗期，报告写"无空窗期" |
 
-**预算分配**（`MAX_AGENT_LLM_CALLS = 5`）：
+**预算分配**（`MAX_AGENT_LLM_CALLS = 5`，单份简历含需求抽取）：
 
 | 场景 | 调用次数 |
 |---|---|
-| 无重试无修订 | 1(抽)+1(生成)+1(自校) = **3** |
+| 干净报告（预检通过，跳过深度核查） | 1(抽)+1(生成) = **2** |
 | 无重试有修订 | 1(抽)+1(生成)+1(自校)+1(修订) = **4** |
 | 有重试无修订 | 1(抽)+1(生成)+1(重试)+1(自校) = **4** |
 | 有重试有修订 | 1(抽)+1(生成)+1(重试)+1(自校)+1(修订) = **5** |
+
+批量模式下需求已预提取（见 8.4），干净报告每份仅需 **1** 次调用。
 
 ### 8.4 批量分析 LLM 调用优化
 
@@ -895,11 +897,21 @@ futures = {
 
 `ResumeReviewPanel` 使用 `key={data.resume_id}` 强制 React 在切换候选人时重新挂载组件，所有内部 state 重置；组件挂载时 `useEffect` 自动加载新候选人的简历重点标记。
 
-### 8.8 Agent 自校
+### 8.8 Agent 自校（分层）
 
 **位置**：`screening_agent._self_reflect()`，在报告校验通过后执行。
 
-**触发条件**：`budget["calls"] < MAX_AGENT_LLM_CALLS - 1`（`MAX_AGENT_LLM_CALLS = 5`），即预算不足以支撑"自校 + 修订"时静默跳过。
+**第一层：确定性预检**（`_precheck_findings`，0 次 LLM，高精度低误报）：
+
+| 预检项 | 对应规则 | 逻辑 |
+|---|---|---|
+| 薪资疑似编造 | 规则 4 | 报告写了薪资期望，但简历原文无任何薪资字样（正则：薪资/薪酬/工资/N k/万…） |
+| 扣分无依据 | 规则 2 | `ai_deduction > 0` 但 `deduction_reasons` 为空 |
+| 强断言无出处 | 规则 1 | 优势含"精通/资深/主导…"等强断言词，且其中的技术项（ASCII 词）在简历原文完全未出现 |
+
+**触发深度核查的条件**：预检发现疑点，或报告自报 `ai_risk` 为 medium/high。预检干净且无风险 → 直接通过（`mode: "预检"`），**不消耗 LLM**。
+
+**第二层：LLM 深度核查**：预算门槛 `budget["calls"] < MAX_AGENT_LLM_CALLS - 1`（`MAX_AGENT_LLM_CALLS = 5`）。Prompt 包含报告 JSON、简历原文摘录 `experiences[:8]`（论断必须以此为依据核对）、岗位要求，以及预检疑点（供重点核实）。
 
 **5 条核查规则**（Prompt 模板）：
 
@@ -925,11 +937,15 @@ futures = {
     "issues": [
         {"rule": 1, "problem": "论断超出简历依据", "fix": "已修正为'了解 Python，有 2 年开发经历'"}
     ],
-    "passed": false                   # true = 无问题 / 问题已修正
+    "passed": false,                  # true = 无问题 / 问题已修正
+    "mode": "预检",                    # "预检" = 确定性预检通过；"深度" = LLM 深度核查
+    "revised": false                  # true = 修订稿已重新生成且通过结构校验后生效
 }
 ```
 
-**前端展示**：dashboard 页面「Agent 校验」模块，以表格形式展示 JD 要求 / 问题 / 修正三列，仅当 `issues.length > 0` 时显示。
+**修订回退**：深度核查触发修订后，修订稿重新过 `_validate_report`；结构校验不通过（或需求抽取本身失败）时回退保留原报告，`revised` 置回 `false`。
+
+**前端展示**：dashboard 页面「Agent 校验」模块，以表格形式展示 JD 要求 / 问题 / 修正三列，仅当 `issues.length > 0` 时显示；摘要文案按 `revised` 区分"检出 N 个问题并已修正"/"检出 N 个问题"。
 
 ### 8.9 跨候选人对比
 
@@ -942,6 +958,8 @@ futures = {
 | `ranking[]` | 排名列表，每项含 `rank` / `name` / `score` / `difference`（核心差异点） |
 | `pairwise[]` | 两两对比自然语言描述 |
 | `recommendation` | 优先面试建议 |
+
+**容错**：LLM 调用失败（无 key / 超时 / 网络异常）时返回 `None` 并记日志，批量响应不受影响（对比只是增强能力）。前端在切换候选人时保留 `comparison` 字段，避免「候选人排名」消失。
 
 **前端展示**：dashboard 页面「候选人排名」模块，展示排名表格 + 差异对比 + 优先面试建议。
 

@@ -604,6 +604,15 @@ class HrAnalysisTests(unittest.TestCase):
             }
 
         barrier = Barrier(3)
+        comparison_payload = {
+            "ranking": [
+                {"rank": 1, "name": "候选人甲", "score": 85, "difference": "Python 经验最深"},
+                {"rank": 2, "name": "候选人乙", "score": 72, "difference": "Java 经验匹配"},
+                {"rank": 3, "name": "候选人丙", "score": 65, "difference": "经验相对较浅"},
+            ],
+            "pairwise": [],
+            "recommendation": "优先面试：候选人甲",
+        }
 
         def analyze_candidate(*, resume_content="", **_kwargs):
             barrier.wait(timeout=2)
@@ -618,17 +627,22 @@ class HrAnalysisTests(unittest.TestCase):
 
         with patch.object(backend.screening_agent, "run_screening_agent", side_effect=analyze_candidate) as call:
             with patch.object(backend.screening_agent, "_extract_requirements", side_effect=mock_extract):
-                response = self.client.post(
-                    "/api/v1/resumes/hr-analysis",
-                    json={"resume_ids": resume_ids, "job_id": job_id},
-                    headers=self.headers,
-                )
+                with patch.object(backend.llm, "call_llm", return_value=comparison_payload) as compare_call:
+                    response = self.client.post(
+                        "/api/v1/resumes/hr-analysis",
+                        json={"resume_ids": resume_ids, "job_id": job_id},
+                        headers=self.headers,
+                    )
 
         self.assertEqual(response.status_code, 200)
         data = response.get_json()["data"]
         self.assertEqual(call.call_count, 3)
         self.assertEqual(len(data["batch_analyses"]), 3)
         self.assertEqual(data["batch_failures"], [])
+        # 3 位候选人时触发跨候选人对比，结果透传到 comparison 字段
+        self.assertEqual(compare_call.call_count, 1)
+        self.assertEqual(data["comparison"]["recommendation"], "优先面试：候选人甲")
+        self.assertEqual(len(data["comparison"]["ranking"]), 3)
         self.assertEqual(
             [item["candidate_name"] for item in data["batch_analyses"]],
             ["候选人甲", "候选人乙", "候选人丙"],

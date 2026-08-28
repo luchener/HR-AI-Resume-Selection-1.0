@@ -399,7 +399,9 @@ export default function DashboardPage() {
                 <div className="mt-3">
                   <p className="mb-3 text-xs text-[#8190a4]">
                     已校验 {analysis.agent_validation.checked_rules} 项要求，
-                    {analysis.agent_validation.passed ? '全部通过' : `检出 ${analysis.agent_validation.issues.length} 个问题并已修正`}
+                    {analysis.agent_validation.passed
+                      ? '全部通过'
+                      : `检出 ${analysis.agent_validation.issues.length} 个问题${analysis.agent_validation.revised ? '并已修正' : ''}`}
                   </p>
                   <div className="overflow-x-auto rounded-md border border-[#e5e9ef]">
                     <table className="w-full border-collapse text-sm">

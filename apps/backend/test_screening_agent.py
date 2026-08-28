@@ -70,12 +70,85 @@ class ScreeningAgentTests(unittest.TestCase):
     def test_agent_enforces_model_call_budget(self):
         report = self._report()
         requirements = {"requirements": [{"id": "r1", "text": "Java 技能", "category": "skill", "hard": True}]}
+        original = screening_agent.MAX_AGENT_LLM_CALLS
+        try:
+            with patch.object(screening_agent, "_extract_requirements", return_value=requirements), patch.object(screening_agent.llm, "call_llm", return_value=report) as call:
+                screening_agent.MAX_AGENT_LLM_CALLS = 2
+                result = screening_agent.run_screening_agent(job_content="Java", resume_content="候选人", current_date="2026-08")
+            self.assertLessEqual(call.call_count, 2)
+            self.assertLessEqual(result["agent_meta"]["llm_calls"], 2)
+        finally:
+            screening_agent.MAX_AGENT_LLM_CALLS = original
+
+    def test_clean_report_skips_reflection_llm_call(self):
+        report = self._report()
+        report["summary"] = "候选人满足本科及以上学历，经历与岗位基本匹配。"
+        requirements = {"requirements": [{"id": "r1", "text": "本科及以上学历", "category": "education", "hard": True}]}
         with patch.object(screening_agent, "_extract_requirements", return_value=requirements), patch.object(screening_agent.llm, "call_llm", return_value=report) as call:
-            screening_agent.MAX_AGENT_LLM_CALLS = 2
-            result = screening_agent.run_screening_agent(job_content="Java", resume_content="候选人", current_date="2026-08")
-        self.assertLessEqual(call.call_count, 2)
-        self.assertLessEqual(result["agent_meta"]["llm_calls"], 2)
-        screening_agent.MAX_AGENT_LLM_CALLS = 4
+            result = screening_agent.run_screening_agent(job_content="本科及以上学历", resume_content="张三\n本科，复旦大学", current_date="2026-08")
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(result["agent_validation"]["mode"], "预检")
+        self.assertTrue(result["agent_validation"]["passed"])
+        self.assertFalse(result["agent_validation"]["revised"])
+        self.assertEqual(result["agent_validation"]["issues"], [])
+
+    def _suspicious_report(self):
+        report = self._report()
+        report["summary"] = "满足本科及以上学历，经历与岗位基本匹配。"
+        report["basic_screening"] = {"education_level": "本科", "salary_expectation": "30K-40K"}
+        report["strengths"] = ["精通 Spark 流式计算"]
+        return report
+
+    def test_precheck_flags_fabricated_salary_and_absent_tech(self):
+        findings = screening_agent._precheck_findings(
+            self._suspicious_report(),
+            {"requirements": []},
+            "张三\n本科，复旦大学\n熟悉 Python",
+        )
+        rules = {item["rule"] for item in findings}
+        self.assertIn(1, rules)
+        self.assertIn(4, rules)
+
+    def test_precheck_clean_report_has_no_findings(self):
+        findings = screening_agent._precheck_findings(self._report(), {"requirements": []}, "张三\n本科，复旦大学")
+        self.assertEqual(findings, [])
+
+    def test_suspicious_report_triggers_deep_validation_with_revision(self):
+        report = self._suspicious_report()
+        reflection = {
+            "issues": [{"rule": 1, "quote": "精通 Spark 流式计算", "problem": "简历未提及 Spark", "suggested_fix": "删除该论断"}],
+            "should_revise": True,
+        }
+        revised = dict(report)
+        revised["strengths"] = ["熟悉 Python"]
+        revised["basic_screening"] = {"education_level": "本科", "salary_expectation": "未提供"}
+        requirements = {"requirements": [{"id": "r1", "text": "本科及以上学历", "category": "education", "hard": True}]}
+        with patch.object(screening_agent, "_extract_requirements", return_value=requirements), patch.object(screening_agent.llm, "call_llm", side_effect=[report, reflection, revised]) as call:
+            result = screening_agent.run_screening_agent(job_content="本科及以上学历", resume_content="张三\n本科，复旦大学\n熟悉 Python", current_date="2026-08")
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(result["agent_validation"]["mode"], "深度")
+        self.assertTrue(result["agent_validation"]["revised"])
+        self.assertEqual(len(result["agent_validation"]["issues"]), 1)
+        self.assertEqual(result["strengths"], ["熟悉 Python"])
+        self.assertEqual(result["agent_meta"]["llm_calls"], 3)
+
+    def test_revision_failing_validation_keeps_original_report(self):
+        report = self._suspicious_report()
+        reflection = {
+            "issues": [{"rule": 1, "quote": "精通 Spark 流式计算", "problem": "简历未提及 Spark", "suggested_fix": "删除该论断"}],
+            "should_revise": True,
+        }
+        broken = dict(report)
+        broken["strengths"] = ["熟悉 Python"]
+        broken["job_fit_score"] = 90
+        requirements = {"requirements": [{"id": "r1", "text": "本科及以上学历", "category": "education", "hard": True}]}
+        with patch.object(screening_agent, "_extract_requirements", return_value=requirements), patch.object(screening_agent.llm, "call_llm", side_effect=[report, reflection, broken]) as call:
+            result = screening_agent.run_screening_agent(job_content="本科及以上学历", resume_content="张三\n本科，复旦大学\n熟悉 Python", current_date="2026-08")
+        self.assertEqual(call.call_count, 3)
+        self.assertEqual(result["agent_validation"]["mode"], "深度")
+        self.assertFalse(result["agent_validation"]["revised"])
+        self.assertEqual(len(result["agent_validation"]["issues"]), 1)
+        self.assertEqual(result["job_fit_score"], 78)
 
     def test_requirement_string_false_is_not_hard(self):
         with patch.object(screening_agent.llm, "call_llm", return_value={"requirements": [{"text": "优先经验", "hard": "false"}]}):

@@ -1383,7 +1383,11 @@ def _compare_candidates(analysis_results: list[dict], runtime_config: dict | Non
   "recommendation": "优先面试：张三、李四"
 }}"""
 
-    result = llm.call_llm(prompt, expect_json=True, max_tokens=2000, runtime_config=runtime_config)
+    try:
+        result = llm.call_llm(prompt, expect_json=True, max_tokens=2000, runtime_config=runtime_config)
+    except Exception as exc:  # 对比只是增强能力，失败不应拖垮批量分析响应
+        logger.warning("候选人对比调用失败，跳过对比: %s", exc)
+        return None
     if isinstance(result, dict):
         ranking = result.get("ranking")
         if isinstance(ranking, list):

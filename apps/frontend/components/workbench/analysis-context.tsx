@@ -65,6 +65,8 @@ export interface HrAnalysis {
     checked_rules: number;
     issues: Array<{ rule: number; problem: string; fix: string }>;
     passed: boolean;
+    mode?: string;
+    revised?: boolean;
   };
 }
 

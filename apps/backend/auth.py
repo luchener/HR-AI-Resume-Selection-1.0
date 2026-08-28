@@ -138,6 +138,8 @@ class _UserLock:
 
     def __enter__(self):
         if fcntl is not None:
+            # 锁文件可能与用户目录一起被重定向到新路径（如测试环境），先确保父目录存在
+            os.makedirs(os.path.dirname(_INDEX_LOCK), exist_ok=True)
             self._fd = open(_INDEX_LOCK, "w")
             fcntl.flock(self._fd, fcntl.LOCK_EX)
         else:
