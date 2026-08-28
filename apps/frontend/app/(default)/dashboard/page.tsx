@@ -20,7 +20,6 @@ import {
   SparklesIcon,
   TargetIcon,
   TrophyIcon,
-  UserRoundIcon,
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
 import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analysis-context';
@@ -119,15 +118,17 @@ function Section({
   eyebrow,
   title,
   icon: Icon,
+  id,
   children,
 }: {
   eyebrow: string;
   title: string;
   icon: typeof FileSearch2Icon;
+  id?: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-md border border-[#dce2eb] bg-white p-5 sm:p-6">
+    <section id={id} className="scroll-mt-6 rounded-md border border-[#dce2eb] bg-white p-5 sm:p-6">
       <div className="flex items-start gap-3">
         <span className="flex size-9 shrink-0 items-center justify-center rounded-md bg-[#edf3ff] text-[#496fc9]">
           <Icon className="size-4.5" />
@@ -283,7 +284,7 @@ export default function DashboardPage() {
             <button type="button" onClick={() => router.push('/')} className="mb-4 inline-flex items-center gap-2 text-sm font-medium text-[#5d6d84] hover:text-[#1e2d47]">
               <ArrowLeftIcon className="size-4" /> 新建分析
             </button>
-            <p className="text-xs font-semibold uppercase text-[#5e7190]">Candidate screening report</p>
+            <p className="text-xs font-semibold uppercase text-[#5e7190]">候选人筛选报告</p>
             <h1 className="mt-2 text-3xl font-semibold text-[#152137] sm:text-4xl">{analysis ? '候选人分析报告' : '深度优化简历'}</h1>
             <p className="mt-3 text-sm text-[#6f7d91]">{candidateName} · 基于目标岗位要求生成</p>
           </div>
@@ -336,12 +337,12 @@ export default function DashboardPage() {
 
         {analysis ? (
           <>
-            <div className="mt-6 grid overflow-hidden rounded-md border border-[#dce2eb] bg-white sm:grid-cols-2 xl:grid-cols-4">
+            <div id="sec-overview" className="mt-6 grid scroll-mt-6 overflow-hidden rounded-md border border-[#dce2eb] bg-white sm:grid-cols-2 xl:grid-cols-4">
               {[
-                { label: '综合得分', value: String(analysis.final_score), note: analysis.fit_grade, color: 'text-[#1d7f5c]' },
                 { label: '岗位契合度', value: `${analysis.job_fit_percentage}%`, note: `基础分 ${analysis.job_fit_score}/100`, color: 'text-[#3e6fd3]' },
                 { label: '简历美化程度', value: analysis.ai_risk_level, note: `${analysis.ai_risk_label} · 扣 ${analysis.ai_deduction} 分`, color: 'text-[#995c87]' },
-                { label: '招聘建议', value: analysis.recruitment_recommendation, note: analysis.fit_tag, color: 'text-[#17243a]' },
+                { label: '相关经验年限', value: analysis.work_history.relevant_years, note: `职责重合 ${analysis.work_history.responsibility_match}`, color: 'text-[#17243a]' },
+                { label: '跳槽稳定性', value: analysis.work_history.stability, note: `公司背景 ${analysis.work_history.company_background}`, color: 'text-[#17243a]' },
               ].map((metric) => (
                 <div key={metric.label} className="border-b border-[#e1e6ed] p-5 last:border-b-0 sm:[&:nth-child(odd)]:border-r xl:border-b-0 xl:border-r xl:last:border-r-0">
                   <p className="text-xs text-[#8190a4]">{metric.label}</p>
@@ -359,7 +360,7 @@ export default function DashboardPage() {
 
             {/* 候选人排名 */}
             {data.comparison && (
-              <Section eyebrow="Candidate ranking" title="候选人排名" icon={TrophyIcon}>
+              <Section id="sec-ranking" eyebrow="全局对比" title="候选人排名" icon={TrophyIcon}>
                 <div className="mt-4">
                   <div className="overflow-x-auto rounded-md border border-[#e5e9ef]">
                     <table className="w-full border-collapse text-sm">
@@ -412,13 +413,13 @@ export default function DashboardPage() {
 
             <div className="mt-6 grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_310px]">
               <div className="space-y-6">
-                <Section eyebrow="Decision summary" title="核心判定" icon={TargetIcon}>
+                <Section eyebrow="综合结论" title="核心判定" icon={TargetIcon}>
                   <p className="mt-5 text-sm leading-7 text-[#435168]">{analysis.summary}</p>
                 </Section>
 
                 {/* Agent 校验：折叠徽章，结论区之后按需展开 */}
                 {analysis.agent_validation && analysis.agent_validation.issues.length > 0 && (
-                  <section className="rounded-md border border-[#e8dfd0] bg-[#fffcf5]">
+                  <section id="sec-validation" className="scroll-mt-6 rounded-md border border-[#e8dfd0] bg-[#fffcf5]">
                     <button
                       type="button"
                       onClick={() => setShowAgentValidation((visible) => !visible)}
@@ -460,7 +461,7 @@ export default function DashboardPage() {
                   </section>
                 )}
 
-                <Section eyebrow="Basic screening" title="基础信息筛选" icon={GraduationCapIcon}>
+                <Section eyebrow="基本信息" title="基础信息筛选" icon={GraduationCapIcon}>
                   <DetailGrid values={[
                     ['姓名', candidateName],
                     ['性别', analysis.basic_screening.gender],
@@ -471,7 +472,7 @@ export default function DashboardPage() {
                   ]} />
                 </Section>
 
-                <Section eyebrow="Education history" title="教育经历" icon={GraduationCapIcon}>
+                <Section id="sec-education" eyebrow="教育背景" title="教育经历" icon={GraduationCapIcon}>
                   {analysis.education_history && analysis.education_history.length > 0 ? (
                     <div className="mt-2 flex flex-col gap-3">
                       {analysis.education_history.map((edu, i) => (
@@ -494,7 +495,7 @@ export default function DashboardPage() {
                   )}
                 </Section>
 
-                <Section eyebrow="Career evidence" title="工作履历" icon={BriefcaseBusinessIcon}>
+                <Section eyebrow="职业履历" title="工作履历" icon={BriefcaseBusinessIcon}>
                   <DetailGrid
                     compact
                     values={[
@@ -512,13 +513,13 @@ export default function DashboardPage() {
                   <EmploymentTimeline records={analysis.work_history.employment_records} />
                 </Section>
 
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <Section eyebrow="Match evidence" title="匹配亮点" icon={CheckCircle2Icon}>
+                <div id="sec-highlights" className="grid scroll-mt-6 gap-6 lg:grid-cols-2">
+                  <Section eyebrow="优势证据" title="匹配亮点" icon={CheckCircle2Icon}>
                     <InsightList items={analysis.strengths} />
                     <h3 className="mt-6 border-t border-[#e6eaf0] pt-5 text-sm font-semibold text-[#29364c]">项目匹配点</h3>
                     <InsightList items={analysis.skill_match.project_match_points} />
                   </Section>
-                  <Section eyebrow="Gap analysis" title="短板与风险" icon={ShieldAlertIcon}>
+                  <Section eyebrow="缺口预警" title="短板与风险" icon={ShieldAlertIcon}>
                     <h3 className="mt-5 text-sm font-semibold text-[#9a6b18]">短板不足</h3>
                     <InsightList items={analysis.weaknesses} />
                     <h3 className="mt-6 border-t border-[#e6eaf0] pt-5 text-sm font-semibold text-[#9a4338]">招聘风险预警</h3>
@@ -527,29 +528,37 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="grid gap-6 lg:grid-cols-2">
-                  <Section eyebrow="Capability match" title="专业技能匹配" icon={BarChart3Icon}>
+                  <Section eyebrow="能力核对" title="专业技能匹配" icon={BarChart3Icon}>
                     <h3 className="mt-5 text-sm font-semibold text-[#29364c]">硬技能与工具</h3>
                     <InsightList items={analysis.skill_match.hard_skills} />
                     <h3 className="mt-6 border-t border-[#e6eaf0] pt-5 text-sm font-semibold text-[#29364c]">软实力</h3>
                     <InsightList items={analysis.skill_match.soft_skills} />
                   </Section>
-                  <Section eyebrow="Additional signals" title="竞争力加分项" icon={SparklesIcon}>
+                  <Section eyebrow="加分信号" title="竞争力加分项" icon={SparklesIcon}>
                     <InsightList items={analysis.bonus_items} />
                     <h3 className="mt-6 border-t border-[#e6eaf0] pt-5 text-sm font-semibold text-[#29364c]">证书资质</h3>
                     <InsightList items={analysis.certificates} />
+                  </Section>
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <Section eyebrow="岗位适配" title="岗位定制判断" icon={TargetIcon}>
+                    <InsightList items={analysis.role_specific_assessment} />
+                  </Section>
+                  <Section eyebrow="美化核查" title="美化程度判断依据" icon={ShieldAlertIcon}>
+                    <InsightList items={analysis.deduction_reasons} empty="未发现明显美化痕迹" />
                   </Section>
                 </div>
               </div>
 
               <aside className="space-y-5 xl:sticky xl:top-6">
                 <section className="rounded-md border border-[#dce2eb] bg-white p-5">
-                  <p className="text-xs font-semibold uppercase text-[#8390a2]">Final decision</p>
+                  <p className="text-xs font-semibold uppercase text-[#8390a2]">招聘决策</p>
                   <div className={`mt-4 inline-flex rounded-full px-3 py-1.5 text-sm font-semibold ${recommendationClass}`}>{analysis.recruitment_recommendation}</div>
                   <p className="mt-4 text-3xl font-semibold text-[#17243a]">{analysis.final_score}<span className="ml-1 text-sm font-normal text-[#8b96a7]">/ 100</span></p>
                   <div className="mt-4 h-2 overflow-hidden rounded-full bg-[#edf0f4]"><div className="h-full rounded-full bg-[#668de8]" style={{ width: `${Math.max(0, Math.min(100, analysis.final_score))}%` }} /></div>
                   <dl className="mt-5 divide-y divide-[#e7ebf0] text-sm">
                     <div className="flex justify-between gap-3 py-3"><dt className="text-[#7e8b9e]">适配标签</dt><dd className="font-medium text-[#2b384e]">{analysis.fit_tag}</dd></div>
-                    <div className="flex justify-between gap-3 py-3"><dt className="text-[#7e8b9e]">美化程度</dt><dd className="font-medium text-[#2b384e]">{analysis.ai_risk_level}</dd></div>
                     <div className="flex justify-between gap-3 py-3"><dt className="text-[#7e8b9e]">候选人</dt><dd className="max-w-36 truncate font-medium text-[#2b384e]">{candidateName}</dd></div>
                   </dl>
                   <button
@@ -563,16 +572,28 @@ export default function DashboardPage() {
                 </section>
 
                 <section className="rounded-md border border-[#dce2eb] bg-white p-5">
-                  <div className="flex items-center gap-2"><UserRoundIcon className="size-4 text-[#5f80ce]" /><h2 className="text-sm font-semibold text-[#253249]">岗位定制判断</h2></div>
-                  <InsightList items={analysis.role_specific_assessment} />
+                  <p className="text-xs font-semibold uppercase text-[#8390a2]">页内导航</p>
+                  <nav className="mt-3 grid gap-0.5" aria-label="报告页内导航">
+                    {[
+                      { id: 'sec-overview', label: '评估总览' },
+                      ...(data.comparison ? [{ id: 'sec-ranking', label: '候选人排名' }] : []),
+                      ...(analysis.agent_validation && analysis.agent_validation.issues.length > 0 ? [{ id: 'sec-validation', label: 'Agent 校验' }] : []),
+                      { id: 'sec-education', label: '教育与履历' },
+                      { id: 'sec-highlights', label: '亮点与风险' },
+                      { id: 'resume-review-panel', label: '简历原文标记' },
+                    ].map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => document.getElementById(item.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                        className="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-xs text-[#435168] transition-colors hover:bg-[#f3f6fa]"
+                      >
+                        <span className="size-1 shrink-0 rounded-full bg-[#6f91e4]" />
+                        {item.label}
+                      </button>
+                    ))}
+                  </nav>
                 </section>
-
-                {analysis.deduction_reasons.length > 0 && (
-                  <section className="rounded-md border border-[#e6d8dc] bg-[#fffafb] p-5">
-                    <h2 className="text-sm font-semibold text-[#7c4e59]">美化程度判断依据</h2>
-                    <InsightList items={analysis.deduction_reasons} />
-                  </section>
-                )}
               </aside>
             </div>
 

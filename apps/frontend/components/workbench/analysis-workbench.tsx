@@ -106,15 +106,22 @@ export default function AnalysisWorkbench() {
   return (
     <AppShell active="home">
       <div className="mx-auto w-full max-w-[1480px] px-5 py-8 sm:px-8 lg:px-10 lg:py-10 xl:px-14">
-        <header className="flex flex-col gap-5 border-b border-[#dce2eb] pb-7 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase text-[#5d6d86]">HR Screening Workspace · 1.0</p>
-            <h1 className="mt-3 text-3xl font-semibold text-[#152137] sm:text-4xl">AI 智能<span className="block sm:inline">全维度量化人才评估。</span></h1>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-[#6d7b91] sm:text-base">自动匹配岗位与简历信息，输出可直接用于招聘决策的标准化分析报告</p>
-          </div>
+        <header className="border-b border-[#dce2eb] pb-6">
+          <h1 className="text-2xl font-semibold text-[#152137] sm:text-3xl">AI 简历智选 · 全维度量化人才评估</h1>
+          <p className="mt-2 text-sm leading-6 text-[#6d7b91]">上传简历并粘贴岗位描述，生成可直接用于招聘决策的标准化分析报告</p>
         </header>
 
-        <div className="mt-7 grid gap-6 xl:grid-cols-[minmax(340px,0.82fr)_minmax(500px,1.18fr)]">
+        <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border border-[#dce2eb] bg-white px-5 py-3">
+          <span className="text-xs font-semibold text-[#8290a3]">分析流程</span>
+          {['解析硬性门槛', '比对履历证据', '生成招聘建议'].map((label, index) => (
+            <span key={label} className="flex items-center gap-2">
+              <span className="flex size-5 items-center justify-center rounded-full bg-[#eaf0fb] text-[10px] font-semibold text-[#3e6fd3]">{index + 1}</span>
+              <span className="text-xs text-[#435168]">{label}</span>
+            </span>
+          ))}
+        </div>
+
+        <div className="mt-5 grid gap-6 xl:grid-cols-[minmax(340px,0.82fr)_minmax(500px,1.18fr)]">
           <section className="flex min-h-[550px] flex-col rounded-md border border-[#dce2eb] bg-white p-5 sm:p-7">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -138,7 +145,7 @@ export default function AnalysisWorkbench() {
               className={`mt-6 flex min-h-64 cursor-pointer flex-col items-center justify-center rounded-md border border-dashed px-6 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#789cf2] ${isDragging ? 'border-[#4774db] bg-[#eef3ff]' : 'border-[#cfd7e4] bg-[#f8fafd] hover:border-[#7999df] hover:bg-[#f3f6fc]'} ${busy ? 'pointer-events-none opacity-60' : ''}`}
             >
               <input ref={inputRef} type="file" accept=".pdf,.docx" multiple className="hidden" onChange={handleFileInput} />
-              <span className="flex size-14 items-center justify-center rounded-md bg-[#17243b] text-white shadow-[8px_8px_0_#88a8ff]">
+              <span className="flex size-14 items-center justify-center rounded-md bg-[#17243b] text-white">
                 <UploadCloudIcon className="size-6" aria-hidden="true" />
               </span>
               <p className="mt-7 text-lg font-semibold text-[#1a263b]">拖放简历到这里</p>
@@ -169,7 +176,7 @@ export default function AnalysisWorkbench() {
           <section className="flex min-h-[550px] flex-col rounded-md border border-[#dce2eb] bg-white p-5 sm:p-7">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-semibold uppercase text-[#2f8b68]">02 · Job description</p>
+                <p className="text-xs font-semibold uppercase text-[#5273c6]">02 · Job description</p>
                 <h2 className="mt-2 text-xl font-semibold text-[#18243a]">输入目标岗位描述</h2>
               </div>
               <BriefcaseBusinessIcon className="size-5 text-[#6f7e92]" />
@@ -189,19 +196,6 @@ export default function AnalysisWorkbench() {
               <span>{jobDescription.length} 字</span>
             </div>
 
-            <div className="mt-6 grid gap-2 sm:grid-cols-3">
-              {[
-                { number: '01', label: '解析硬性门槛', color: 'bg-[#7da2ff]' },
-                { number: '02', label: '比对履历证据', color: 'bg-[#ff9b89]' },
-                { number: '03', label: '生成招聘建议', color: 'bg-[#a98cf5]' },
-              ].map((item) => (
-                <div key={item.number} className="flex items-center gap-3 rounded-md border border-[#e1e6ed] px-3 py-3">
-                  <span className={`flex size-8 shrink-0 items-center justify-center rounded-md text-xs font-semibold text-[#17233a] ${item.color}`}>{item.number}</span>
-                  <span className="text-xs font-medium text-[#435168]">{item.label}</span>
-                </div>
-              ))}
-            </div>
-
             <div className="mt-auto border-t border-[#e5e9ef] pt-5">
               {error && <div role="alert" className="mb-4 rounded-md border border-[#efb5ad] bg-[#fff4f2] px-4 py-3 text-sm text-[#9d3e32]">{error}</div>}
               <button
@@ -214,9 +208,28 @@ export default function AnalysisWorkbench() {
                 {phaseLabel}
                 {!busy && <ArrowRightIcon className="size-4" />}
               </button>
-              <p className="mt-3 flex items-center justify-center gap-2 text-xs text-[#7e8a9d]">
-                <CheckIcon className="size-3.5 text-[#2b936b]" /> 分析将覆盖履历、技能、项目、稳定性与招聘风险
-              </p>
+              {busy ? (
+                <ol className="mt-4 flex items-center justify-between gap-2" aria-live="polite">
+                  {(['uploading', 'job', 'analyzing'] as const).map((stepPhase, index) => {
+                    const currentIndex = phase === 'uploading' ? 0 : phase === 'job' ? 1 : 2;
+                    const done = index < currentIndex;
+                    const active = index === currentIndex;
+                    const label = stepPhase === 'uploading' ? '读取简历' : stepPhase === 'job' ? '解析岗位' : '生成分析';
+                    return (
+                      <li key={stepPhase} className="flex min-w-0 flex-1 items-center gap-2">
+                        <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${done ? 'bg-[#e6f7ee] text-[#1d7f5c]' : active ? 'bg-[#eaf0fb] text-[#3e6fd3]' : 'bg-[#f1f3f6] text-[#8290a3]'}`}>
+                          {done ? <CheckIcon className="size-3" /> : active ? <LoaderCircleIcon className="size-3 animate-spin" /> : index + 1}
+                        </span>
+                        <span className={`truncate text-xs ${active ? 'font-medium text-[#2c394f]' : 'text-[#8290a3]'}`}>{label}</span>
+                      </li>
+                    );
+                  })}
+                </ol>
+              ) : (
+                <p className="mt-3 flex items-center justify-center gap-2 text-xs text-[#7e8a9d]">
+                  <CheckIcon className="size-3.5 text-[#2b936b]" /> 分析将覆盖履历、技能、项目、稳定性与招聘风险
+                </p>
+              )}
             </div>
           </section>
         </div>
