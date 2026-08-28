@@ -1006,7 +1006,7 @@ def _normalize_education_history(raw) -> list[dict]:
         }
         entries.append(entry)
     entries.sort(key=lambda e: _DEGREE_ORDER.get(e["degree"], 99))
-    return entries[:6]
+    return entries[:8]
 
 
 def _normalize_score_breakdown(value) -> tuple[dict[str, int], bool]:
