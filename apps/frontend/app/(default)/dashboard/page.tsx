@@ -200,7 +200,7 @@ export default function DashboardPage() {
   const selectCandidate = (selectedResumeId: string) => {
     const selected = batchAnalyses.find((item) => item.resume_id === selectedResumeId);
     if (!selected) return;
-    setAnalysisResult({ data: { ...selected, batch_analyses: batchAnalyses, batch_failures: batchFailures } });
+    setAnalysisResult({ data: { ...selected, batch_analyses: batchAnalyses, batch_failures: batchFailures, comparison: data.comparison } });
   };
 
   const handleReanalyze = async () => {
@@ -416,8 +416,7 @@ export default function DashboardPage() {
                           return (
                             <tr key={i} className="border-b border-[#e5e9ef] last:border-b-0">
                               <td className="px-4 py-2 text-xs text-[#2c394f]">
-                                <span className="inline-block rounded bg-[#fef6e6] px-1.5 py-0.5 text-[10px] text-[#b0761a]">规则 {issue.rule}</span>
-                                <span className="ml-1.5">{ruleLabels[issue.rule] || ''}</span>
+                                <span className="inline-block rounded bg-[#fef6e6] px-1.5 py-0.5 text-[10px] text-[#b0761a]">问题类型：{ruleLabels[issue.rule] || ''}</span>
                               </td>
                               <td className="px-4 py-2 text-xs text-[#b23b4e]">{issue.problem}</td>
                               <td className="px-4 py-2 text-xs text-[#1d7f5c]">{issue.fix}</td>
