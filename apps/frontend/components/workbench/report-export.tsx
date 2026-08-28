@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import html2canvas from 'html2canvas';
 import { CameraIcon, DownloadIcon, FileTextIcon, LoaderCircleIcon } from 'lucide-react';
-import type { CandidateComparison, HrAnalysis } from './analysis-context';
+import type { HrAnalysis } from './analysis-context';
 import { fetchResumeReviewMarkers, type ResumeReviewData } from '@/lib/api/screening';
 
 export const AGENT_RULE_LABELS = ['', '论断超出简历依据', '评分依据不可追溯', '加分项与岗位无关', '缺失项标注"未提供"', '风险与未体现混淆'];
@@ -53,7 +53,6 @@ b.green,.green{color:#1d7f5c}
 .red{color:#b23b4e}
 .sub{color:#65738a;font-size:11px}
 .tag{display:inline-block;background:#fef6e6;color:#b0761a;border-radius:2px;padding:1px 6px;font-size:10px}
-.callout{margin:6px 0;font-size:13px;font-weight:600;color:#1d7f5c}
 .empty{color:#8190a4}
 .notice{margin-top:18px;font-size:10px;color:#8190a4}
 @media print{.page{width:auto;padding:10px 12px}}
@@ -62,10 +61,9 @@ b.green,.green{color:#1d7f5c}
 function buildReportInner(opts: {
   analysis: HrAnalysis;
   candidateName: string;
-  comparison?: CandidateComparison | null;
   markers: ResumeReviewData | null;
 }): string {
-  const { analysis: a, comparison, markers } = opts;
+  const { analysis: a, markers } = opts;
   const name = opts.candidateName || a.candidate_name || '候选人';
   const out: string[] = [];
 
@@ -90,26 +88,6 @@ function buildReportInner(opts: {
     <td class="val"><b>${esc(a.recruitment_recommendation)}</b><br><span class="sub">${esc(a.fit_tag)}</span></td>
   </tr>
 </table>`);
-
-  if (comparison && Array.isArray(comparison.ranking) && comparison.ranking.length > 0) {
-    const medals = ['🥇', '🥈', '🥉'];
-    out.push(`
-<h2>候选人排名</h2>
-<table>
-  <thead><tr><th style="width:56px">排名</th><th style="width:64px">得分</th><th style="width:120px">候选人</th><th>核心差异点</th></tr></thead>
-  <tbody>
-    ${comparison.ranking.map((item) => `
-    <tr>
-      <td><b>${item.rank <= 3 ? medals[item.rank - 1] : esc(item.rank)}</b></td>
-      <td><b class="blue">${esc(item.score)}</b></td>
-      <td>${esc(item.name)}</td>
-      <td class="sub">${esc(item.difference)}</td>
-    </tr>`).join('')}
-  </tbody>
-</table>
-${comparison.recommendation ? `<p class="callout">${esc(comparison.recommendation)}</p>` : ''}
-${comparison.pairwise?.length ? `<ul>${comparison.pairwise.map((item) => `<li class="sub">${esc(item)}</li>`).join('')}</ul>` : ''}`);
-  }
 
   out.push(`<h2>核心判定</h2><p class="para">${esc(a.summary)}</p>`);
 
@@ -253,12 +231,10 @@ const BUTTON_CLASS = 'inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-
 export default function ReportExportCenter({
   analysis,
   candidateName,
-  comparison,
   resumeId,
 }: {
   analysis: HrAnalysis;
   candidateName: string;
-  comparison?: CandidateComparison | null;
   resumeId: string;
 }) {
   const [busy, setBusy] = useState<ExportFormat | null>(null);
@@ -284,7 +260,7 @@ export default function ReportExportCenter({
     try {
       const markerData = await ensureMarkers();
       const name = candidateName || analysis.candidate_name || '候选人';
-      const inner = buildReportInner({ analysis, candidateName, comparison, markers: markerData });
+      const inner = buildReportInner({ analysis, candidateName, markers: markerData });
       if (format === 'png') {
         setCaptureHtml(`<style>${DOC_STYLE}</style><div class="page">${inner}</div>`);
         return; // busy 在截图完成后释放

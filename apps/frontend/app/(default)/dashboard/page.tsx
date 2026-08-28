@@ -438,8 +438,8 @@ export default function DashboardPage() {
 
             {/* 统一导出中心：整份报告 × 图片/PDF/Word */}
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-white px-4 py-2.5">
-              <p className="text-xs text-sub">导出整份报告（含排名、Agent 校验、标记要点）</p>
-              <ReportExportCenter key={data.resume_id} analysis={analysis} candidateName={candidateName} comparison={data.comparison} resumeId={data.resume_id} />
+              <p className="text-xs text-sub">导出整份报告（含 Agent 校验、标记要点）</p>
+              <ReportExportCenter key={data.resume_id} analysis={analysis} candidateName={candidateName} resumeId={data.resume_id} />
             </div>
 
             {/* 候选人排名 */}
