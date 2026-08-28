@@ -242,9 +242,7 @@ export default function DashboardPage() {
     return [
       { id: 'sec-overview', label: '评估总览' },
       ...(current.comparison ? [{ id: 'sec-ranking', label: '候选人排名' }] : []),
-      ...(current.hr_analysis.agent_validation && current.hr_analysis.agent_validation.issues.length > 0
-        ? [{ id: 'sec-validation', label: 'Agent 校验' }]
-        : []),
+      ...(current.hr_analysis.agent_validation ? [{ id: 'sec-validation', label: 'Agent 校验' }] : []),
       { id: 'sec-education', label: '教育与履历' },
       { id: 'sec-highlights', label: '亮点与风险' },
       { id: 'resume-review-panel', label: '简历原文标记' },
@@ -501,7 +499,7 @@ export default function DashboardPage() {
                   <p className="mt-5 text-sm leading-7 text-body">{analysis.summary}</p>
                 </Section>
 
-                {/* Agent 校验：折叠徽章，结论区之后按需展开 */}
+                {/* Agent 校验：折叠徽章，始终显示；有问题时可展开详情 */}
                 {analysis.agent_validation && analysis.agent_validation.issues.length > 0 && (
                   <section id="sec-validation" className="scroll-mt-6 rounded-md border border-[#e8dfd0] bg-warn-soft">
                     <button
@@ -542,6 +540,13 @@ export default function DashboardPage() {
                         </div>
                       </div>
                     )}
+                  </section>
+                )}
+
+                {analysis.agent_validation && analysis.agent_validation.issues.length === 0 && (
+                  <section id="sec-validation" className="scroll-mt-6 flex items-center gap-2 rounded-md border border-[#c9e5d6] bg-good-soft px-4 py-3 text-xs font-medium text-good">
+                    <CheckCircle2Icon className="size-3.5 shrink-0" />
+                    <span>Agent 校验：已核查 {analysis.agent_validation.checked_rules} 项要求，全部通过</span>
                   </section>
                 )}
 

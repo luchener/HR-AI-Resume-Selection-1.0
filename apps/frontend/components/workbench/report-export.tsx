@@ -107,6 +107,8 @@ function buildReportInner(opts: {
     </tr>`).join('')}
   </tbody>
 </table>`);
+  } else if (av) {
+    out.push(`<p class="para"><b class="green">✓ Agent 校验：</b>已核查 ${esc(av.checked_rules)} 项要求，全部通过</p>`);
   }
 
   const bs = a.basic_screening;
