@@ -46,202 +46,101 @@ AI 简历智选是面向公司内部招聘团队的多候选人筛选工作台�
 | 岗位专项 | 根据管理、技术、销售、应届生等岗位类型动态生成 |
 | 可信度 | AI 美化程度、模板化表达、缺少事实或量化证据 |
 
-## 技术栈
+## 一、项目架构与技术栈
 
-| 模块 | 技术与职责 |
-| --- | --- |
-| 前端 | Next.js 15.3、React 19、TypeScript 5、Tailwind CSS 4、Lucide React |
-| 后端 | Python 3.12、Flask 3、Gunicorn 23 |
-| AI 接入 | OpenAI Python SDK 1.75、请求级 OpenAI 兼容客户端、结构化 JSON 重试/修复 |
-| 文档解析 | `pdfminer.six` 解析 PDF；标准库 ZIP/XML 解析 DOCX |
-| 数据存储 | 本地 JSON 文件，原子写入，无数据库依赖 |
-| 批量分析 | `ThreadPoolExecutor`，最多 3 位候选人并发且结果相互隔离 |
-| 流式输出 | Server-Sent Events（SSE） |
-| 简历编辑 | 内置 a4cv Resume Studio 静态应用 |
-| 部署 | Docker Compose，或 Nginx + Next.js + Gunicorn |
-| 测试 | Python `unittest`、HTTP E2E、TypeScript/Next.js 构建检查、Playwright 页面检查 |
+### 1.1 架构总览
 
-## 系统架构
-
-```text
-Browser
-  ├─ 上传 1-3 份简历与岗位描述
-  ├─ 保存当前用户的 AI 模型配置
-  └─ 展示候选人报告 / Resume Studio
-          │
-          ▼
-Next.js 15
-  ├─ 工作台与分析报告 UI
-  ├─ /api/* 同源反向代理
-  └─ sessionStorage / localStorage 会话状态
-          │
-          ▼
-Flask 3
-  ├─ parser.py：PDF / DOCX 文本提取
-  ├─ prompts.py：JD 驱动的招聘分析策略
-  ├─ llm.py：请求级模型客户端与 JSON 修复
-  ├─ app.py：并发分析、评分标准化和 API
-  └─ store.py：简历与岗位 JSON 存储
-          │
-          ▼
-DeepSeek / 任意 OpenAI 兼容模型服务
+```
+┌──────────────────────────────────────────────────────────────┐
+│  用户浏览器                                                    │
+│  Next.js 15 前端（React 19 + Tailwind CSS 4）                 │
+│  登录页 → 工作台 → 分析报告 → Resume Studio 编辑器(/a4cv)       │
+└──────────────────────────┬───────────────────────────────────┘
+                           │ 同源 /api/*（Next rewrites 转发）
+┌──────────────────────────▼───────────────────────────────────┐
+│  Nginx 反向代理（可选，生产推荐：80/443 + HTTPS）               │
+└──────────────────────────┬───────────────────────────────────┘
+┌──────────────────────────▼───────────────────────────────────┐
+│  backend 容器 :8000（Gunicorn 4 workers）                     │
+│  Flask 3.0 + Python 3.12                                      │
+│  ├─ auth.py    JWT 认证 + 用户管理                             │
+│  ├─ app.py     路由 + HR 分析编排（ThreadPool 并发）            │
+│  ├─ store.py   JSON 文件存储（原子写）                          │
+│  ├─ llm.py     OpenAI 兼容 LLM 调用 + JSON 容错解析             │
+│  ├─ parser.py  PDF/DOCX 文本提取                               │
+│  └─ prompts.py HR 分析 Prompt 模板                             │
+└────────────┬──────────────────────────────┬───────────────────┘
+             ▼                              ▼
+   data/users/  data/resumes/  data/jobs/  日志 logs/backend.log
+   （JSON 文件，Docker volume 持久化）
 ```
 
-## 项目结构
+### 1.2 技术栈清单
 
-```text
-.
-├─ apps/
-│  ├─ backend/                 # Flask API、LLM、解析、存储和测试
-│  └─ frontend/                # Next.js 工作台、报告页和 Resume Studio
-├─ docs/                       # 项目结构、部署与验证文档
-├─ docker-compose.yml          # 前后端容器编排
-├─ start-resume-matcher.ps1    # Windows 启动脚本
-├─ 一键启动.bat                 # Windows 双击入口
-├─ package.json                # 根目录统一脚本
-└─ README.md
+| 层          | 技术                                        | 版本           |
+| ----------- | ------------------------------------------- | -------------- |
+| 前端框架    | Next.js (App Router)                        | 15.3.0         |
+| 前端 UI     | React + Tailwind CSS + lucide-react         | 19 / 4 / 0.501 |
+| 后端框架    | Flask                                       | 3.0.*          |
+| WSGI 服务器 | Gunicorn                                    | 23.*           |
+| LLM 调用    | openai SDK（兼容 DeepSeek 等）              | 1.75.*         |
+| 认证        | PyJWT (HS256) + PBKDF2 密码哈希             | 2.10.*         |
+| 文档解析    | pdfminer.six + 手写 DOCX(zip+xml) 解析      | 20250327       |
+| 存储        | JSON 文件（零数据库依赖）                   | —              |
+| 部署        | Docker Compose（backend + frontend 双容器） | —              |
+
+### 1.3 目录结构
+
+```
+AIResumeSmartSelection1.0-CloudDeploymentVersion/
+├── apps/
+│   ├── backend/          # Flask 后端（10 个核心 py 文件）
+│   │   ├── auth.py       # JWT、用户、密码和验证码
+│   │   ├── app.py        # 路由 + 分析编排
+│   │   ├── store.py      # JSON 存储（原子写）
+│   │   ├── config.py     # 配置（.env 读取）
+│   │   ├── mailer.py     # SMTP HTML/纯文本验证码邮件
+│   │   ├── reset_password_cli.py # 管理员重置无邮箱账号
+│   │   └── llm.py / parser.py / prompts.py / run.py
+│   │       # LLM 调用、文档解析、Prompt、启动辅助
+│   │   ├── .env          # 密钥（gitignore，不入库）
+│   │   └── Dockerfile
+│   └── frontend/         # Next.js 前端
+│       ├── app/          # 页面路由（login/dashboard/首页）
+│       ├── components/workbench/  # 工作台组件 + auth-context
+│       ├── lib/api/      # API 封装（带 JWT 头）
+│       ├── public/a4cv/  # 独立简历编辑器
+│       └── Dockerfile
+├── docker-compose.yml
+├── package.json          # 根脚本（build/start/docker:*）
+├── .dockerignore
+└── docs/                 # 文档
 ```
 
-完整文件职责见 [docs/PROJECT_STRUCTURE.md](./docs/PROJECT_STRUCTURE.md)。
+### 1.4 运行环境要求
 
-## 环境要求
+#### 本地开发环境
 
-- Node.js 20 或更高版本。
-- Python 3.12 或更高版本。
-- npm。
-- 可用的 DeepSeek API Key，或其他 OpenAI 兼容服务凭证。
-- Docker 部署时需要 Docker Engine 20.10+ 与 Docker Compose v2。
+| 项目     | 要求                                       |
+| -------- | ------------------------------------------ |
+| 操作系统 | Windows 10/11、macOS、Ubuntu 22.04+        |
+| Node.js  | 20 LTS 或更高                              |
+| npm/pnpm | npm 10+ 或 pnpm 9+                         |
+| Python   | 3.12                                       |
+| 内存     | 8 GB 推荐；前端构建建议至少 4 GB 可用内存  |
+| 网络     | 可访问 DeepSeek 或其他 OpenAI 兼容 LLM API |
 
-## 本地运行
+#### 生产环境
 
-### Windows 一键启动
+推荐腾讯云 Ubuntu Server 24.04 LTS：
 
-首次运行先安装依赖：
-
-```powershell
-python -m venv apps/backend/.venv
-apps/backend/.venv/Scripts/python.exe -m pip install -r apps/backend/requirements.txt
-cd apps/frontend
-npm ci
-cd ../..
-```
-
-之后双击 `一键启动.bat`，或执行：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\start-resume-matcher.ps1
-```
-
-默认地址：
-
-- 前端：`http://127.0.0.1:3008`
-- 后端：`http://127.0.0.1:9001`
-
-### 手动启动
-
-复制配置文件：
-
-```bash
-cp apps/backend/.env.sample apps/backend/.env
-cp apps/frontend/.env.sample apps/frontend/.env
-```
-
-启动后端：
-
-```bash
-cd apps/backend
-python -m venv .venv
-# Windows: .venv/Scripts/python -m pip install -r requirements.txt
-# Linux/macOS: .venv/bin/python -m pip install -r requirements.txt
-.venv/Scripts/python run.py --host 127.0.0.1 --port 9001
-```
-
-启动前端：
-
-```bash
-cd apps/frontend
-npm ci
-npm run dev -- --hostname 127.0.0.1 -p 3008
-```
-
-打开 `http://127.0.0.1:3008`，先在右上角配置并测试 AI 模型，再上传简历和岗位描述。
-
-## Docker Compose
-
-```bash
-cp apps/backend/.env.sample apps/backend/.env
-# ENV=production 时必须修改 SESSION_SECRET_KEY
-docker compose up --build -d
-```
-
-Docker 默认仅绑定本机回环地址：
-
-- 前端：`127.0.0.1:3000`
-- 后端：`127.0.0.1:8000`
-
-生产环境应由 Nginx 统一提供 HTTPS 和 `/api/` 反向代理。详细步骤见：
-
-- [服务器部署](./docs/SERVER_DEPLOY.md)
-- [宝塔面板部署](./docs/BAOTA_DEPLOY.md)
-
-## 环境变量
-
-### 后端 `apps/backend/.env`
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `ENV` | `local` | `local` 或 `production` |
-| `SESSION_SECRET_KEY` | `change-me` | production 必须改为随机值 |
-| `LLM_API_KEY` | 空 | 可选的服务端默认 API Key |
-| `LLM_BASE_URL` | `https://api.deepseek.com` | 可选的服务端默认 Base URL |
-| `LLM_MODEL` | `deepseek-v4-flash` | 可选的服务端默认模型 |
-| `BACKEND_PORT` | `9001` | 本地 Flask 端口；Docker 内部固定为 8000 |
-| `ALLOWED_ORIGINS` | 本地开发来源 | 跨域前端来源；同源代理可留空 |
-| `LOG_DIR` | `apps/backend/logs` | 后端日志目录 |
-
-### 前端 `apps/frontend/.env`
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `NEXT_PUBLIC_API_URL` | 空 | 空值表示浏览器请求同源 `/api/*` |
-| `BACKEND_INTERNAL_URL` | `http://127.0.0.1:9001` | Next.js 同源代理访问的后端地址 |
-
-## API
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| `GET` | `/ping` | 后端健康检查 |
-| `POST` | `/api/v1/ai/test` | 测试浏览器提交的模型配置 |
-| `POST` | `/api/v1/resumes/upload` | 上传并解析单份简历 |
-| `POST` | `/api/v1/resumes/hr-analysis` | 分析 1 至 3 位候选人 |
-| `POST` | `/api/v1/resumes/improve?stream=true` | SSE 深度优化 |
-| `POST` | `/api/v1/resumes/improved-markdown` | 生成 Resume Studio Markdown |
-| `GET` | `/api/v1/resumes?resume_id=...` | 获取简历数据 |
-| `POST` | `/api/v1/jobs/upload` | 保存岗位描述 |
-| `GET` | `/api/v1/jobs?job_id=...` | 获取岗位数据 |
-
-## 测试与构建
-
-```bash
-# 后端招聘分析测试（不调用真实模型）
-cd apps/backend
-python -m unittest -v test_hr_analysis.py
-
-# HTTP 冒烟测试；默认生成匿名 DOCX，不依赖真实简历文件
-python test_e2e.py --base-url http://127.0.0.1:9001 --skip-llm
-
-# 前端检查
-cd ../frontend
-npm run lint
-npm run build
-```
-
-完整 E2E 会调用模型并产生少量 token 消耗：
-
-```bash
-python apps/backend/test_e2e.py --base-url http://127.0.0.1:9001
-```
-
+- 2 核 4 GB 起步；并发分析推荐 4 核 8 GB；
+- 磁盘 40 GB 起步，按简历数量扩容；
+- Docker Engine 24+、Docker Compose v2；
+- 安全组只开放 22、80、443，3000/8000 不直接暴露公网；
+- 域名 A 记录指向服务器公网 IP；
+- 已开通 SMTP 服务并取得授权码；
+- 服务器可以访问 LLM API。。
 ## 数据与安全
 
 - `apps/backend/data/` 保存运行时简历与岗位 JSON，已被 Git 忽略。
