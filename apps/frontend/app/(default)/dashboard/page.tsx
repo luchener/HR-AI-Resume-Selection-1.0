@@ -21,12 +21,14 @@ import {
   SparklesIcon,
   TargetIcon,
   TrophyIcon,
+  ArchiveIcon,
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
 import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analysis-context';
 import ResumeReviewPanel from '@/components/workbench/resume-review-panel';
 import ReportExportCenter, { AGENT_RULE_LABELS } from '@/components/workbench/report-export';
 import { analyzeResumes, fetchImprovedMarkdown, improveResumeStream } from '@/lib/api/screening';
+import { createArchive, ARCHIVE_PRESET_CATEGORIES } from '@/lib/api/archives';
 
 type Action = 'reanalyze' | 'improve' | 'editor' | null;
 
@@ -235,6 +237,11 @@ export default function DashboardPage() {
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [showAgentValidation, setShowAgentValidation] = useState(false);
+  const [archiveNote, setArchiveNote] = useState('');
+  const [archiving, setArchiving] = useState(false);
+  const [archiveModalOpen, setArchiveModalOpen] = useState(false);
+  const [archiveCategory, setArchiveCategory] = useState('');
+  const [archiveCategoryCustom, setArchiveCategoryCustom] = useState('');
 
   const reportNavItems = useMemo(() => {
     const current = analysisResult?.data;
@@ -352,6 +359,46 @@ export default function DashboardPage() {
     }
   };
 
+  // ── 归档到候选人才库 ─────────────────────────────────────────────
+  const openArchiveModal = () => {
+    setError('');
+    setArchiveNote('');
+    // 默认分类预填 JD 岗位名（若有），HR 可改成预设分类或自定义
+    setArchiveCategory('');
+    setArchiveCategoryCustom('');
+    setArchiveModalOpen(true);
+  };
+
+  const resolveArchiveCategory = () => {
+    const custom = archiveCategoryCustom.trim();
+    if (custom) return custom;
+    if (archiveCategory) return archiveCategory;
+    return '';
+  };
+
+  const handleArchive = async () => {
+    if (!analysis || !data.resume_id || !data.job_id || archiving) return;
+    setArchiving(true);
+    setError('');
+    setArchiveNote('');
+    const category = resolveArchiveCategory();
+    setArchiveModalOpen(false);
+    try {
+      const record = await createArchive(data.resume_id, data.job_id, {
+        candidateName,
+        finalScore: analysis.final_score,
+        category: category || undefined,
+        analysis: analysis as unknown as Record<string, unknown>,
+        analysisResult: data.analysis_result,
+      });
+      setArchiveNote(`已归档「${record.candidate_name}」到候选人才库`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '归档失败，请稍后重试。');
+    } finally {
+      setArchiving(false);
+    }
+  };
+
   const recommendationClass = analysis?.recruitment_recommendation === '优先面试'
     ? 'bg-good-soft text-good'
     : analysis?.recruitment_recommendation === '储备观察'
@@ -375,6 +422,9 @@ export default function DashboardPage() {
               <>
                 <button type="button" disabled={busy} onClick={handleReanalyze} className="inline-flex h-10 items-center gap-2 rounded-md border border-line-soft bg-white px-4 text-sm font-medium text-ink hover:bg-mist disabled:opacity-50">
                   {action === 'reanalyze' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />} 重新分析
+                </button>
+                <button type="button" disabled={busy || archiving} onClick={openArchiveModal} className="inline-flex h-10 items-center gap-2 rounded-md border border-[#cfe3d8] bg-[#e8f5ee] px-4 text-sm font-medium text-[#1d7f5c] hover:bg-[#d9efe4] disabled:opacity-50">
+                  {archiving ? <LoaderCircleIcon className="size-4 animate-spin" /> : <ArchiveIcon className="size-4" />} 归档到人才库
                 </button>
                 <button type="button" disabled={busy} onClick={handleImprove} className="inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-[#263a5e] disabled:opacity-50">
                   {action === 'improve' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <SparklesIcon className="size-4" />} 深度优化简历
@@ -439,6 +489,13 @@ export default function DashboardPage() {
               <p className="text-xs text-sub">导出整份报告（含 Agent 校验、标记要点）</p>
               <ReportExportCenter key={data.resume_id} analysis={analysis} candidateName={candidateName} resumeId={data.resume_id} />
             </div>
+
+            {/* 归档提示 */}
+            {archiveNote && (
+              <div className="mt-4 flex items-center gap-3 rounded-md border border-[#bfe3d0] bg-[#e8f5ee] px-4 py-3 text-sm text-[#1d7f5c]">
+                <CheckCircle2Icon className="size-4 shrink-0" /> {archiveNote}
+              </div>
+            )}
 
             {/* 候选人排名 */}
             {data.comparison && (
@@ -679,6 +736,67 @@ export default function DashboardPage() {
           </section>
         )}
       </div>
+
+      {/* 归档分类弹窗 */}
+      {archiveModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="归档到候选人才库"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setArchiveModalOpen(false); }}
+        >
+          <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold text-ink">归档到候选人才库</h3>
+            <p className="mt-1 text-sm text-sub">选择或自定义岗位分类，方便后续按分类筛选排名。</p>
+
+            <div className="mt-4">
+              <p className="mb-2 text-xs font-medium text-sub">预设分类</p>
+              <div className="flex flex-wrap gap-2">
+                {ARCHIVE_PRESET_CATEGORIES.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => { setArchiveCategory(c); setArchiveCategoryCustom(''); }}
+                    className={`rounded-full border px-3 py-1 text-sm transition-colors ${archiveCategory === c && !archiveCategoryCustom ? 'border-brand bg-brand-soft text-brand' : 'border-line-soft bg-white text-body hover:bg-mist'}`}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <label className="mb-1.5 block text-xs font-medium text-sub">自定义分类</label>
+              <input
+                type="text"
+                value={archiveCategoryCustom}
+                onChange={(e) => { setArchiveCategoryCustom(e.target.value); setArchiveCategory(''); }}
+                placeholder="如：AI 算法工程师、跨境电商运营…（留空则使用岗位名）"
+                className="w-full rounded-md border border-line-soft px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+              />
+            </div>
+
+            <div className="mt-6 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setArchiveModalOpen(false)}
+                className="rounded-md border border-line-soft bg-white px-4 py-2 text-sm font-medium text-ink hover:bg-mist"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                disabled={archiving}
+                onClick={handleArchive}
+                className="inline-flex items-center gap-2 rounded-md bg-[#1d7f5c] px-4 py-2 text-sm font-medium text-white hover:bg-[#18694d] disabled:opacity-50"
+              >
+                {archiving ? <LoaderCircleIcon className="size-4 animate-spin" /> : <ArchiveIcon className="size-4" />} 确认归档
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </AppShell>
   );
 }

@@ -79,6 +79,11 @@ Thumbs.db
 # Build artifacts
 build/
 dist/
+*.tsbuildinfo
+
+# 一次性部署脚本（含服务器路径，不进开源仓库）
+/deploy-archive.sh
+/verify-archive-deploy.sh
 
 # ---- 个人开发笔记 / 临时文件（不应进入开源仓库）----
 # 注意：README.md、docs/ 下的文档不在忽略范围，仍可正常提交。

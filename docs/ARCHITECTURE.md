@@ -54,8 +54,10 @@
 | 层 | 技术 | 版本 |
 |----|------|------|
 | 前端框架 | Next.js (App Router) | 15.3.0 |
-| 前端 UI | React + Tailwind CSS + lucide-react | 19 / 4 / 0.501 |
-| 前端导出 | html2canvas（截图 → PNG 导出） | 1.4.1 |
+| 前端 UI | React + Tailwind CSS v4 + lucide-react | 19 / 4 / 0.501 |
+| 前端导出 | html2canvas（报告图片实时生成 → JPEG 下载，不落盘） | 1.4.1 |
+| 前端设计令牌 | Tailwind v4 `@theme` 18 语义色（ink/body/sub/line/brand/good/bad/warn/violet），核心页硬编码色值从 148 种收敛到 6 种 | — |
+| 前端阅读逻辑 | 侧栏页内导航（scroll-spy 高亮）、信息去重、collapsible 折叠徽章、可点击排名行 | — |
 | 后端框架 | Flask | 3.0.* |
 | WSGI 服务器 | Gunicorn | 23.* |
 | LLM 调用 | openai SDK（兼容 DeepSeek 等） | 1.75.* |
@@ -72,7 +74,7 @@ AIResumeSmartSelection1.0-CloudDeploymentVersion/
 │   ├── backend/          # Flask 后端（15 个核心 py 文件）
 │   │   ├── auth.py       # JWT、用户、密码和验证码
 │   │   ├── app.py        # 路由 + 分析编排（含 HR 分析 + 简历重点标记）
-│   │   ├── store.py      # JSON 存储（原子写）
+│   │   ├── store.py      # JSON 存储（原子写，含归档人才库）
 │   │   ├── config.py     # 配置（.env 读取）
 │   │   ├── mailer.py     # SMTP HTML/纯文本验证码邮件
 │   │   ├── reset_password_cli.py # 管理员重置无邮箱账号
@@ -87,10 +89,17 @@ AIResumeSmartSelection1.0-CloudDeploymentVersion/
 │   │   ├── .env          # 密钥（gitignore，不入库）
 │   │   └── Dockerfile
 │   └── frontend/         # Next.js 前端
-│       ├── app/          # 页面路由（login/dashboard/首页）
+│       ├── app/          # 页面路由（login/dashboard/首页/archives）
+│       ├── app/(default)/css/globals.css  # 全局样式 + @theme 语义色令牌
 │       ├── components/workbench/  # 工作台组件 + auth-context
-│       ├── lib/api/      # API 封装（带 JWT 头）
-│       ├── public/a4cv/  # 独立简历编辑器
+│       │   ├── app-shell.tsx         # 侧栏壳（导航 + 用户 + 版权）
+│       │   ├── analysis-workbench.tsx # 首页工作台（上传 + JD + 分析触发）
+│       │   ├── analysis-context.tsx  # 分析结果上下文 + 类型定义
+│       │   ├── report-export.tsx     # 统一导出中心（图片/PDF/Word）
+│       │   ├── resume-review-panel.tsx # 简历重点标记面板
+│       │   └── auth-context.tsx      # 登录态管理
+│       ├── lib/api/      # API 封装（带 JWT 头，含 archives.ts 归档客户端）
+│       └── public/a4cv/  # 独立简历编辑器
 │       └── Dockerfile
 ├── docker-compose.yml
 ├── package.json          # 根脚本（build/start/docker:*）
@@ -296,8 +305,11 @@ data/                          # BASE_DIR/data（启动自动创建）
 │   └── <purpose>.<sha256>.json
 ├── resumes/                   # 简历
 │   └── <resume_id>.json
-└── jobs/                      # 岗位 JD
-    └── <job_id>.json
+├── jobs/                      # 岗位 JD
+│   └── <job_id>.json
+└── archives/                  # 归档人才库（纯 JSON，无图片文件）
+    ├── <archive_id>.json      # 归档明细（含完整 analysis 快照）
+    └── _index.json            # 全局索引（active / trashed 双列表）
 logs/                          # 日志（.env LOG_DIR 可配置）
 └── backend.log
 ```
@@ -348,9 +360,42 @@ logs/                          # 日志（.env LOG_DIR 可配置）
 上传简历 → 解析 PDF/DOCX → data/resumes/<uuid>.json（带 user_id）
 粘贴 JD  → 本地规则摘要 → data/jobs/<uuid>.json（带 user_id + resume_id）
 AI 分析 → 结果只存内存缓存（_HR_ANALYSIS_CACHE），不落盘
+归档人才库 → data/archives/<archive_id>.json（分析结果快照 + 完整 analysis，无图片）
 ```
 
 > 分析结果不落盘是**有意的设计**：简历/JD 原始数据持久化，AI 分析结果每次实时生成，避免磁盘膨胀且保证用最新模型配置。
+
+> 归档人才库是**唯一的分析结果落盘点**：归档时把当次完整 `hr_analysis` 写入归档 JSON，供候选人才库长期查看与导出。报告图片**不存储**，查看/导出时由前端用归档里的 `analysis` 实时 html2canvas 生成 JPEG 下载（见 8.6）。
+
+### 3.5 归档人才库文件结构
+
+```jsonc
+// data/archives/<archive_id>.json
+{
+  "archive_id": "uuid...",
+  "user_id": "uuid...",             // ← 归属字段（多用户隔离）
+  "resume_id": "uuid...",           // 关联简历
+  "job_id": "uuid...",              // 关联岗位
+  "candidate_name": "苏明远",
+  "final_score": 86,
+  "fit_tag": "高匹配",
+  "recruitment_recommendation": "优先面试",
+  "job_title": "AI Agent 工程师",   // JD 自动提取的岗位名
+  "category": "IT",                 // 岗位分类：HR 预设/自定义，空则回退 job_title
+  "custom_tags": ["AI", "社招"],     // HR 自定义标签
+  "analysis_snapshot": { ... },      // 精简摘要（列表页展示）
+  "analysis": { ... },              // 完整 hr_analysis（详情页 + 实时导出报告图片）
+  "status": "active",               // active | trashed（软删除）
+  "trashed_at": null,
+  "created_at": "ISO 时间"
+}
+```
+
+**归档要点**：
+- **幂等**：同一 `(user_id, resume_id, job_id)` 重复归档返回已有记录，不重复建号。
+- **不存图片**：无 `image_path` 字段、无 `archive_images/` 目录。报告图片由前端用 `analysis` 实时生成。
+- **`analysis` 仅在详情接口返回**（`GET /archives/<id>`），列表接口只返回 `analysis_snapshot`，避免响应过大。
+- **简历标记要点不进归档**：导出报告图片时经 `review-markers` 接口实时生成（零 Token，见第八章）。
 
 ---
 
@@ -457,6 +502,25 @@ Content-Type: application/json
 | `GET` | `/api/v1/resumes/hr-analysis` | 查询分析结果/缓存结果 |
 | `GET` | `/api/v1/resumes` | 获取简历内容（含自动 ASCII 垃圾过滤） |
 | `POST` | `/api/v1/resumes/review-markers` | 生成简历重点标记（匹配亮点/岗位匹配/待核实/学历待核实） |
+
+#### 归档人才库接口
+
+以下接口均需要 JWT，`archive_id` 资源均校验归属（跨用户返回 404）：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/v1/archives` | 幂等创建归档（`resume_id` + `job_id` 唯一），携带 `category` 与完整 `analysis` |
+| `GET` | `/api/v1/archives` | 人才库列表（active），支持 `name` / `job_title` / `category` / `tag` 筛选与 `sort` 排序；`meta` 返回 `job_titles` / `categories` |
+| `GET` | `/api/v1/archives/trash` | 回收站列表（trashed） |
+| `GET` | `/api/v1/archives/<archive_id>` | 归档详情（含完整 `analysis`，供导出报告图片） |
+| `PATCH` | `/api/v1/archives/<archive_id>/tags` | 更新自定义标签 |
+| `PATCH` | `/api/v1/archives/<archive_id>/category` | 更新岗位分类 |
+| `DELETE` | `/api/v1/archives/<archive_id>` | 移入回收站（软删除） |
+| `POST` | `/api/v1/archives/<archive_id>/restore` | 从回收站恢复 |
+| `DELETE` | `/api/v1/archives/trash/<archive_id>` | 回收站内彻底删除单条 |
+| `DELETE` | `/api/v1/archives/trash` | 清空回收站 |
+
+> 归档报告图片**无独立上传/下载接口**：图片不落盘，由前端用归档详情里的 `analysis` 实时生成 JPEG 下载（见 8.6）。
 
 ### 4.5 错误状态码
 
@@ -568,6 +632,8 @@ docker compose up -d backend frontend
 ```
 
 仅执行 `docker compose build` 不会自动替换当前运行容器。构建后必须执行对应的 `up -d 服务名`，并检查容器启动时间。
+
+> ⚠️ **已知问题（containerd 网络层挂起）**：本服务器（腾讯云 Ubuntu 24.04）偶发容器网络命名空间挂起，表现为 `127.0.0.1:3000` 连接超时（nginx 504）但容器内进程正常启动。连 `robots.txt` 静态路由都超时即属此问题。处置：`docker compose up -d --force-recreate frontend` 强制重建网络命名空间，约 10-20 秒恢复。若 backend 也挂起：`sudo systemctl restart docker` + `docker compose up -d`（全容器重启，中断约 1-2 分钟）。
 
 验证 backend 是否包含验证码新版：
 
@@ -879,19 +945,55 @@ futures = {
 | `major` | 学习专业名称（简历原文，不做匹配判断） |
 | `graduation_year` | 毕业时间 |
 
-**排序逻辑**（`_normalize_education_history`）：博士 > 硕士 > 本科 > 专科 > 大专 > 其他。
+**排序逻辑**（`_normalize_education_history`）：博士 > 硕士 > 本科 > 专科 > 大专 > 其他。**全段保留**：Prompt 规则要求报告所有教育经历，前端无 `[:8]` 截断（commit 8ded42a 移除原限制，经历列表超出 8 项时仍完整展示）。
 
-### 8.6 前端导出功能
+### 8.6 统一导出中心
 
-三个导出按钮，均在前端无服务端依赖：
+**位置**：`components/workbench/report-export.tsx`（默认导出 `ReportExportCenter`）。
+
+三个按钮位于报告页指标卡下方，导出一份 HTML 文档模型 + 三种格式，**无服务端依赖**：
 
 | 按钮 | 技术 | 说明 |
-|---|---|---|
-| **导出图片** | `html2canvas` 截图隐藏 DOM → 2x 缩放 → PNG 下载 | 最稳，直接下载 |
-| **打印 PDF** | `window.open()` + `window.print()` | 浏览器打印对话框，需用户选"另存为 PDF" |
-| **导出 Word** | HTML + `xmlns:w` + `.doc` 扩展名 | Word 兼容 HTML，直接打开可编辑 |
+|------|------|------|
+| **导出图片** | `html2canvas` 隐藏 offscreen div → 2x 缩放 → JPEG（q0.9）下载 | 最稳定，直接下载 |
+| **打印 PDF** | 隐藏 iframe `doc.write` + `win.print()` | 用户选"另存为 PDF"；替代 `window.open`（不被弹窗拦截） |
+| **导出 Word** | 同一 HTML + `xmlns:w` Office 命名空间 + `.doc` 扩展名 | Word 打开即可编辑 |
 
-**PDF 手动另存为说明**：浏览器安全限制禁止静默下载 PDF，这是不可绕过的安全策略。UI 中按钮下方有提示文字说明。
+**导出内容**：评估总览 → 核心判定 → Agent 校验（始终输出，通过时绿色一行）→ 基础信息 → 教育经历（全段，无 `[:8]` 截断）→ 工作履历 + 经历明细 → 匹配亮点 → 短板与风险 → 专业技能 → 竞争力加分项 → 岗位定制判断 → 美化程度判断依据 → 简历标记要点表。
+
+**注意**：导出不包含评分构成（裸分数无参考价值）和候选人排名（单份报告不需要交叉对比，批量场景中排名在页面查看）。
+
+**标记数据懒加载**：首次导出才请求 `fetchResumeReviewMarkers`，失败不阻断报告生成（跳过标记表）。切换候选人时组件按 `resume_id` 重挂载，缓存清零。
+
+**Word 安全样式**：导出 HTML 仅使用 `table`/`h*`/`p`/`ul` 等安全标签，避免 flex 布局造成 Word 排版塌陷。
+
+#### 归档报告图片实时导出（方案 B）
+
+`report-export.tsx` 额外导出两个函数，供候选人才库「导出报告图片」使用——**图片不存储、不落盘，按需实时生成**：
+
+| 函数 | 说明 |
+|------|------|
+| `captureReportPng(opts)` | 用 `analysis` + `resumeId` 生成报告图片 `Blob`（JPEG q0.9，2x 缩放），**不触发下载**；失败返回 `null` |
+| `downloadReportImage(opts)` | 调用 `captureReportPng` 后直接触发浏览器下载（`候选人分析报告-<姓名>.jpg`），返回是否成功 |
+
+数据流：
+
+```
+归档详情（detail.analysis，完整 hr_analysis，已存 JSON）
+   │
+   ▼
+buildReportInner(analysis) → 报告 HTML（13 个模块）
+   │  + fetchResumeReviewMarkers(resume_id, analysis)  ← 简历标记要点，实时零 Token，不进归档 JSON
+   ▼
+html2canvas 离屏渲染 → canvas.toBlob('image/jpeg', 0.9) → Blob
+   ▼
+URL.createObjectURL + <a download> → 浏览器下载 JPEG
+```
+
+要点：
+- **只存「配方」（analysis JSON），不存「成品」（图片）**——每份归档仅几 KB JSON，1000 份 <10MB，替代原先每份 300KB–4MB PNG 的方案。
+- 数据隔离天然成立：导出用的是**该归档自己存的那份 `analysis`**，与"重新分析任何人"互不影响。
+- 旧归档若缺完整 `analysis`（本轮之前归档的），前端禁用导出按钮并提示重新归档。
 
 ### 8.7 批量分析切换
 
@@ -945,7 +1047,11 @@ futures = {
 
 **修订回退**：深度核查触发修订后，修订稿重新过 `_validate_report`；结构校验不通过（或需求抽取本身失败）时回退保留原报告，`revised` 置回 `false`。
 
-**前端展示**：dashboard 页面「Agent 校验」模块，以表格形式展示 JD 要求 / 问题 / 修正三列，仅当 `issues.length > 0` 时显示；摘要文案按 `revised` 区分"检出 N 个问题并已修正"/"检出 N 个问题"。
+**前端展示**：dashboard 页面「Agent 校验」模块始终显示（只要 `hr_analysis.agent_validation` 存在）：
+- 全部通过 → 绿色单行徽章「✓ Agent 校验：已核查 N 项要求，全部通过」，不可展开
+- 检出问题 → 琥珀色折叠徽章「Agent 校验：已核查 N 项要求，检出 N 个问题并已修正」，点「详情」展开问题表格（问题类型/问题/修正三列）
+- 右侧导航「Agent 校验」锚点同步存在，可滚动跳转
+- 导出报告同样始终输出校验结论（通过时一行绿色 `✓ Agent 校验`，有问题时带问题表）
 
 ### 8.9 跨候选人对比
 
@@ -961,7 +1067,7 @@ futures = {
 
 **容错**：LLM 调用失败（无 key / 超时 / 网络异常）时返回 `None` 并记日志，批量响应不受影响（对比只是增强能力）。前端在切换候选人时保留 `comparison` 字段，避免「候选人排名」消失。
 
-**前端展示**：dashboard 页面「候选人排名」模块，展示排名表格 + 差异对比 + 优先面试建议。
+**前端展示**：dashboard 页面「候选人排名」模块，展示排名表格 + 差异对比 + 优先面试建议。排名在页面始终显示（批量模式），**导出报告中不包含**（单份决策报告无需交叉对比）。
 
 ---
 
@@ -993,110 +1099,42 @@ futures = {
 | `apps/frontend/components/workbench/resume-review-panel.tsx` | 🆕 简历重点标记面板（高亮渲染 + 三种导出） |
 | `apps/frontend/lib/api/screening.ts` | 新增 `fetchResumeReviewMarkers` / `fetchResumeView` API |
 | `apps/frontend/components/workbench/analysis-context.tsx` | `HrAnalysis` 类型：新增 `education_history` / `agent_validation`；新增 `CandidateComparison` |
-| `apps/frontend/app/(default)/dashboard/page.tsx` | 基础信息筛选精简 + 教育经历 + 候选人排名 + Agent 校验 |
+| `apps/frontend/app/(default)/dashboard/page.tsx` | 报告页：指标卡 → 导出中心 → 排名 → 核心判定 → Agent 校验（始终可见）→ 基础信息 → 教育经历 → 工作履历 → 亮点/短板/风险 → 技能/加分 → 岗位定制/美化依据；右侧 sticky 决策摘要 + 页内导航（scroll-spy）|
+| `apps/frontend/components/workbench/report-export.tsx` | 🆕 统一导出中心：单 HTML 模型 × 3 格式（JPEG/PDF/Word），懒加载标记数据；另导出 `captureReportPng` / `downloadReportImage` 供归档实时导出 |
 | `.dockerignore` | 排除 `test_*.py` / `smoke_test_*.py` / `*.log`（不进生产镜像） |
 | `apps/backend/Dockerfile` | `COPY apps/backend/*.py ./`（通配符，新模块自动包含） |
-| `package.json`（前端） | + `html2canvas@1.4.1`（PNG 导出依赖） |
+| `package.json`（前端） | + `html2canvas@1.4.1`（报告图片导出依赖） |
 
-一、基础信息筛选
+### 归档人才库 + 回收站模块文件清单
 
-1. 学历信息 
+| 文件 | 职责 |
+|------|------|
+| `apps/backend/config.py` | 🆕 `ARCHIVES_DIR` 目录常量（随 `DATA_DIR` 自动创建；无图片目录） |
+| `apps/backend/store.py` | 🆕 归档读写：`save_archive`（幂等，存 `category` + 完整 `analysis`）/ `find_existing_archive` / `list_archives` / `query_archives`（姓名模糊+岗位+分类+标签）/ `get_distinct_job_titles` / `get_distinct_categories` / `soft_delete_archive` / `restore_archive` / `permanent_delete_archive` / `empty_trash` / `update_archive_tags` / `update_archive_category`；`_index.json` 全局索引（active/trashed 双列表） |
+| `apps/backend/app.py` | 🆕 归档 API：`POST /api/v1/archives`（幂等创建，接收 `category` + 完整 `analysis`）、`GET /api/v1/archives`（列表+姓名/岗位/分类/标签筛选+排序，`meta` 返回分类）、`GET /api/v1/archives/trash`、`GET /api/v1/archives/<id>`（详情，含完整 `analysis`）、`PATCH /api/v1/archives/<id>/tags`、`PATCH /api/v1/archives/<id>/category`、`DELETE /api/v1/archives/<id>`（软删）、`POST /api/v1/archives/<id>/restore`、`DELETE /api/v1/archives/trash/<id>`（彻底删）、`DELETE /api/v1/archives/trash`（清空） |
+| `apps/frontend/lib/api/archives.ts` | 🆕 归档 API 客户端：`ARCHIVE_PRESET_CATEGORIES` 预设分类、`createArchive`（含 `category`）、`fetchArchives`（含分类筛选）、`fetchTrash`、`fetchArchiveDetail`、`updateArchiveTags`、`updateArchiveCategory`、`moveToTrash`、`restoreArchive`、`permanentDeleteArchive`、`emptyTrash` |
+| `apps/frontend/components/workbench/app-shell.tsx` | 侧边导航 🆕 新增「候选人才库」入口（`/archives`，`ArchiveIcon`），`active` 类型扩展为 `'home' \| 'report' \| 'archives'` |
+| `apps/frontend/app/(default)/archives/page.tsx` | 🆕 候选人才库页：双 Tab（在库人才 / 回收站）、姓名查询（防抖）、分类筛选（预设 + 已有分类）、标签筛选、动态排名（同分并列）、详情抽屉（岗位分类编辑 + 标签编辑 + 「导出报告图片」实时生成下载）、恢复/彻底删除/清空回收站（二次确认） |
+| `apps/frontend/app/(default)/dashboard/page.tsx` | 报告页头部 🆕 「归档到人才库」按钮：弹出分类选择框（预设 chips + 自定义输入），归档时只传 `category` + 完整 `analysis`，不再上传图片 |
+| `apps/frontend/components/workbench/report-export.tsx` | 🆕 `captureReportPng`（生成 JPEG blob）/ `downloadReportImage`（实时生成 + 下载）；移除 `onPngBlob` 回调 |
+| `apps/backend/test_archives.py` | 🆕 store 层单测：归档 CRUD、幂等、姓名/岗位/分类/标签查询、分类去重与回退、软删/恢复/彻底删/清空、归属隔离（临时目录隔离） |
+| `apps/backend/test_archives_api.py` | 🆕 API 冒烟测试：全链路（归档→查询→改分类/标签→软删→恢复→彻底删）、分类创建与 PATCH、鉴权、归属隔离、清空回收站 |
 
-•	最高学历、院校层次（985/211 / 一本 / 二本 / 专科）、统招 / 非统招
-•	专业匹配度：对口 / 相关 / 无关专业
-•	毕业时间、是否应届生
+### 归档数据流（无 LLM 调用，无图片存储）
 
-2. 年龄、性别（部分岗位参考）、工作所在地、期望薪资
-3. 证书资质 
-
-•	硬性必备证书（计算机、财会、教资、行业资格证）
-•	加分证书（英语四六级、PMP、软考、技能认证）
-•	证书有效期、含金量
-二、工作履历硬指标（核心硬性门槛）
-
-1. 总工作年限、相关岗位从业年限
-2. 行业匹配：过往行业是否和招聘业务一致
-3. 公司背景：大厂 / 上市公司 / 中小企业 / 初创
-4. 岗位层级：专员 / 主管 / 经理 / 总监 / 管理岗（带人规模）
-5. 跳槽稳定性 
-
-•	每份工作在职时长、短期跳槽（1 年内频繁换工作）
-•	空窗期时长、空窗原因合理性
-
-6. 岗位职责重合度：过往工作内容是否覆盖 JD 核心工作
-
-三、专业技能匹配（AI 重点打分维度）
-
-1. 硬性技术栈 / 岗位技能 
-
-•	IT 岗：编程语言、框架、服务器、运维工具、数据库
-•	人事行政：招聘、绩效、薪酬、员工关系、OA 系统
-•	市场运营：投放、短视频、活动策划、数据分析
-
-2. 工具掌握程度：熟练 / 了解 / 精通
-3. 项目经验匹配 
-
-•	项目类型、项目规模、个人负责模块
-•	项目成果量化数据（降本、提效、营收、用户量）
-•	是否有同行业标杆项目经验
-
-4. 软实力：沟通、统筹、跨部门协作、抗压、执行力
-
-四、综合竞争力加分项
-
-1. 业绩量化成果（带数据成果优先）
-2. 获奖荣誉：校内奖、行业奖项、公司绩效评优
-3. 实习经历（应届生重点）、校企项目
-4. 附加能力：外语、跨部门管理、跨区域项目、独立操盘项目
-5. 学习能力：自学新技术、持续进修、在职提升学历
-
-五、简历风险预警维度（HR 淘汰关键，项目必加）
-
-1. 履历断层：长期空窗无合理解释
-2. 高频跳槽：1 年 2 份及以上工作，稳定性差
-3. 履历造假风险：工作时间冲突、项目逻辑矛盾、学历存疑
-4. 能力断层：岗位跨度极大，无过渡经验
-5. 薪资预期严重超出岗位预算
-6. 地点不符：无法到岗、异地不接受通勤
-7. 技能空白：JD 核心要求完全无相关经验
-8. 管理矛盾：管理岗无带人经验，简历夸大层级
-
-六、适配招聘岗位的定制化维度（动态字段）
-
-1. 管理岗专属：团队管理人数、预算管控、团队搭建、人才培养经验
-2. 技术岗专属：故障排查、架构设计、落地项目、线上运维经验
-3. 销售业务岗：业绩指标、客户资源、回款数据、拓客渠道
-4. 应届生专属：实习、校园干部、竞赛、毕业设计、校园项目
-
-七、最终综合输出字段（可直接 JSON 结构化存入项目）
-
-1. 整体匹配得分（0-100 分）
-2. 核心优势
-3. 短板不足
-4. 招聘风险点
-5. 综合录用建议：优先面试 / 储备观察 / 淘汰
-6. 适配岗位标签（高匹配 / 部分匹配 / 不匹配）
-7. 简历AI美化程度（轻度/中度/重度）
-
-后端 AI 分析筛选逻辑输出：
-
-- 基础信息筛选：学历、院校层次、学历类型、专业匹配、毕业时间、应届状态、年龄、性别、所在地、期望薪资。
-- 证书资质：必备证书、加分证书、有效期和含金量。
-- 工作履历硬指标：总年限、相关年限、行业匹配、公司背景、岗位层级、带人规模、跳槽稳定性、空窗期、职责重合度。
-- 专业技能匹配：硬技能、工具熟练度、项目匹配点、量化成果、软实力。
-- 综合竞争力：业绩、奖项、实习、外语、管理、跨区域项目、学习能力。
-- 风险预警：履历断层、高频跳槽、时间冲突、学历存疑、能力断层、薪资/地点不符、技能空白、管理经验夸大。
-- 岗位专项判断：管理岗、技术岗、销售业务岗、应届生等专项维度。
-- 最终输出：匹配得分、核心优势、短板不足、风险点、招聘建议、适配标签、AI 美化风险。
-
-招聘分析工作台，分区展示：
-
-- 基础信息筛选
-- 工作履历硬指标
-- 专业技能与项目匹配
-- 证书资质
-- 岗位专项判断
-- 核心优势与加分项
-- 短板不足
-- 招聘风险预警
-- 适配标签和招聘建议
+```
+分析工作台「归档到人才库」
+   │ 弹窗选岗位分类（预设 chips / 自定义，空则回退 JD 岗位名）
+   │ POST /api/v1/archives {resume_id, job_id, category, analysis…}
+   ▼
+store.save_archive（读已有 resume/job 文件，自动带出 job_title/final_score/candidate_name）
+   ├─ data/archives/<archive_id>.json   ← 归档明细（analysis_snapshot 摘要 + 完整 analysis）
+   └─ data/archives/_index.json         ← 用户索引（active / trashed 双列表）
+   │
+   ▼
+候选人才库页（/archives）
+   ├─ 列表：GET /api/v1/archives?name=&job_title=&category=&tag=&sort=
+   ├─ 动态排名：前端对当前筛选结果按 final_score 降序、同分并列
+   ├─ 详情抽屉：编辑岗位分类 / 标签；「导出报告图片」→ 前端用 detail.analysis 实时生成 JPEG 下载
+   └─ 回收站：软删 → GET /archives/trash → 恢复 / 彻底删除 / 清空
+```

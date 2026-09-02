@@ -230,6 +230,62 @@ function downloadWord(html: string, name: string) {
 
 const BUTTON_CLASS = 'inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-50';
 
+/** 归档等场景复用：生成报告图片 blob（JPEG，不触发浏览器下载）。失败返回 null。 */
+export async function captureReportPng(opts: {
+  analysis: HrAnalysis;
+  candidateName: string;
+  resumeId: string;
+}): Promise<Blob | null> {
+  let markers: ResumeReviewData | null = null;
+  try {
+    markers = await fetchResumeReviewMarkers(
+      opts.resumeId,
+      opts.analysis as unknown as Record<string, unknown>,
+      opts.candidateName,
+    );
+  } catch {
+    markers = null;
+  }
+  const inner = buildReportInner({ analysis: opts.analysis, candidateName: opts.candidateName, markers });
+  const captureHtml = `<style>${DOC_STYLE}</style><div class="page">${inner}</div>`;
+
+  const holder = document.createElement('div');
+  // 与 ReportExportCenter 的隐藏捕获容器保持一致的离屏方式：
+  // position:fixed + left 负偏移，不加 z-index:-1（负 z-index 会让 html2canvas 渲染空白）。
+  holder.style.cssText = 'position:fixed;left:-99999px;top:0;width:800px;background:#ffffff;';
+  holder.innerHTML = captureHtml;
+  document.body.appendChild(holder);
+  try {
+    // 等一帧让离屏容器完成布局与字体加载，避免 html2canvas 截到空白
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    const canvas = await html2canvas(holder, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false });
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+    return blob;
+  } catch {
+    return null;
+  } finally {
+    holder.remove();
+  }
+}
+
+/** 生成并直接下载报告图片（JPEG）。成功返回 true，失败返回 false。 */
+export async function downloadReportImage(opts: {
+  analysis: HrAnalysis;
+  candidateName: string;
+  resumeId: string;
+}): Promise<boolean> {
+  const name = opts.candidateName || opts.analysis.candidate_name || '候选人';
+  const blob = await captureReportPng(opts);
+  if (!blob) return false;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `候选人分析报告-${name}.jpg`;
+  anchor.click();
+  URL.revokeObjectURL(url);
+  return true;
+}
+
 export default function ReportExportCenter({
   analysis,
   candidateName,
@@ -281,15 +337,15 @@ export default function ReportExportCenter({
     if (!captureHtml || !captureRef.current) return;
     const name = candidateName || analysis.candidate_name || '候选人';
     html2canvas(captureRef.current, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false })
-      .then((canvas) => canvas.toBlob((png) => {
-        if (!png) return;
-        const url = URL.createObjectURL(png);
+      .then((canvas) => canvas.toBlob((img) => {
+        if (!img) return;
+        const url = URL.createObjectURL(img);
         const anchor = document.createElement('a');
         anchor.href = url;
-        anchor.download = `候选人分析报告-${name}.png`;
+        anchor.download = `候选人分析报告-${name}.jpg`;
         anchor.click();
         URL.revokeObjectURL(url);
-      }, 'image/png'))
+      }, 'image/jpeg', 0.9))
       .catch(() => printDocument(captureHtml)) // 截图失败回退打印对话框
       .finally(() => {
         setCaptureHtml(''); // 清空以卸载隐藏容器，并保证下次导出能重新触发

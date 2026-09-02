@@ -97,7 +97,8 @@ except (TypeError, ValueError):
 # 子目录（启动时自动创建）
 RESUMES_DIR = os.path.join(DATA_DIR, "resumes")
 JOBS_DIR = os.path.join(DATA_DIR, "jobs")
-for _d in (DATA_DIR, RESUMES_DIR, JOBS_DIR, LOG_DIR):
+ARCHIVES_DIR = os.path.join(DATA_DIR, "archives")
+for _d in (DATA_DIR, RESUMES_DIR, JOBS_DIR, ARCHIVES_DIR, LOG_DIR):
     os.makedirs(_d, exist_ok=True)
 
 

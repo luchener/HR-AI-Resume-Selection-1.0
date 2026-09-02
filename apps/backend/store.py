@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from config import RESUMES_DIR, JOBS_DIR
+from config import RESUMES_DIR, JOBS_DIR, ARCHIVES_DIR
 
 
 def _now_iso() -> str:
@@ -232,3 +232,263 @@ def normalize_job_structured(raw: dict) -> dict:
         out[std_key] = val
     out["processed_at"] = _now_iso()
     return out
+
+
+# ── 归档 ──────────────────────────────────────────────────────────────
+
+ARCHIVE_INDEX_PATH = os.path.join(ARCHIVES_DIR, "_index.json")
+
+
+def _ensure_archive_index() -> dict:
+    """读取或创建全局归档索引。"""
+    index = _read_json(ARCHIVE_INDEX_PATH)
+    if index is None:
+        index = {}
+        _write_json(ARCHIVE_INDEX_PATH, index)
+    return index
+
+
+def _update_archive_index(user_id: str, archive_id: str, action: str) -> None:
+    """
+    更新归档索引。
+    action: add_active | add_trashed | remove_active | remove_trashed
+            | move_to_trashed | move_to_active
+    """
+    index = _ensure_archive_index()
+    if user_id not in index:
+        index[user_id] = {"active": [], "trashed": []}
+
+    if action == "add_active":
+        if archive_id not in index[user_id]["active"]:
+            index[user_id]["active"].append(archive_id)
+    elif action == "add_trashed":
+        if archive_id not in index[user_id]["trashed"]:
+            index[user_id]["trashed"].append(archive_id)
+    elif action == "remove_active":
+        index[user_id]["active"] = [a for a in index[user_id]["active"] if a != archive_id]
+    elif action == "remove_trashed":
+        index[user_id]["trashed"] = [a for a in index[user_id]["trashed"] if a != archive_id]
+    elif action == "move_to_trashed":
+        index[user_id]["active"] = [a for a in index[user_id]["active"] if a != archive_id]
+        if archive_id not in index[user_id]["trashed"]:
+            index[user_id]["trashed"].append(archive_id)
+    elif action == "move_to_active":
+        index[user_id]["trashed"] = [a for a in index[user_id]["trashed"] if a != archive_id]
+        if archive_id not in index[user_id]["active"]:
+            index[user_id]["active"].append(archive_id)
+
+    _write_json(ARCHIVE_INDEX_PATH, index)
+
+
+def save_archive(
+    user_id: str,
+    resume_id: str,
+    job_id: str,
+    candidate_name: str,
+    final_score: int,
+    fit_tag: str,
+    recruitment_recommendation: str,
+    job_title: str,
+    custom_tags: list[str] | None = None,
+    analysis_snapshot: dict | None = None,
+    category: str = "",
+    full_analysis: dict | None = None,
+) -> str:
+    """创建归档记录，返回 archive_id。
+
+    category：HR 自定义 / 预设岗位分类（行政、销售、IT、营销等），
+    为空时回退为 job_title，保证筛选下拉始终有意义。
+    full_analysis：完整 hr_analysis 结构，供人才库详情页重新生成报告快照。
+    """
+    archive_id = str(uuid.uuid4())
+    record = {
+        "archive_id": archive_id,
+        "user_id": user_id,
+        "resume_id": resume_id,
+        "job_id": job_id,
+        "candidate_name": candidate_name,
+        "final_score": final_score,
+        "fit_tag": fit_tag,
+        "recruitment_recommendation": recruitment_recommendation,
+        "job_title": job_title,
+        "category": category or job_title,
+        "custom_tags": custom_tags or [],
+        "analysis_snapshot": analysis_snapshot or {},
+        "analysis": full_analysis or {},
+        "status": "active",
+        "trashed_at": None,
+        "created_at": _now_iso(),
+    }
+    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), record)
+    _update_archive_index(user_id, archive_id, "add_active")
+    return archive_id
+
+
+def find_existing_archive(user_id: str, resume_id: str, job_id: str) -> str | None:
+    """按 (resume_id, job_id) 查找是否已归档，返回 archive_id 或 None。"""
+    index = _ensure_archive_index()
+    user_data = index.get(user_id, {})
+    for status_key in ("active", "trashed"):
+        for aid in user_data.get(status_key, []):
+            rec = _read_json(os.path.join(ARCHIVES_DIR, f"{aid}.json"))
+            if rec and rec.get("resume_id") == resume_id and rec.get("job_id") == job_id:
+                return aid
+    return None
+
+
+def get_archive(archive_id: str, user_id: str = "") -> dict | None:
+    """读取归档记录。当 user_id 非空时校验归属。"""
+    record = _read_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"))
+    if record is None:
+        return None
+    if user_id and record.get("user_id") != user_id:
+        return None
+    return record
+
+
+def list_archives(user_id: str, status: str = "active") -> list[dict]:
+    """列出用户指定状态的归档记录（按 final_score 降序）。"""
+    index = _ensure_archive_index()
+    user_data = index.get(user_id, {})
+    archive_ids = user_data.get(status, [])
+
+    result = []
+    for aid in archive_ids:
+        rec = _read_json(os.path.join(ARCHIVES_DIR, f"{aid}.json"))
+        if rec and rec.get("user_id") == user_id:
+            result.append(rec)
+
+    result.sort(key=lambda x: x.get("final_score", 0) or 0, reverse=True)
+    return result
+
+
+def query_archives(
+    user_id: str,
+    name_keyword: str = "",
+    job_title: str = "",
+    tag: str = "",
+    category: str = "",
+    sort: str = "score",
+) -> list[dict]:
+    """按条件查询 active 归档记录。"""
+    archives = list_archives(user_id, status="active")
+
+    if name_keyword:
+        keyword = name_keyword.lower()
+        archives = [a for a in archives if keyword in (a.get("candidate_name") or "").lower()]
+    if job_title:
+        archives = [a for a in archives if job_title.lower() in (a.get("job_title") or "").lower()]
+    if category:
+        archives = [
+            a
+            for a in archives
+            if category.lower() in (a.get("category") or a.get("job_title") or "").lower()
+        ]
+    if tag:
+        archives = [
+            a
+            for a in archives
+            if tag.lower() in [t.lower() for t in (a.get("custom_tags") or [])]
+        ]
+
+    if sort == "created":
+        archives.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    else:
+        archives.sort(key=lambda x: x.get("final_score", 0) or 0, reverse=True)
+
+    return archives
+
+
+def get_distinct_job_titles(user_id: str) -> list[str]:
+    """获取用户归档中所有不重复的岗位名称（用于前端筛选下拉）。"""
+    active = list_archives(user_id, status="active")
+    titles = set()
+    for a in active:
+        t = (a.get("job_title") or "").strip()
+        if t:
+            titles.add(t)
+    return sorted(titles)
+
+
+def get_distinct_categories(user_id: str) -> list[str]:
+    """获取用户归档中所有不重复的岗位分类（category 优先，回退 job_title）。"""
+    active = list_archives(user_id, status="active")
+    cats = set()
+    for a in active:
+        c = (a.get("category") or a.get("job_title") or "").strip()
+        if c:
+            cats.add(c)
+    return sorted(cats)
+
+
+def soft_delete_archive(archive_id: str, user_id: str) -> bool:
+    """软删除：移入回收站。"""
+    rec = get_archive(archive_id, user_id=user_id)
+    if not rec or rec.get("status") != "active":
+        return False
+
+    rec["status"] = "trashed"
+    rec["trashed_at"] = _now_iso()
+    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), rec)
+    _update_archive_index(user_id, archive_id, "move_to_trashed")
+    return True
+
+
+def restore_archive(archive_id: str, user_id: str) -> bool:
+    """从回收站恢复到人才库。"""
+    rec = get_archive(archive_id, user_id=user_id)
+    if not rec or rec.get("status") != "trashed":
+        return False
+
+    rec["status"] = "active"
+    rec["trashed_at"] = None
+    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), rec)
+    _update_archive_index(user_id, archive_id, "move_to_active")
+    return True
+
+
+def permanent_delete_archive(archive_id: str, user_id: str) -> bool:
+    """彻底删除归档记录。"""
+    rec = get_archive(archive_id, user_id=user_id)
+    if not rec or rec.get("status") != "trashed":
+        return False
+
+    # 删除 JSON 明细
+    json_path = os.path.join(ARCHIVES_DIR, f"{archive_id}.json")
+    if os.path.exists(json_path):
+        os.remove(json_path)
+
+    _update_archive_index(user_id, archive_id, "remove_trashed")
+    return True
+
+
+def empty_trash(user_id: str) -> int:
+    """清空回收站，返回删除数量。"""
+    trashed = list_archives(user_id, status="trashed")
+    count = 0
+    for rec in trashed:
+        if permanent_delete_archive(rec["archive_id"], user_id):
+            count += 1
+    return count
+
+
+def update_archive_tags(archive_id: str, user_id: str, custom_tags: list[str]) -> bool:
+    """更新自定义标签（仅 active 状态可操作）。"""
+    rec = get_archive(archive_id, user_id=user_id)
+    if not rec or rec.get("status") != "active":
+        return False
+
+    rec["custom_tags"] = custom_tags
+    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), rec)
+    return True
+
+
+def update_archive_category(archive_id: str, user_id: str, category: str) -> bool:
+    """更新岗位分类（仅 active 状态可操作）。"""
+    rec = get_archive(archive_id, user_id=user_id)
+    if not rec or rec.get("status") != "active":
+        return False
+
+    rec["category"] = category or rec.get("job_title", "")
+    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), rec)
+    return True

@@ -3,18 +3,19 @@
 import { useState, type ReactNode } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
-import { BarChart3Icon, KeyRoundIcon, LayoutDashboardIcon, LogOutIcon, XIcon } from 'lucide-react';
+import { ArchiveIcon, BarChart3Icon, KeyRoundIcon, LayoutDashboardIcon, LogOutIcon, XIcon } from 'lucide-react';
 import { useAuth } from './auth-context';
 import { changePassword } from '@/lib/api/screening';
 
 type AppShellProps = {
-  active: 'home' | 'report';
+  active: 'home' | 'report' | 'archives';
   children: ReactNode;
 };
 
 const navigation = [
   { id: 'home' as const, label: '首页控制台', href: '/', icon: LayoutDashboardIcon },
   { id: 'report' as const, label: '分析报告页', href: '/dashboard', icon: BarChart3Icon },
+  { id: 'archives' as const, label: '候选人才库', href: '/archives', icon: ArchiveIcon },
 ];
 
 export default function AppShell({ active, children }: AppShellProps) {

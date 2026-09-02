@@ -17,7 +17,9 @@ Flask 后端应用。极简化重构，替代旧版 FastAPI + SQLAlchemy + Agent
 import json
 import logging
 import os
+import queue
 import re
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -163,6 +165,24 @@ def _request_ai_config(data: dict, *, required: bool = False) -> dict | None:
         return llm.normalize_runtime_config(value)
     except ValueError as exc:
         raise ApiError(str(exc), 422, "ai") from exc
+
+
+def _request_agent_config(data: dict) -> dict:
+    """请求级 Agent 增强配置（可选）：web_search（Step 4）。
+
+    非法值静默回退默认，不阻断请求。
+    """
+    value = data.get("agent_config")
+    if not isinstance(value, dict):
+        return {}
+    web_search = bool(value.get("web_search")) if isinstance(value.get("web_search"), bool) else False
+    return {"web_search": web_search}
+
+
+def _agent_config_fingerprint(agent_config: dict | None) -> str:
+    """Agent 增强配置的缓存指纹，防止不同增强等级串缓存。"""
+    config = agent_config if isinstance(agent_config, dict) else {}
+    return "ws=1" if config.get("web_search") else "ws=0"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1233,9 +1253,12 @@ def _run_hr_analysis(
     user_id: str,
     ai_config: dict | None = None,
     precomputed_requirements: dict | None = None,
+    agent_config: dict | None = None,
+    on_event=None,
 ) -> dict:
     config_fingerprint = llm.model_config_fingerprint(ai_config)
-    cache_key = (_HR_ANALYSIS_VERSION, user_id, resume_id, job_id, config_fingerprint)
+    agent_fingerprint = _agent_config_fingerprint(agent_config)
+    cache_key = (_HR_ANALYSIS_VERSION, user_id, resume_id, job_id, config_fingerprint, agent_fingerprint)
     cached = _HR_ANALYSIS_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -1255,6 +1278,8 @@ def _run_hr_analysis(
             current_date=datetime.now().strftime("%Y-%m"),
             runtime_config=ai_config,
             precomputed_requirements=precomputed_requirements,
+            agent_config=agent_config,
+            on_event=on_event,
         )
         result = _normalize_hr_analysis(
             raw,
@@ -1281,8 +1306,10 @@ def _run_hr_batch_analysis(
     job_id: str,
     user_id: str,
     ai_config: dict | None = None,
+    agent_config: dict | None = None,
 ) -> tuple[dict[str, dict], list[dict]]:
     """Run isolated candidate analyses concurrently; pre-extract job requirements once to avoid redundant LLM calls."""
+    agent_fingerprint = _agent_config_fingerprint(agent_config)
     results: dict[str, dict] = {}
     failures: list[dict] = []
     pending: list[str] = []
@@ -1294,6 +1321,7 @@ def _run_hr_batch_analysis(
             resume_id,
             job_id,
             llm.model_config_fingerprint(ai_config),
+            agent_fingerprint,
         )
         cached = _HR_ANALYSIS_CACHE.get(cache_key)
         if cached is not None:
@@ -1331,7 +1359,7 @@ def _run_hr_batch_analysis(
     started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=min(3, len(pending)), thread_name_prefix="hr-analysis") as executor:
         futures = {
-            executor.submit(_run_hr_analysis, resume_id, job_id, user_id, ai_config, precomputed_requirements): resume_id
+            executor.submit(_run_hr_analysis, resume_id, job_id, user_id, ai_config, precomputed_requirements, agent_config): resume_id
             for resume_id in pending
         }
         for future in as_completed(futures):
@@ -1450,8 +1478,12 @@ def _hr_analysis_payload(resume_id: str, job_id: str, result: dict, user_id: str
 
 @app.post("/api/v1/resumes/hr-analysis")
 def hr_analysis():
-    """Run one concise, structured LLM call for recruitment screening."""
+    """Run one concise, structured LLM call for recruitment screening.
+
+    ?stream=true 走 SSE 流式：实时推送 Agent 各阶段进度，最后输出与非流式同构的结果。
+    """
     rid = _request_id("resumes")
+    stream = request.args.get("stream", "false").lower() in ("true", "1", "yes")
     data = request.get_json(silent=True) or {}
     resume_ids = data.get("resume_ids")
     if not isinstance(resume_ids, list):
@@ -1463,13 +1495,21 @@ def hr_analysis():
     if len(resume_ids) > 3:
         return _err("A maximum of 3 resumes can be analyzed at once", 422, "resumes")
     ai_config = _request_ai_config(data)
+    agent_config = _request_agent_config(data)
     user_id = _current_user_id()
 
+    if stream:
+        return Response(
+            stream_with_context(_hr_analysis_stream(resume_ids, job_id, rid, user_id, ai_config, agent_config)),
+            mimetype="text/event-stream",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
     if len(resume_ids) == 1:
-        result = _run_hr_analysis(resume_ids[0], job_id, user_id, ai_config)
+        result = _run_hr_analysis(resume_ids[0], job_id, user_id, ai_config, agent_config=agent_config)
         payload = _hr_analysis_payload(resume_ids[0], job_id, result, user_id)
     else:
-        batch_results, failures = _run_hr_batch_analysis(resume_ids, job_id, user_id, ai_config)
+        batch_results, failures = _run_hr_batch_analysis(resume_ids, job_id, user_id, ai_config, agent_config)
         analyses = [
             _hr_analysis_payload(resume_id, job_id, batch_results[resume_id], user_id)
             for resume_id in resume_ids
@@ -1492,6 +1532,76 @@ def hr_analysis():
             "data": payload,
         }
     )
+
+
+def _hr_analysis_stream(resume_ids, job_id, rid, user_id, ai_config, agent_config):
+    """SSE 生成器：逐阶段推送进度，最后输出与非流式同构的 completed 结果。
+
+    单简历路径用后台线程 + 线程安全队列实时转发 screening_agent 的 on_event，
+    让前端能实时看到“正在检索公司公开信息”等中间步骤（而非分析结束后一次性到达）。
+    """
+    def sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    try:
+        yield sse({"status": "starting", "message": "正在启动招聘筛选 Agent"})
+
+        if len(resume_ids) == 1:
+            # 实时流式：on_event 立即入队，主生成器边消费边 yield
+            event_queue: "queue.Queue[dict | None]" = queue.Queue()
+            result_holder: dict = {}
+
+            def _on_event(event: dict) -> None:
+                event_queue.put(event)
+
+            def _worker() -> None:
+                try:
+                    result_holder["result"] = _run_hr_analysis(
+                        resume_ids[0], job_id, user_id, ai_config,
+                        agent_config=agent_config, on_event=_on_event,
+                    )
+                except Exception as exc:  # 传递给主生成器统一抛
+                    result_holder["error"] = exc
+                finally:
+                    event_queue.put(None)  # 结束哨兵
+
+            worker = threading.Thread(target=_worker, daemon=True)
+            worker.start()
+            while True:
+                event = event_queue.get()
+                if event is None:
+                    break
+                yield sse(event)
+            worker.join()
+            if "error" in result_holder:
+                raise result_holder["error"]
+            result = result_holder["result"]
+            payload = _hr_analysis_payload(resume_ids[0], job_id, result, user_id)
+        else:
+            # 批量：逐步推送每份候选人的进度与阶段
+            for index, resume_id in enumerate(resume_ids, 1):
+                yield sse({"status": "candidate", "index": index, "total": len(resume_ids), "message": f"正在分析候选人 {index}/{len(resume_ids)}"})
+            batch_results, failures = _run_hr_batch_analysis(resume_ids, job_id, user_id, ai_config, agent_config)
+            analyses = [
+                _hr_analysis_payload(resume_id, job_id, batch_results[resume_id], user_id)
+                for resume_id in resume_ids
+                if resume_id in batch_results
+            ]
+            if not analyses:
+                yield sse({"status": "error", "message": "本批次所有简历的 AI 分析均失败，请重试。"})
+                return
+            comparison = _compare_candidates(analyses, ai_config)
+            payload = {
+                **analyses[0],
+                "batch_analyses": analyses,
+                "batch_failures": failures,
+                "comparison": comparison,
+            }
+
+        yield sse({"status": "completed", "result": {"request_id": rid, "data": payload}})
+    except Exception as exc:
+        logger.error("HR analysis stream failed: %s", exc, exc_info=True)
+        yield sse({"status": "error", "message": "AI 分析服务暂时不可用，请重试。"})
 
 
 @app.get("/api/v1/resumes")
@@ -1639,6 +1749,255 @@ def get_job():
     if not view:
         return _err(f"Job not found: {job_id}", 404, "jobs")
     return jsonify({"request_id": rid, "data": view})
+
+
+# ════════════════════════════════════════════════════════════════════
+# 归档（候选人才库 + 回收站）
+# ════════════════════════════════════════════════════════════════════
+
+
+def _archive_payload(rec: dict, include_analysis: bool = False) -> dict:
+    """归档记录对外响应结构（裁剪掉内部字段）。
+
+    include_analysis=True 时附带完整 analysis（供详情页重新生成报告快照），
+    列表接口默认不附带以避免响应过大。
+    """
+    payload = {
+        "archive_id": rec["archive_id"],
+        "resume_id": rec.get("resume_id"),
+        "job_id": rec.get("job_id"),
+        "candidate_name": rec.get("candidate_name", ""),
+        "final_score": rec.get("final_score", 0) or 0,
+        "fit_tag": rec.get("fit_tag", ""),
+        "recruitment_recommendation": rec.get("recruitment_recommendation", ""),
+        "job_title": rec.get("job_title", ""),
+        "category": rec.get("category") or rec.get("job_title", ""),
+        "custom_tags": rec.get("custom_tags") or [],
+        "analysis_snapshot": rec.get("analysis_snapshot") or {},
+        "status": rec.get("status", "active"),
+        "trashed_at": rec.get("trashed_at"),
+        "created_at": rec.get("created_at"),
+    }
+    if include_analysis:
+        payload["analysis"] = rec.get("analysis") or {}
+    return payload
+
+
+@app.post("/api/v1/archives")
+def create_archive():
+    """归档一份已分析的简历到候选人才库（幂等：resume_id + job_id 唯一）。"""
+    rid = _request_id("archives")
+    data = request.get_json(silent=True) or {}
+    resume_id = str(data.get("resume_id") or "").strip()
+    job_id = str(data.get("job_id") or "").strip()
+    if not resume_id or not job_id:
+        return _err("resume_id and job_id are required", 422, "archives")
+
+    user_id = _current_user_id()
+    resume = store.get_resume(resume_id, user_id=user_id)
+    if not resume:
+        return _err(f"Resume not found: {resume_id}", 404, "archives")
+    job = store.get_job(job_id, user_id=user_id)
+    if not job:
+        return _err(f"Job not found: {job_id}", 404, "archives")
+
+    # 幂等：同一 (resume_id, job_id) 已归档则直接返回
+    existing = store.find_existing_archive(user_id, resume_id, job_id)
+    if existing:
+        rec = store.get_archive(existing, user_id=user_id)
+        return jsonify(
+            {
+                "request_id": rid,
+                "message": "该候选人已归档",
+                "data": _archive_payload(rec),
+            }
+        )
+
+    # 从已存储的分析结果提取展示字段
+    hr = data.get("analysis") if isinstance(data.get("analysis"), dict) else {}
+    job_title = ""
+    p = job.get("processed") or {}
+    if isinstance(p, dict):
+        job_title = str(p.get("job_title") or "").strip()
+    if not job_title:
+        # 兜底：从 JD 原始文本首行提取
+        first_line = (job.get("content") or "").strip().splitlines()
+        if first_line:
+            job_title = first_line[0].strip()
+
+    candidate_name = str(data.get("candidate_name") or hr.get("candidate_name") or "").strip()
+    if not candidate_name:
+        # 兜底：从简历原文第一行取姓名
+        first_line = (resume.get("content") or "").strip().splitlines()
+        candidate_name = first_line[0].strip() if first_line else "未提供"
+
+    try:
+        final_score = int(float(hr.get("final_score", data.get("final_score", 0) or 0)))
+    except (TypeError, ValueError):
+        final_score = 0
+
+    custom_tags = data.get("custom_tags")
+    if not isinstance(custom_tags, list):
+        custom_tags = []
+    custom_tags = [str(t).strip() for t in custom_tags if str(t).strip()]
+
+    # 岗位分类：HR 预设/自定义优先，空则回退 JD 提取的 job_title
+    category = str(data.get("category") or "").strip()
+
+    snapshot = {
+        "candidate_name": candidate_name,
+        "final_score": final_score,
+        "fit_tag": str(hr.get("fit_tag") or ""),
+        "recruitment_recommendation": str(hr.get("recruitment_recommendation") or ""),
+        "job_fit_percentage": hr.get("job_fit_percentage"),
+        "summary": str(hr.get("summary") or ""),
+        "ai_risk_label": str(hr.get("ai_risk_label") or ""),
+        "relevant_years": (hr.get("work_history") or {}).get("relevant_years"),
+        "analysis_result_md": str(data.get("analysis_result") or ""),
+    }
+
+    aid = store.save_archive(
+        user_id=user_id,
+        resume_id=resume_id,
+        job_id=job_id,
+        candidate_name=candidate_name,
+        final_score=final_score,
+        fit_tag=str(hr.get("fit_tag") or ""),
+        recruitment_recommendation=str(hr.get("recruitment_recommendation") or ""),
+        job_title=job_title,
+        custom_tags=custom_tags,
+        analysis_snapshot=snapshot,
+        category=category,
+        full_analysis=hr if isinstance(hr, dict) else {},
+    )
+    logger.info(f"Archive created: {aid} by {user_id}")
+    rec = store.get_archive(aid, user_id=user_id)
+    return jsonify({"request_id": rid, "message": "归档成功", "data": _archive_payload(rec)}), 201
+
+
+@app.get("/api/v1/archives")
+def list_archives_api():
+    """候选人才库列表（默认仅 active），支持姓名/岗位/标签筛选与排序。"""
+    rid = _request_id("archives")
+    user_id = _current_user_id()
+    name = str(request.args.get("name") or "").strip()
+    job_title = str(request.args.get("job_title") or "").strip()
+    category = str(request.args.get("category") or "").strip()
+    tag = str(request.args.get("tag") or "").strip()
+    sort = str(request.args.get("sort") or "score").strip()
+    if sort not in ("score", "created"):
+        sort = "score"
+
+    records = store.query_archives(
+        user_id,
+        name_keyword=name,
+        job_title=job_title,
+        category=category,
+        tag=tag,
+        sort=sort,
+    )
+    payloads = [_archive_payload(r) for r in records]
+
+    # 附加聚合信息：去重后的岗位分类（供前端下拉）
+    meta = {
+        "job_titles": store.get_distinct_job_titles(user_id),
+        "categories": store.get_distinct_categories(user_id),
+    }
+    return jsonify({"request_id": rid, "data": {"archives": payloads, "meta": meta}})
+
+
+@app.get("/api/v1/archives/trash")
+def list_trash_api():
+    """回收站列表。"""
+    rid = _request_id("archives")
+    records = store.list_archives(_current_user_id(), status="trashed")
+    return jsonify(
+        {
+            "request_id": rid,
+            "data": {
+                "archives": [_archive_payload(r) for r in records],
+                "meta": {"job_titles": [], "categories": []},
+            },
+        }
+    )
+
+
+@app.get("/api/v1/archives/<archive_id>")
+def get_archive_api(archive_id: str):
+    """归档详情（仅 active 可见）。附完整 analysis 供重新生成快照。"""
+    rid = _request_id("archives")
+    rec = store.get_archive(archive_id, user_id=_current_user_id())
+    if not rec:
+        return _err(f"Archive not found: {archive_id}", 404, "archives")
+    if rec.get("status") != "active":
+        return _err("回收站中的记录不可查看详情", 400, "archives")
+    return jsonify({"request_id": rid, "data": _archive_payload(rec, include_analysis=True)})
+
+
+@app.patch("/api/v1/archives/<archive_id>/tags")
+def update_archive_tags_api(archive_id: str):
+    """更新归档自定义标签（仅 active）。"""
+    rid = _request_id("archives")
+    data = request.get_json(silent=True) or {}
+    tags = data.get("custom_tags")
+    if not isinstance(tags, list):
+        return _err("custom_tags must be a list", 422, "archives")
+    tags = [str(t).strip() for t in tags if str(t).strip()]
+
+    if not store.update_archive_tags(archive_id, _current_user_id(), tags):
+        return _err(f"Archive not found or not editable: {archive_id}", 404, "archives")
+    rec = store.get_archive(archive_id, user_id=_current_user_id())
+    return jsonify({"request_id": rid, "data": _archive_payload(rec)})
+
+
+@app.patch("/api/v1/archives/<archive_id>/category")
+def update_archive_category_api(archive_id: str):
+    """更新岗位分类（仅 active）。预设分类或 HR 自定义字符串。"""
+    rid = _request_id("archives")
+    data = request.get_json(silent=True) or {}
+    category = str(data.get("category") or "").strip()
+    if not category:
+        return _err("category is required", 422, "archives")
+
+    if not store.update_archive_category(archive_id, _current_user_id(), category):
+        return _err(f"Archive not found or not editable: {archive_id}", 404, "archives")
+    rec = store.get_archive(archive_id, user_id=_current_user_id())
+    return jsonify({"request_id": rid, "data": _archive_payload(rec)})
+
+
+@app.delete("/api/v1/archives/<archive_id>")
+def soft_delete_archive_api(archive_id: str):
+    """移入回收站（软删除，可恢复）。"""
+    rid = _request_id("archives")
+    if not store.soft_delete_archive(archive_id, _current_user_id()):
+        return _err(f"Archive not found or not active: {archive_id}", 404, "archives")
+    return jsonify({"request_id": rid, "message": "已移入回收站，可在回收站恢复"})
+
+
+@app.post("/api/v1/archives/<archive_id>/restore")
+def restore_archive_api(archive_id: str):
+    """从回收站恢复到人才库。"""
+    rid = _request_id("archives")
+    if not store.restore_archive(archive_id, _current_user_id()):
+        return _err(f"Archive not found or not trashed: {archive_id}", 404, "archives")
+    return jsonify({"request_id": rid, "message": "已恢复到人才库"})
+
+
+@app.delete("/api/v1/archives/trash/<archive_id>")
+def permanent_delete_archive_api(archive_id: str):
+    """回收站内彻底删除单条。"""
+    rid = _request_id("archives")
+    if not store.permanent_delete_archive(archive_id, _current_user_id()):
+        return _err(f"Archive not found or not trashed: {archive_id}", 404, "archives")
+    return jsonify({"request_id": rid, "message": "已彻底删除"})
+
+
+@app.delete("/api/v1/archives/trash")
+def empty_trash_api():
+    """清空回收站。"""
+    rid = _request_id("archives")
+    count = store.empty_trash(_current_user_id())
+    return jsonify({"request_id": rid, "message": f"已清空回收站（{count} 条）"})
 
 
 # ════════════════════════════════════════════════════════════════════
