@@ -50,11 +50,15 @@ def normalize_runtime_config(value: dict | None) -> dict:
     if not model or len(model) > 160 or any(char in model for char in "\r\n\t"):
         raise ValueError("请填写有效的模型名称。")
 
+    # 可选的 Agent 增强配置：web_search 控制外部检索（Step 4）。非法值静默回退默认。
+    web_search = bool(value.get("web_search")) if isinstance(value.get("web_search"), bool) else False
+
     return {
         "provider": provider,
         "api_key": api_key,
         "base_url": base_url.rstrip("/"),
         "model": model,
+        "web_search": web_search,
     }
 
 
@@ -70,6 +74,7 @@ def model_config_fingerprint(value: dict | None) -> str:
                 config["base_url"],
                 config["model"],
                 config["api_key"],
+                "ws=1" if config["web_search"] else "ws=0",
             )
         )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]

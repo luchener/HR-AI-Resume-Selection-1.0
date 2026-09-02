@@ -79,6 +79,51 @@ export async function analyzeResumes(resumeIds: string | string[], jobId: string
   return (await response.json()) as AnalysisResult;
 }
 
+export interface AgentConfig {
+  web_search?: boolean;
+}
+
+export async function analyzeResumesStream(
+  resumeIds: string | string[],
+  jobId: string,
+  agentConfig: AgentConfig | undefined,
+  onProgress?: (status: string, message: string, index?: number, total?: number) => void,
+  signal?: AbortSignal,
+): Promise<AnalysisResult> {
+  const body: Record<string, unknown> = { job_id: jobId };
+  if (Array.isArray(resumeIds)) body.resume_ids = resumeIds; else body.resume_id = resumeIds;
+  if (agentConfig && (agentConfig.web_search)) body.agent_config = agentConfig;
+
+  const response = await fetch(`${API_URL}/api/v1/resumes/hr-analysis?stream=true`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }), body: JSON.stringify(body), signal });
+  if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || `招聘分析失败（HTTP ${response.status}），请稍后重试。`); }
+  if (!response.body) throw new Error('招聘分析服务未返回数据流。');
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let finalResult: AnalysisResult | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let separator: number;
+    while ((separator = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, separator);
+      buffer = buffer.slice(separator + 2);
+      const dataLine = rawEvent.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('');
+      if (!dataLine) continue;
+      let event: { status: string; message?: string; result?: AnalysisResult; index?: number; total?: number };
+      try { event = JSON.parse(dataLine) as typeof event; } catch { continue; }
+      if (event.status === 'completed' && event.result) finalResult = event.result;
+      else if (event.status === 'error') throw new Error(event.message || '招聘分析失败。');
+      else onProgress?.(event.status, event.message ?? '', event.index, event.total);
+    }
+  }
+  if (!finalResult) throw new Error('招聘分析数据流提前结束。');
+  return finalResult;
+}
+
 export async function improveResumeStream(resumeId: string, jobId: string, onProgress?: (status: string, message: string) => void, signal?: AbortSignal): Promise<AnalysisResult> {
   const response = await fetch(`${API_URL}/api/v1/resumes/improve?stream=true`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json', Accept: 'text/event-stream' }), body: JSON.stringify({ resume_id: resumeId, job_id: jobId }), signal });
   if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || `深度优化失败（HTTP ${response.status}）`); }

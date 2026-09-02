@@ -7,6 +7,7 @@ import {
   BriefcaseBusinessIcon,
   CheckIcon,
   FileTextIcon,
+  GlobeIcon,
   LoaderCircleIcon,
   ShieldCheckIcon,
   SparklesIcon,
@@ -14,7 +15,7 @@ import {
   XIcon,
 } from 'lucide-react';
 import AppShell from './app-shell';
-import { analyzeResumes, uploadJobDescription, uploadResume } from '@/lib/api/screening';
+import { analyzeResumesStream, uploadJobDescription, uploadResume } from '@/lib/api/screening';
 import { useAnalysis } from './analysis-context';
 
 const MAX_FILES = 3;
@@ -34,6 +35,9 @@ export default function AnalysisWorkbench() {
   const [isDragging, setIsDragging] = useState(false);
   const [phase, setPhase] = useState<Phase>('idle');
   const [error, setError] = useState('');
+  const [progress, setProgress] = useState('');
+  const [candidateProgress, setCandidateProgress] = useState('');
+  const [webSearch, setWebSearch] = useState(false);
 
   const busy = phase !== 'idle';
   const canAnalyze = files.length > 0 && jobDescription.trim().length >= 20 && !busy;
@@ -81,7 +85,21 @@ export default function AnalysisWorkbench() {
       setPhase('job');
       const jobId = await uploadJobDescription(jobDescription.trim(), resumeIds[0]);
       setPhase('analyzing');
-      const result = await analyzeResumes(resumeIds, jobId);
+      setProgress('');
+      setCandidateProgress(resumeIds.length > 1 ? `共 ${resumeIds.length} 位候选人` : '');
+      const result = await analyzeResumesStream(
+        resumeIds,
+        jobId,
+        { web_search: webSearch },
+        (status, message, index, total) => {
+          if (status === 'candidate') {
+            setCandidateProgress(`正在分析候选人 ${index}/${total}`);
+            setProgress('');
+          } else {
+            setProgress(message || '');
+          }
+        },
+      );
       setAnalysisResult(result);
       router.push('/dashboard');
     } catch (caught) {
@@ -92,6 +110,8 @@ export default function AnalysisWorkbench() {
           : message || '分析未完成，请稍后重试。',
       );
       setPhase('idle');
+      setProgress('');
+      setCandidateProgress('');
     }
   };
 
@@ -198,6 +218,23 @@ export default function AnalysisWorkbench() {
 
             <div className="mt-auto border-t border-line-soft pt-5">
               {error && <div role="alert" className="mb-4 rounded-md border border-[#efb5ad] bg-bad-soft px-4 py-3 text-sm text-bad">{error}</div>}
+              {!busy && (
+                <label className="mb-4 flex cursor-pointer items-center justify-between gap-3 rounded-md border border-line-soft px-3 py-2.5">
+                  <span className="flex items-center gap-2 text-xs text-sub">
+                    <GlobeIcon className="size-4 text-brand" />
+                    <span>
+                      联网核验公司信息
+                      <span className="ml-1 hidden text-[10px] text-sub sm:inline">将检索公司公开信息用于交叉核验</span>
+                    </span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={webSearch}
+                    onChange={(event) => setWebSearch(event.target.checked)}
+                    className="size-4 accent-[#2b4a7f]"
+                  />
+                </label>
+              )}
               <button
                 type="button"
                 disabled={!canAnalyze}
@@ -209,22 +246,30 @@ export default function AnalysisWorkbench() {
                 {!busy && <ArrowRightIcon className="size-4" />}
               </button>
               {busy ? (
-                <ol className="mt-4 flex items-center justify-between gap-2" aria-live="polite">
-                  {(['uploading', 'job', 'analyzing'] as const).map((stepPhase, index) => {
-                    const currentIndex = phase === 'uploading' ? 0 : phase === 'job' ? 1 : 2;
-                    const done = index < currentIndex;
-                    const active = index === currentIndex;
-                    const label = stepPhase === 'uploading' ? '读取简历' : stepPhase === 'job' ? '解析岗位' : '生成分析';
-                    return (
-                      <li key={stepPhase} className="flex min-w-0 flex-1 items-center gap-2">
-                        <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${done ? 'bg-good-soft text-good' : active ? 'bg-brand-soft text-brand' : 'bg-mist text-sub'}`}>
-                          {done ? <CheckIcon className="size-3" /> : active ? <LoaderCircleIcon className="size-3 animate-spin" /> : index + 1}
-                        </span>
-                        <span className={`truncate text-xs ${active ? 'font-medium text-ink' : 'text-sub'}`}>{label}</span>
-                      </li>
-                    );
-                  })}
-                </ol>
+                <>
+                  <ol className="mt-4 flex items-center justify-between gap-2" aria-live="polite">
+                    {(['uploading', 'job', 'analyzing'] as const).map((stepPhase, index) => {
+                      const currentIndex = phase === 'uploading' ? 0 : phase === 'job' ? 1 : 2;
+                      const done = index < currentIndex;
+                      const active = index === currentIndex;
+                      const label = stepPhase === 'uploading' ? '读取简历' : stepPhase === 'job' ? '解析岗位' : '生成分析';
+                      return (
+                        <li key={stepPhase} className="flex min-w-0 flex-1 items-center gap-2">
+                          <span className={`flex size-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${done ? 'bg-good-soft text-good' : active ? 'bg-brand-soft text-brand' : 'bg-mist text-sub'}`}>
+                            {done ? <CheckIcon className="size-3" /> : active ? <LoaderCircleIcon className="size-3 animate-spin" /> : index + 1}
+                          </span>
+                          <span className={`truncate text-xs ${active ? 'font-medium text-ink' : 'text-sub'}`}>{label}</span>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                  {(progress || candidateProgress) && (
+                    <p className="mt-3 flex items-center justify-center gap-2 text-center text-xs text-brand" aria-live="polite">
+                      {candidateProgress && <span className="font-medium">{candidateProgress}</span>}
+                      {progress && <span className="truncate">{progress}</span>}
+                    </p>
+                  )}
+                </>
               ) : (
                 <p className="mt-3 flex items-center justify-center gap-2 text-xs text-sub">
                   <CheckIcon className="size-3.5 text-good" /> 分析将覆盖履历、技能、项目、稳定性与招聘风险
