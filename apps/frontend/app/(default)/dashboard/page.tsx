@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   AlertTriangleIcon,
@@ -22,8 +22,12 @@ import {
   TargetIcon,
   TrophyIcon,
   ArchiveIcon,
+  ArrowDownIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
+import { useDialogBehavior } from '@/components/workbench/dialog-behavior';
 import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analysis-context';
 import ResumeReviewPanel from '@/components/workbench/resume-review-panel';
 import ReportExportCenter, { AGENT_RULE_LABELS } from '@/components/workbench/report-export';
@@ -31,6 +35,7 @@ import { analyzeResumes, fetchImprovedMarkdown, improveResumeStream } from '@/li
 import { createArchive, ARCHIVE_PRESET_CATEGORIES } from '@/lib/api/archives';
 
 type Action = 'reanalyze' | 'improve' | 'editor' | null;
+type ReportView = 'analysis' | 'optimized';
 
 const EMPTY_VALUE = '简历未提供';
 
@@ -65,6 +70,11 @@ function EmploymentGapSummary({ value }: { value?: string }) {
       </div>
     </div>
   );
+}
+
+function EmploymentOverlapWarning({ items }: { items?: Array<{ message: string }> }) {
+  if (!items?.length) return null;
+  return <div className="mt-5 rounded-md border border-warn-border bg-warn-soft px-4 py-3 text-sm text-warn"><p className="flex items-center gap-1.5 font-semibold"><AlertTriangleIcon className="size-4" /> 发现工作时间冲突</p><ul className="mt-2 space-y-1">{items.map((item, index) => <li key={`${item.message}-${index}`} className="flex items-start gap-1.5"><AlertTriangleIcon className="mt-1 size-3.5 shrink-0" />{item.message}</li>)}</ul></div>;
 }
 
 function EmploymentTimeline({ records }: { records?: EmploymentRecord[] }) {
@@ -150,12 +160,12 @@ const NAV_SECTION_ICONS: Record<string, typeof FileSearch2Icon> = {
   'sec-overview': BarChart3Icon,
   'sec-ranking': TrophyIcon,
   'sec-validation': ShieldAlertIcon,
-  'sec-education': GraduationCapIcon,
   'sec-highlights': CheckCircle2Icon,
+  'sec-details': FileSearch2Icon,
   'resume-review-panel': HighlighterIcon,
 };
 
-function ReportNav({ items }: { items: Array<{ id: string; label: string }> }) {
+function ReportNav({ items, onNavigate }: { items: Array<{ id: string; label: string }>; onNavigate?: (id: string) => void }) {
   const [activeId, setActiveId] = useState(items[0]?.id ?? '');
 
   const itemsKey = items.map((item) => item.id).join(',');
@@ -197,6 +207,7 @@ function ReportNav({ items }: { items: Array<{ id: string; label: string }> }) {
               type="button"
               onClick={() => {
                 setActiveId(item.id);
+                onNavigate?.(item.id);
                 document.getElementById(item.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
               }}
               aria-current={active ? 'true' : undefined}
@@ -234,6 +245,7 @@ export default function DashboardPage() {
   const router = useRouter();
   const { analysisResult, setAnalysisResult, isHydrated } = useAnalysis();
   const [action, setAction] = useState<Action>(null);
+  const [reportView, setReportView] = useState<ReportView>('analysis');
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [showAgentValidation, setShowAgentValidation] = useState(false);
@@ -243,6 +255,14 @@ export default function DashboardPage() {
   const [archiveCategory, setArchiveCategory] = useState('');
   const [archiveCategoryCustom, setArchiveCategoryCustom] = useState('');
 
+  // 归档弹窗：统一弹窗行为（Esc 关闭 / 焦点恢复 / Tab 陷阱）——P1-3
+  const archivePanelRef = useRef<HTMLDivElement>(null);
+  useDialogBehavior({
+    open: archiveModalOpen,
+    onClose: () => setArchiveModalOpen(false),
+    panelRef: archivePanelRef,
+  });
+
   const reportNavItems = useMemo(() => {
     const current = analysisResult?.data;
     if (!current?.hr_analysis) return [];
@@ -250,8 +270,8 @@ export default function DashboardPage() {
       { id: 'sec-overview', label: '评估总览' },
       ...(current.comparison ? [{ id: 'sec-ranking', label: '候选人排名' }] : []),
       ...(current.hr_analysis.agent_validation ? [{ id: 'sec-validation', label: 'Agent 校验' }] : []),
-      { id: 'sec-education', label: '教育与履历' },
       { id: 'sec-highlights', label: '亮点与风险' },
+      { id: 'sec-details', label: '深入分析' },
       { id: 'resume-review-panel', label: '简历原文标记' },
     ];
   }, [analysisResult]);
@@ -294,6 +314,7 @@ export default function DashboardPage() {
     const selected = batchAnalyses.find((item) => item.resume_id === selectedResumeId);
     if (!selected) return;
     setAnalysisResult({ data: { ...selected, batch_analyses: batchAnalyses, batch_failures: batchFailures, comparison: data.comparison } });
+    setReportView('analysis');
   };
 
   const handleReanalyze = async () => {
@@ -327,7 +348,16 @@ export default function DashboardPage() {
         data.job_id,
         (_status, message) => setProgress(message),
       );
-      setAnalysisResult(result);
+      const optimizedMarkdown = result.data.analysis_result || '';
+      const optimizedData = { ...data, optimized_markdown: optimizedMarkdown };
+      const nextBatch = batchAnalyses.map((item) => item.resume_id === data.resume_id ? optimizedData : item);
+      setAnalysisResult({
+        data: {
+          ...optimizedData,
+          batch_analyses: nextBatch,
+        },
+      });
+      setReportView('optimized');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '深度优化失败，请稍后重试。');
     } finally {
@@ -414,24 +444,34 @@ export default function DashboardPage() {
               <ArrowLeftIcon className="size-4" /> 新建分析
             </button>
             <p className="text-xs font-semibold uppercase text-sub">候选人筛选报告</p>
-            <h1 className="mt-2 text-3xl font-semibold text-ink sm:text-4xl">{analysis ? '候选人分析报告' : '深度优化简历'}</h1>
+            <h1 className="mt-2 text-3xl font-semibold text-ink sm:text-4xl">{analysis && reportView === 'analysis' ? '候选人分析报告' : '深度优化简历'}</h1>
             <p className="mt-3 text-sm text-sub">{candidateName} · 基于目标岗位要求生成</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            {analysis ? (
+            {analysis && data.optimized_markdown && (
+              <div className="mr-1 inline-flex rounded-md border border-line-soft bg-white p-1">
+                <button type="button" onClick={() => setReportView('analysis')} className={`relative rounded px-3 py-1.5 text-sm font-medium after:absolute after:-inset-1 after:content-[''] ${reportView === 'analysis' ? 'bg-brand-deep text-white' : 'text-body hover:bg-mist'}`}>分析报告</button>
+                <button type="button" onClick={() => setReportView('optimized')} className={`relative rounded px-3 py-1.5 text-sm font-medium after:absolute after:-inset-1 after:content-[''] ${reportView === 'optimized' ? 'bg-brand-deep text-white' : 'text-body hover:bg-mist'}`}>优化简历</button>
+              </div>
+            )}
+            {analysis && reportView === 'analysis' ? (
               <>
                 <button type="button" disabled={busy} onClick={handleReanalyze} className="inline-flex h-10 items-center gap-2 rounded-md border border-line-soft bg-white px-4 text-sm font-medium text-ink hover:bg-mist disabled:opacity-50">
                   {action === 'reanalyze' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />} 重新分析
                 </button>
-                <button type="button" disabled={busy || archiving} onClick={openArchiveModal} className="inline-flex h-10 items-center gap-2 rounded-md border border-[#cfe3d8] bg-[#e8f5ee] px-4 text-sm font-medium text-[#1d7f5c] hover:bg-[#d9efe4] disabled:opacity-50">
+                <button type="button" disabled={busy || archiving} onClick={openArchiveModal} className="inline-flex h-10 items-center gap-2 rounded-md border border-good-border-soft bg-good-soft px-4 text-sm font-medium text-good-deep hover:bg-good-border-soft/60 disabled:opacity-50">
                   {archiving ? <LoaderCircleIcon className="size-4 animate-spin" /> : <ArchiveIcon className="size-4" />} 归档到人才库
                 </button>
-                <button type="button" disabled={busy} onClick={handleImprove} className="inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-[#263a5e] disabled:opacity-50">
+                <button type="button" disabled={busy} onClick={handleImprove} className="inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50">
                   {action === 'improve' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <SparklesIcon className="size-4" />} 深度优化简历
                 </button>
               </>
+            ) : analysis && reportView === 'optimized' ? (
+              <button type="button" disabled={busy} onClick={handleOpenEditor} className="inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50">
+                {action === 'editor' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <PencilIcon className="size-4" />} 在 Resume Studio 中编辑
+              </button>
             ) : (
-              <button type="button" disabled={busy} onClick={handleOpenEditor} className="inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-[#263a5e] disabled:opacity-50">
+              <button type="button" disabled={busy} onClick={handleOpenEditor} className="inline-flex h-10 items-center gap-2 rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-brand-hover disabled:opacity-50">
                 {action === 'editor' ? <LoaderCircleIcon className="size-4 animate-spin" /> : <PencilIcon className="size-4" />} 在 Resume Studio 中编辑
               </button>
             )}
@@ -439,7 +479,7 @@ export default function DashboardPage() {
         </header>
 
         {(progress || error) && (
-          <div className={`mt-5 rounded-md border px-4 py-3 text-sm ${error ? 'border-[#efb5ad] bg-bad-soft text-bad' : 'border-brand bg-brand-soft text-brand'}`}>
+          <div className={`mt-5 rounded-md border px-4 py-3 text-sm ${error ? 'border-bad-border bg-bad-soft text-bad' : 'border-brand bg-brand-soft text-brand'}`}>
             {progress && !error && <LoaderCircleIcon className="mr-2 inline size-4 animate-spin" />}{error || progress}
           </div>
         )}
@@ -462,16 +502,25 @@ export default function DashboardPage() {
         )}
 
         {batchFailures.length > 0 && (
-          <div className="mt-4 flex gap-3 rounded-md border border-[#efcf8a] bg-warn-soft px-4 py-3 text-sm text-warn">
+          <div className="mt-4 flex gap-3 rounded-md border border-warn-border bg-warn-soft px-4 py-3 text-sm text-warn">
             <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" /> {batchFailures.length} 份简历未完成分析，其余结果已保留。
           </div>
         )}
 
-        {analysis ? (
+        {analysis && reportView === 'analysis' ? (
           <>
             <div id="sec-overview" className="mt-6 grid scroll-mt-6 overflow-hidden rounded-md border border-line bg-white sm:grid-cols-2 xl:grid-cols-4">
               {[
-                { label: '岗位契合度', value: `${analysis.job_fit_percentage}%`, note: `基础分 ${analysis.job_fit_score}/100`, color: 'text-brand' },
+                {
+                  label: '岗位契合度',
+                  value: `${analysis.final_score} / 100`,
+                  note: [
+                    `${analysis.job_fit_percentage}% 基础契合度`,
+                    analysis.ai_deduction > 0 ? `AI 美化扣 ${analysis.ai_deduction}` : null,
+                    analysis.hard_gate_deduction ? `硬门槛扣 ${analysis.hard_gate_deduction}` : null,
+                  ].filter(Boolean).join(' · '),
+                  color: 'text-brand',
+                },
                 { label: '简历美化程度', value: analysis.ai_risk_level, note: `${analysis.ai_risk_label} · 扣 ${analysis.ai_deduction} 分`, color: 'text-violet' },
                 { label: '相关经验年限', value: analysis.work_history.relevant_years, note: `职责重合 ${analysis.work_history.responsibility_match}`, color: 'text-ink' },
                 { label: '跳槽稳定性', value: analysis.work_history.stability, note: `公司背景 ${analysis.work_history.company_background}`, color: 'text-ink' },
@@ -492,7 +541,7 @@ export default function DashboardPage() {
 
             {/* 归档提示 */}
             {archiveNote && (
-              <div className="mt-4 flex items-center gap-3 rounded-md border border-[#bfe3d0] bg-[#e8f5ee] px-4 py-3 text-sm text-[#1d7f5c]">
+              <div className="mt-4 flex items-center gap-3 rounded-md border border-good-border bg-good-soft px-4 py-3 text-sm text-good-deep">
                 <CheckCircle2Icon className="size-4 shrink-0" /> {archiveNote}
               </div>
             )}
@@ -513,8 +562,7 @@ export default function DashboardPage() {
                       </thead>
                       <tbody>
                         {data.comparison.ranking.map((item) => {
-                          const medals = ['🥇', '🥈', '🥉'];
-                          const medal = item.rank <= 3 ? medals[item.rank - 1] : `${item.rank}`;
+                          const rankLabel = `${item.rank}`;
                           const target = batchAnalyses.find(
                             (batch) => (batch.candidate_name || batch.hr_analysis?.candidate_name) === item.name,
                           );
@@ -522,11 +570,20 @@ export default function DashboardPage() {
                             <tr
                               key={item.rank}
                               onClick={() => target && selectCandidate(target.resume_id)}
-                              className={`border-b border-line-soft last:border-b-0 ${target ? 'cursor-pointer transition-colors hover:bg-soft' : ''}`}
+                              onKeyDown={(e) => {
+                                if (target && (e.key === 'Enter' || e.key === ' ')) {
+                                  e.preventDefault();
+                                  selectCandidate(target.resume_id);
+                                }
+                              }}
+                              role={target ? 'button' : undefined}
+                              tabIndex={target ? 0 : undefined}
+                              aria-label={target ? `切换到候选人 ${item.name}，得分 ${target?.hr_analysis?.final_score ?? item.score}` : undefined}
+                              className={`border-b border-line-soft last:border-b-0 ${target ? 'cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brand hover:bg-soft' : ''}`}
                               title={target ? `点击切换到 ${item.name}` : undefined}
                             >
-                              <td className="px-4 py-3 font-semibold text-ink">{medal}</td>
-                              <td className="px-4 py-3 font-semibold text-brand">{item.score}</td>
+                              <td className="px-4 py-3 font-semibold text-ink">{rankLabel}</td>
+                              <td className="px-4 py-3 font-semibold text-brand">{target?.hr_analysis?.final_score ?? item.score}</td>
                               <td className="px-4 py-3 text-ink">{item.name}</td>
                               <td className="px-4 py-3 text-sub">{item.difference}</td>
                             </tr>
@@ -552,61 +609,113 @@ export default function DashboardPage() {
 
             <div className="mt-6 grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_310px]">
               <div className="space-y-6">
-                <Section eyebrow="综合结论" title="核心判定" icon={TargetIcon}>
-                  <p className="mt-5 text-sm leading-7 text-body">{analysis.summary}</p>
-                </Section>
+                {/* 招聘决策带（决策主轴：首屏即结论） */}
+                <section className="rounded-md border border-line bg-white p-5">
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                    <div className={`inline-flex rounded-full px-3 py-1.5 text-sm font-semibold ${recommendationClass}`}>{analysis.recruitment_recommendation}</div>
+                    <p className="text-3xl font-semibold text-ink">{analysis.final_score}<span className="ml-1 text-sm font-normal text-sub">/ 100</span></p>
+                    <div className="min-w-0 flex-1 text-sm text-sub">
+                      <p className="break-words leading-6">{analysis.summary}</p>
+                    </div>
+                  </div>
+                  <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-line-soft pt-3 text-sm">
+                    <div className="flex items-center gap-2"><span className="text-xs text-sub">适配标签</span><span className="font-medium text-ink">{analysis.fit_tag}</span></div>
+                    <div className="flex items-center gap-2"><span className="text-xs text-sub">候选人</span><span className="max-w-48 truncate font-medium text-ink">{candidateName}</span></div>
+                    <button
+                      type="button"
+                      onClick={() => document.getElementById('resume-review-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                      className="relative ml-auto inline-flex items-center gap-1.5 rounded-md border border-line-soft bg-white px-3 py-1.5 text-xs font-medium text-ink after:absolute after:-inset-1.5 after:content-[''] hover:bg-soft active:scale-[0.98]"
+                    >
+                      <HighlighterIcon className="size-3.5 text-brand" />
+                      简历原文标记 <ArrowDownIcon className="size-3.5" />
+                    </button>
+                  </div>
+                </section>
 
-                {/* Agent 校验：折叠徽章，始终显示；有问题时可展开详情 */}
-                {analysis.agent_validation && analysis.agent_validation.issues.length > 0 && (
-                  <section id="sec-validation" className="scroll-mt-6 rounded-md border border-[#e8dfd0] bg-warn-soft">
+                {/* Agent 校验：折叠徽章，始终显示；展开查看五步检测过程与问题详情 */}
+                {analysis.agent_validation && analysis.agent_validation.checked_rules > 0 && (
+                  <section id="sec-validation" className={`scroll-mt-6 rounded-md border ${analysis.agent_validation.issues.length > 0 ? 'border-warn-border-soft bg-warn-soft' : 'border-good-border-soft bg-good-soft'}`}>
                     <button
                       type="button"
                       onClick={() => setShowAgentValidation((visible) => !visible)}
-                      className="flex w-full items-center gap-2 px-4 py-3 text-left text-xs font-medium text-warn"
+                      className={`flex w-full items-center gap-2 px-4 py-3 text-left text-xs font-medium ${analysis.agent_validation.issues.length > 0 ? 'text-warn' : 'text-good'}`}
                     >
-                      <ShieldAlertIcon className="size-3.5 shrink-0" />
+                      {analysis.agent_validation.issues.length > 0 ? <ShieldAlertIcon className="size-3.5 shrink-0" /> : <CheckCircle2Icon className="size-3.5 shrink-0" />}
                       <span>
-                        Agent 校验：已核查 {analysis.agent_validation.checked_rules} 项要求，检出 {analysis.agent_validation.issues.length} 个问题
+                        Agent 校验：已核查 {analysis.agent_validation.checked_rules} 项要求
+                        {analysis.agent_validation.issues.length > 0 ? `，检出 ${analysis.agent_validation.issues.length} 个问题` : '，全部通过'}
                         {analysis.agent_validation.revised ? '并已修正' : ''}
                       </span>
-                      <span className="ml-auto shrink-0 text-warn">{showAgentValidation ? '收起 ▴' : '详情 ▾'}</span>
+                      <span className={`ml-auto flex shrink-0 items-center gap-1 ${analysis.agent_validation.issues.length > 0 ? 'text-warn' : 'text-good'}`}>
+                        {showAgentValidation ? '收起' : '查看过程'}
+                        {showAgentValidation ? <ChevronUpIcon className="size-3.5" /> : <ChevronDownIcon className="size-3.5" />}
+                      </span>
                     </button>
                     {showAgentValidation && (
-                      <div className="border-t border-[#eee3cd] px-4 pb-4 pt-3">
-                        <div className="overflow-x-auto rounded-md border border-line-soft">
-                          <table className="w-full border-collapse text-sm">
-                            <thead>
-                              <tr className="bg-mist">
-                                <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">问题类型</th>
-                                <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">问题</th>
-                                <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">修正</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {analysis.agent_validation.issues.map((issue, i) => (
-                                <tr key={i} className="border-b border-line-soft last:border-b-0">
-                                  <td className="px-4 py-2 text-xs text-ink">
-                                    <span className="inline-block rounded bg-warn-soft px-1.5 py-0.5 text-[10px] text-warn">{AGENT_RULE_LABELS[issue.rule] || ''}</span>
-                                  </td>
-                                  <td className="px-4 py-2 text-xs text-bad">{issue.problem}</td>
-                                  <td className="px-4 py-2 text-xs text-good">{issue.fix}</td>
-                                </tr>
+                      <div className={`border-t px-4 pb-4 pt-3 ${analysis.agent_validation.issues.length > 0 ? 'border-warn-border-faint' : 'border-good-border-soft'}`}>
+                        {analysis.agent_trace?.steps?.length ? (
+                          <div>
+                            <p className="text-xs font-semibold text-ink">检测过程（共 {analysis.agent_trace.steps.length} 步）</p>
+                            <ol className="mt-2 space-y-1.5">
+                              {analysis.agent_trace.steps.map((step, i) => (
+                                <li key={i} className="flex items-start gap-2 text-xs leading-5">
+                                  <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full bg-mist text-[10px] text-sub">{i + 1}</span>
+                                  <span className="shrink-0 font-semibold text-ink">{step.step}</span>
+                                  <span className="shrink-0 text-sub">{step.status}</span>
+                                  <span className="min-w-0 break-words text-body">{step.detail}</span>
+                                </li>
                               ))}
-                            </tbody>
-                          </table>
-                        </div>
+                            </ol>
+                          </div>
+                        ) : (
+                          <p className="text-xs text-sub">本次分析未记录检测过程明细。</p>
+                        )}
+                        {analysis.agent_validation.issues.length > 0 && (
+                          <div className="mt-3 overflow-x-auto rounded-md border border-line-soft">
+                            <table className="w-full border-collapse text-sm">
+                              <thead>
+                                <tr className="bg-mist">
+                                  <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">问题类型</th>
+                                  <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">问题</th>
+                                  <th className="border-b border-line-soft px-4 py-2 text-left text-xs font-semibold text-sub">修正</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {analysis.agent_validation.issues.map((issue, i) => (
+                                  <tr key={i} className="border-b border-line-soft last:border-b-0">
+                                    <td className="px-4 py-2 text-xs text-ink">
+                                      <span className="inline-block rounded bg-warn-soft px-1.5 py-0.5 text-[10px] text-warn">{AGENT_RULE_LABELS[issue.rule] || ''}</span>
+                                    </td>
+                                    <td className="px-4 py-2 text-xs text-bad">{issue.problem}</td>
+                                    <td className="px-4 py-2 text-xs text-good">{issue.fix}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        )}
                       </div>
                     )}
                   </section>
                 )}
 
-                {analysis.agent_validation && analysis.agent_validation.issues.length === 0 && (
-                  <section id="sec-validation" className="scroll-mt-6 flex items-center gap-2 rounded-md border border-[#c9e5d6] bg-good-soft px-4 py-3 text-xs font-medium text-good">
-                    <CheckCircle2Icon className="size-3.5 shrink-0" />
-                    <span>Agent 校验：已核查 {analysis.agent_validation.checked_rules} 项要求，全部通过</span>
-                  </section>
-                )}
+                {/* 亮点与风险：决策证据链核心，默认展开（P1-1 distill：与次级区块分离） */}
+                <div id="sec-highlights" className="grid scroll-mt-6 gap-6 lg:grid-cols-2">
+                  <Section eyebrow="优势证据" title="匹配亮点" icon={CheckCircle2Icon}>
+                    <InsightList items={analysis.strengths} />
+                    <h3 className="mt-6 border-t border-line-soft pt-5 text-sm font-semibold text-ink">项目匹配点</h3>
+                    <InsightList items={analysis.skill_match.project_match_points} />
+                  </Section>
+                  <Section eyebrow="缺口预警" title="短板与风险" icon={ShieldAlertIcon}>
+                    <h3 className="mt-5 text-sm font-semibold text-warn">短板不足</h3>
+                    <InsightList items={analysis.weaknesses} />
+                    <h3 className="mt-6 border-t border-line-soft pt-5 text-sm font-semibold text-bad">招聘风险预警</h3>
+                    <InsightList items={analysis.risk_points} />
+                  </Section>
+                </div>
 
+                {/* 深入分析：次级证据模块平铺（教育·履历·技能·加分） */}
+                <div id="sec-details" className="scroll-mt-6 space-y-6">
                 <Section eyebrow="基本信息" title="基础信息筛选" icon={GraduationCapIcon}>
                   <DetailGrid values={[
                     ['姓名', candidateName],
@@ -620,22 +729,28 @@ export default function DashboardPage() {
 
                 <Section id="sec-education" eyebrow="教育背景" title="教育经历" icon={GraduationCapIcon}>
                   {analysis.education_history && analysis.education_history.length > 0 ? (
-                    <div className="mt-2 flex flex-col gap-3">
-                      {analysis.education_history.map((edu, i) => (
-                        <div key={i} className="rounded-md border border-line-soft bg-mist p-4">
-                          <div className="flex items-center gap-2 text-xs font-semibold text-brand">
-                            <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-brand-soft text-[10px]">{i + 1}</span>
-                            <span>{edu.degree}</span>
-                            <span className="ml-auto text-sub font-normal">毕业时间：{edu.graduation_year}</span>
+                    <>
+                      <div className="mt-3 flex items-start gap-2 rounded-md border border-warn-border bg-warn-soft px-3.5 py-2.5 text-xs leading-5 text-warn-ink-deep">
+                        <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                        <span>学历信息为简历自述，未经权威渠道核验，请结合学信网或学历/学位证书原件复核（人工待审核）。</span>
+                      </div>
+                      <div className="mt-3 flex flex-col gap-3">
+                        {analysis.education_history.map((edu, i) => (
+                          <div key={i} className="rounded-md border border-line-soft bg-mist p-4">
+                            <div className="flex items-center gap-2 text-xs font-semibold text-brand">
+                              <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-brand-soft text-[10px]">{i + 1}</span>
+                              <span>{edu.degree}</span>
+                              <span className="ml-auto text-sub font-normal">毕业时间：{edu.graduation_year}</span>
+                            </div>
+                            <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1.5">
+                              <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">院校</dt><dd className="text-sm text-ink">{edu.school_name}</dd></div>
+                              <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">层次</dt><dd className="text-sm text-ink">{edu.school_tier}</dd></div>
+                              <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">专业</dt><dd className="text-sm text-ink">{edu.major}</dd></div>
+                            </div>
                           </div>
-                          <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1.5">
-                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">院校</dt><dd className="text-sm text-ink">{edu.school_name}</dd></div>
-                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">层次</dt><dd className="text-sm text-ink">{edu.school_tier}</dd></div>
-                            <div className="flex items-center"><dt className="w-14 shrink-0 text-[11px] text-sub">专业</dt><dd className="text-sm text-ink">{edu.major}</dd></div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                        ))}
+                      </div>
+                    </>
                   ) : (
                     <p className="mt-2 text-sm text-sub">暂无教育经历信息。</p>
                   )}
@@ -656,22 +771,9 @@ export default function DashboardPage() {
                     ]}
                   />
                   <EmploymentGapSummary value={analysis.work_history.employment_gaps} />
-                  <EmploymentTimeline records={analysis.work_history.employment_records} />
+                  <EmploymentOverlapWarning items={analysis.work_history.employment_overlaps} />
+                   <EmploymentTimeline records={analysis.work_history.employment_records} />
                 </Section>
-
-                <div id="sec-highlights" className="grid scroll-mt-6 gap-6 lg:grid-cols-2">
-                  <Section eyebrow="优势证据" title="匹配亮点" icon={CheckCircle2Icon}>
-                    <InsightList items={analysis.strengths} />
-                    <h3 className="mt-6 border-t border-line-soft pt-5 text-sm font-semibold text-ink">项目匹配点</h3>
-                    <InsightList items={analysis.skill_match.project_match_points} />
-                  </Section>
-                  <Section eyebrow="缺口预警" title="短板与风险" icon={ShieldAlertIcon}>
-                    <h3 className="mt-5 text-sm font-semibold text-warn">短板不足</h3>
-                    <InsightList items={analysis.weaknesses} />
-                    <h3 className="mt-6 border-t border-line-soft pt-5 text-sm font-semibold text-bad">招聘风险预警</h3>
-                    <InsightList items={analysis.risk_points} />
-                  </Section>
-                </div>
 
                 <div className="grid gap-6 lg:grid-cols-2">
                   <Section eyebrow="能力核对" title="专业技能匹配" icon={BarChart3Icon}>
@@ -695,28 +797,10 @@ export default function DashboardPage() {
                     <InsightList items={analysis.deduction_reasons} empty="未发现明显美化痕迹" />
                   </Section>
                 </div>
+                </div>
               </div>
 
               <aside className="space-y-5 xl:sticky xl:top-6">
-                <section className="rounded-md border border-line bg-white p-5">
-                  <p className="text-xs font-semibold uppercase text-sub">招聘决策</p>
-                  <div className={`mt-4 inline-flex rounded-full px-3 py-1.5 text-sm font-semibold ${recommendationClass}`}>{analysis.recruitment_recommendation}</div>
-                  <p className="mt-4 text-3xl font-semibold text-ink">{analysis.final_score}<span className="ml-1 text-sm font-normal text-sub">/ 100</span></p>
-                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-mist"><div className="h-full rounded-full bg-brand" style={{ width: `${Math.max(0, Math.min(100, analysis.final_score))}%` }} /></div>
-                  <dl className="mt-5 divide-y divide-line-soft text-sm">
-                    <div className="flex justify-between gap-3 py-3"><dt className="text-sub">适配标签</dt><dd className="font-medium text-ink">{analysis.fit_tag}</dd></div>
-                    <div className="flex justify-between gap-3 py-3"><dt className="text-sub">候选人</dt><dd className="max-w-36 truncate font-medium text-ink">{candidateName}</dd></div>
-                  </dl>
-                  <button
-                    type="button"
-                    onClick={() => document.getElementById('resume-review-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
-                    className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-md border border-line-soft bg-white px-3 py-2 text-xs font-medium text-ink hover:bg-soft"
-                  >
-                    <HighlighterIcon className="size-3.5 text-brand" />
-                    简历原文标记 ↓
-                  </button>
-                </section>
-
                 <ReportNav items={reportNavItems} />
               </aside>
             </div>
@@ -732,7 +816,7 @@ export default function DashboardPage() {
           </>
         ) : (
           <section className="mt-6 rounded-md border border-line bg-white p-5 sm:p-8">
-            <MarkdownReport content={data.analysis_result || '暂无深度优化内容。'} />
+            <MarkdownReport content={data.optimized_markdown || data.analysis_result || '暂无深度优化内容。'} />
           </section>
         )}
       </div>
@@ -746,7 +830,7 @@ export default function DashboardPage() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
           onClick={(e) => { if (e.target === e.currentTarget) setArchiveModalOpen(false); }}
         >
-          <div className="w-full max-w-md rounded-lg bg-white p-6 shadow-2xl">
+          <div ref={archivePanelRef} className="w-full max-w-md rounded-lg bg-white p-6 shadow-2xl">
             <h3 className="text-lg font-semibold text-ink">归档到候选人才库</h3>
             <p className="mt-1 text-sm text-sub">选择或自定义岗位分类，方便后续按分类筛选排名。</p>
 
@@ -758,7 +842,7 @@ export default function DashboardPage() {
                     key={c}
                     type="button"
                     onClick={() => { setArchiveCategory(c); setArchiveCategoryCustom(''); }}
-                    className={`rounded-full border px-3 py-1 text-sm transition-colors ${archiveCategory === c && !archiveCategoryCustom ? 'border-brand bg-brand-soft text-brand' : 'border-line-soft bg-white text-body hover:bg-mist'}`}
+                    className={`relative rounded-full border px-3 py-1 text-sm transition-colors after:absolute after:-inset-1.5 after:content-[''] ${archiveCategory === c && !archiveCategoryCustom ? 'border-brand bg-brand-soft text-brand' : 'border-line-soft bg-white text-body hover:bg-mist'}`}
                   >
                     {c}
                   </button>
@@ -789,7 +873,7 @@ export default function DashboardPage() {
                 type="button"
                 disabled={archiving}
                 onClick={handleArchive}
-                className="inline-flex items-center gap-2 rounded-md bg-[#1d7f5c] px-4 py-2 text-sm font-medium text-white hover:bg-[#18694d] disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded-md bg-good px-4 py-2 text-sm font-medium text-white hover:bg-good-deep disabled:opacity-50"
               >
                 {archiving ? <LoaderCircleIcon className="size-4 animate-spin" /> : <ArchiveIcon className="size-4" />} 确认归档
               </button>

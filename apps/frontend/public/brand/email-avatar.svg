@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="av-title av-desc">
+  <title id="av-title">简历智选管理员邮箱头像</title>
+  <desc id="av-desc">深蓝圆形象头：AI 扫描简历并给出匹配评分</desc>
+  <!-- 深靛蓝圆底 -->
+  <circle cx="128" cy="128" r="128" fill="#1B2A45"/>
+  <!-- 白色简历文档 -->
+  <rect x="72" y="46" width="112" height="148" rx="16" fill="#F8FAFC"/>
+  <path d="M72 62a16 16 0 0 1 16-16h24v32H72Z" fill="#D8E1EE"/>
+  <path d="M112 46h8v32h-8Z" fill="#F8FAFC"/>
+  <!-- 履历行线 -->
+  <rect x="86" y="84" width="68" height="12" rx="6" fill="#C4CFDE"/>
+  <rect x="86" y="108" width="68" height="12" rx="6" fill="#C4CFDE"/>
+  <rect x="86" y="132" width="44" height="12" rx="6" fill="#C4CFDE"/>
+  <!-- AI 扫描线：贯穿文档下部，象征量化读取 -->
+  <rect x="86" y="158" width="68" height="10" rx="5" fill="#78A0FF"/>
+  <!-- 评分盖章徽章：深蓝圆盘 + 薄荷绿勾 -->
+  <circle cx="176" cy="176" r="40" fill="#0E1F3A"/>
+  <path d="m160 176 12 12 26-30" fill="none" stroke="#52E0AA" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

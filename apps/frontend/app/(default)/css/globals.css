@@ -4,6 +4,15 @@
 
 /* 品牌语义色令牌：两个核心页（工作台/报告页）统一从这里取色。
    sub 在白底对比度 4.9:1（WCAG AA）；改品牌色只动这里。 */
+
+/* 移动端安全区：刘海屏/手势条时不遮挡内容（viewport-fit=cover 生效时） */
+@layer base {
+  body {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
 @theme {
   --color-ink: #1b273d;        /* 标题/主文字 */
   --color-body: #435168;       /* 正文 */
@@ -18,11 +27,39 @@
   --color-navy: #111c31;       /* 侧栏底色 */
   --color-good: #1d7f5c;
   --color-good-soft: #e6f7ee;
+  --color-good-deep: #197050;     /* 成功色加深档：浅底小字徽章过 AA */
+  --color-good-ink: #2f6b4a;      /* 深绿文字/图例（原硬编码） */
+  --color-good-border: #bfe3d0;   /* 成功态细边框（原硬编码） */
+  --color-good-border-soft: #cfe7d8; /* 成功态内分隔线（原硬编码） */
   --color-bad: #b23b4e;
   --color-bad-soft: #fff4f2;
+  --color-bad-border: #efb5ad;    /* 错误态细边框（原硬编码） */
+  --color-bad-hover: #972f40;     /* 危险按钮 hover（原硬编码） */
+  --color-bad-hover-soft: #f6d9d5; /* 危险浅底 hover（原硬编码） */
+  --color-brand-hover-soft: #2f5cb8; /* 品牌蓝按钮 hover（原硬编码） */
   --color-warn: #8b6514;
   --color-warn-soft: #fffcf5;
+  --color-warn-border: #efcf8a;   /* 警示金边框（原硬编码） */
+  --color-warn-border-soft: #e8dfd0; /* 警示浅米外框（原硬编码） */
+  --color-warn-border-faint: #eee3cd; /* 警示内分隔（原硬编码） */
+  --color-warn-panel: #fffaf0;    /* 警示金浅底（原硬编码） */
+  --color-warn-ink: #8a6d1f;      /* 警示金文字（原硬编码） */
+  --color-warn-ink-deep: #6b5314; /* 警示深金文字（原硬编码） */
+  --color-warn-strong: #5a4a10;   /* 警示最深金（原硬编码） */
+  --color-warn-divider: #f0e2bd;  /* 金区分隔线（原硬编码） */
+  --color-warn-btn-border: #d9c98f; /* 金按钮边框（原硬编码） */
+  --color-warn-btn-hover: #fdf6e3;  /* 金按钮 hover（原硬编码） */
   --color-violet: #995c87;
+  --color-brand-hover: #263a5e;   /* 主按钮 hover（原硬编码） */
+  --color-check-accent: #2b4a7f;  /* checkbox 选中色（原硬编码） */
+  --color-disabled-bg: #c9cfd9;   /* 禁用态底（原 #b8c0cc 加深一档） */
+  --color-disabled-fg: #7a8698;   /* 禁用态文字（过 3:1） */
+  --color-nav-active-bg: #1b2a47;      /* 侧栏激活底（原硬编码） */
+  --color-nav-active-border: rgba(120, 160, 255, 0.5); /* 侧栏激活边框 */
+  --color-nav-accent: #78a0ff;    /* 侧栏亮蓝图标底（原硬编码） */
+  --color-nav-accent-fg: #11203b; /* 侧栏亮蓝图标字（原硬编码） */
+  --color-navy-hover: #1c2c4d;    /* 深蓝按钮 hover（原硬编码） */
+  --color-nav-ring: rgba(120, 160, 255, 0.3); /* 深蓝聚焦环（原硬编码） */
 }
 
 /* In your global CSS file (e.g., globals.css) */
@@ -105,40 +142,6 @@
   --sidebar-ring: oklch(0.705 0.015 286.067);
 }
 
-.dark {
-  --background: oklch(0.141 0.005 285.823);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.21 0.006 285.885);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.21 0.006 285.885);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.92 0.004 286.32);
-  --primary-foreground: oklch(0.21 0.006 285.885);
-  --secondary: oklch(0.274 0.006 286.033);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.274 0.006 286.033);
-  --muted-foreground: oklch(0.705 0.015 286.067);
-  --accent: oklch(0.274 0.006 286.033);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.552 0.016 285.938);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.21 0.006 285.885);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.274 0.006 286.033);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.552 0.016 285.938);
-}
-
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -154,5 +157,27 @@
 ::selection {
   background: #cbdafd;
   color: #14213a;
+}
+
+/* 浏览器表面：caret 沿用品牌蓝（craft floor） */
+:root {
+  caret-color: var(--color-brand);
+}
+
+/* 动效降级：尊重 prefers-reduced-motion（animate.md 要求保留有意义的反馈，
+   仅移除/放缓空间位移与装饰性动画，状态色变化仍可见） */
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin {
+    animation-duration: 1.5s; /* 保留"进行中"反馈，但放缓旋转 */
+  }
+  .animate-shake {
+    animation: none;
+  }
+  .animate-gradient {
+    animation: none;
+  }
+  .animate-pulse {
+    animation-duration: 3s;
+  }
 }
 

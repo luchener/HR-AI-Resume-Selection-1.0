@@ -13,6 +13,8 @@ import {
   XIcon,
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
+import ConfirmDialog from '@/components/workbench/confirm-dialog';
+import { useDialogBehavior } from '@/components/workbench/dialog-behavior';
 import {
   ARCHIVE_PRESET_CATEGORIES,
   emptyTrash,
@@ -46,9 +48,6 @@ function ScoreBadge({ score }: { score: number }) {
 }
 
 function rankMedal(rank: number): string {
-  if (rank === 1) return '🥇';
-  if (rank === 2) return '🥈';
-  if (rank === 3) return '🥉';
   return String(rank);
 }
 
@@ -76,7 +75,17 @@ export default function ArchivesPage() {
   const [regenerating, setRegenerating] = useState(false);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  /** 待确认的高风险操作（P1-2：替代原生 window.confirm） */
+  const [pendingAction, setPendingAction] = useState<{ kind: 'trash' | 'delete' | 'empty'; record?: ArchiveRecord } | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 详情抽屉：统一弹窗行为（Esc 关闭 / 焦点恢复 / Tab 陷阱）——P1-3
+  const drawerPanelRef = useRef<HTMLDivElement>(null);
+  useDialogBehavior({
+    open: detail !== null,
+    onClose: () => setDetail(null),
+    panelRef: drawerPanelRef,
+  });
 
   const loadActive = useCallback(async (query = nameQuery) => {
     setLoading(true);
@@ -146,7 +155,6 @@ export default function ArchivesPage() {
   };
 
   const handleMoveToTrash = async (record: ArchiveRecord) => {
-    if (!window.confirm(`确定将「${record.candidate_name}」移入回收站吗？可在回收站恢复。`)) return;
     setBusyId(record.archive_id);
     try {
       await moveToTrash(record.archive_id);
@@ -175,7 +183,6 @@ export default function ArchivesPage() {
   };
 
   const handlePermanentDelete = async (record: ArchiveRecord) => {
-    if (!window.confirm(`彻底删除「${record.candidate_name}」？该操作不可恢复！`)) return;
     setBusyId(record.archive_id);
     try {
       await permanentDeleteArchive(record.archive_id);
@@ -189,7 +196,6 @@ export default function ArchivesPage() {
   };
 
   const handleEmptyTrash = async () => {
-    if (!window.confirm('确定清空回收站吗？回收站内所有归档将被彻底删除，不可恢复！')) return;
     setBusyId('__all__');
     try {
       await emptyTrash();
@@ -291,12 +297,12 @@ export default function ArchivesPage() {
         </header>
 
         {notice && (
-          <div className="mt-4 flex items-center gap-3 rounded-md border border-[#bfe3d0] bg-[#e8f5ee] px-4 py-3 text-sm text-[#1d7f5c]">
+          <div className="mt-4 flex items-center gap-3 rounded-md border border-good-border bg-good-soft px-4 py-3 text-sm text-good-deep">
             <CheckCircle2Icon className="size-4 shrink-0" /> {notice}
           </div>
         )}
         {error && (
-          <div className="mt-4 flex items-center gap-3 rounded-md border border-[#efb5ad] bg-bad-soft px-4 py-3 text-sm text-bad">
+          <div className="mt-4 flex items-center gap-3 rounded-md border border-bad-border bg-bad-soft px-4 py-3 text-sm text-bad">
             <XIcon className="size-4 shrink-0" /> {error}
             <button type="button" onClick={() => setError('')} className="ml-auto text-xs underline">关闭</button>
           </div>
@@ -383,7 +389,7 @@ export default function ArchivesPage() {
                       <td className="px-4 py-3"><span className={`rounded px-2 py-0.5 text-xs font-medium ${REC_STYLE[a.recruitment_recommendation] || 'bg-mist text-sub'}`}>{a.recruitment_recommendation || '--'}</span></td>
                       <td className="px-4 py-3">
                         <div className="flex max-w-44 flex-wrap gap-1">
-                          {(a.custom_tags || []).map((t) => <span key={t} className="rounded bg-brand-soft px-1.5 py-0.5 text-[11px] text-brand">{t}</span>)}
+                          {(a.custom_tags || []).map((t) => <span key={t} className="rounded bg-brand-soft px-1.5 py-0.5 text-[11px] text-brand-deep">{t}</span>)}
                           {(a.custom_tags || []).length === 0 && <span className="text-xs text-sub/70">--</span>}
                         </div>
                       </td>
@@ -394,13 +400,13 @@ export default function ArchivesPage() {
                             type="button"
                             disabled={busyId === a.archive_id}
                             onClick={() => openDetail(a)}
-                            className="rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-ink hover:bg-mist disabled:opacity-50"
+                            className="relative rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-ink after:absolute after:-inset-1.5 after:content-[''] hover:bg-mist disabled:opacity-50"
                           >详情</button>
                           <button
                             type="button"
                             disabled={busyId === a.archive_id}
-                            onClick={() => handleMoveToTrash(a)}
-                            className="rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-bad hover:bg-bad-soft disabled:opacity-50"
+                            onClick={() => setPendingAction({ kind: 'trash', record: a })}
+                            className="relative rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-bad after:absolute after:-inset-1.5 after:content-[''] hover:bg-bad-soft disabled:opacity-50"
                           >
                             {busyId === a.archive_id ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : '移入回收站'}
                           </button>
@@ -419,8 +425,8 @@ export default function ArchivesPage() {
               <button
                 type="button"
                 disabled={busyId !== null || trash.length === 0}
-                onClick={handleEmptyTrash}
-                className="inline-flex h-9 items-center gap-2 rounded-md border border-bad/30 bg-bad-soft px-4 text-sm font-medium text-bad hover:bg-[#f6d9d5] disabled:opacity-50"
+                onClick={() => setPendingAction({ kind: 'empty' })}
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-bad/30 bg-bad-soft px-4 text-sm font-medium text-bad hover:bg-bad-hover-soft disabled:opacity-50"
               >
                 <Trash2Icon className="size-4" /> 清空回收站
               </button>
@@ -459,15 +465,15 @@ export default function ArchivesPage() {
                             type="button"
                             disabled={busyId === a.archive_id}
                             onClick={() => handleRestore(a)}
-                            className="inline-flex items-center gap-1 rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-good hover:bg-good-soft disabled:opacity-50"
+                            className="relative inline-flex items-center gap-1 rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-good after:absolute after:-inset-1.5 after:content-[''] hover:bg-good-soft disabled:opacity-50"
                           >
                             {busyId === a.archive_id ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : <ArchiveRestoreIcon className="size-3.5" />} 恢复
                           </button>
                           <button
                             type="button"
                             disabled={busyId === a.archive_id}
-                            onClick={() => handlePermanentDelete(a)}
-                            className="inline-flex items-center gap-1 rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-bad hover:bg-bad-soft disabled:opacity-50"
+                            onClick={() => setPendingAction({ kind: 'delete', record: a })}
+                            className="relative inline-flex items-center gap-1 rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-bad after:absolute after:-inset-1.5 after:content-[''] hover:bg-bad-soft disabled:opacity-50"
                           >
                             <Trash2Icon className="size-3.5" /> 彻底删除
                           </button>
@@ -491,7 +497,7 @@ export default function ArchivesPage() {
           className="fixed inset-0 z-50 flex justify-end bg-black/40"
           onClick={(e) => { if (e.target === e.currentTarget) setDetail(null); }}
         >
-          <div className="h-full w-full max-w-xl overflow-y-auto bg-white shadow-2xl">
+          <div ref={drawerPanelRef} className="h-full w-full max-w-xl overflow-y-auto bg-white shadow-2xl">
             <div className="sticky top-0 flex items-center justify-between border-b border-line bg-white px-6 py-4">
               <div className="flex items-center gap-3">
                 <span className="flex size-10 items-center justify-center rounded-full bg-brand-soft text-base font-bold text-brand">
@@ -502,7 +508,7 @@ export default function ArchivesPage() {
                   <p className="text-xs text-sub">{detail.category || detail.job_title || '未关联岗位'}</p>
                 </div>
               </div>
-              <button type="button" onClick={() => setDetail(null)} aria-label="关闭" className="flex size-8 items-center justify-center rounded-md text-sub hover:bg-mist">
+              <button type="button" onClick={() => setDetail(null)} aria-label="关闭" className="relative flex size-8 items-center justify-center rounded-md text-sub after:absolute after:-inset-1.5 after:content-[''] hover:bg-mist">
                 <XIcon className="size-4" />
               </button>
             </div>
@@ -533,7 +539,7 @@ export default function ArchivesPage() {
                       key={c}
                       type="button"
                       onClick={() => setCategoryDraft(c)}
-                      className={`rounded-full border px-3 py-1 text-sm transition-colors ${categoryDraft === c ? 'border-brand bg-brand-soft text-brand' : 'border-line-soft bg-white text-body hover:bg-mist'}`}
+                      className={`relative rounded-full border px-3 py-1 text-sm transition-colors after:absolute after:-inset-1.5 after:content-[''] ${categoryDraft === c ? 'border-brand bg-brand-soft text-brand' : 'border-line-soft bg-white text-body hover:bg-mist'}`}
                     >
                       {c}
                     </button>
@@ -547,7 +553,7 @@ export default function ArchivesPage() {
                     placeholder="或输入自定义分类"
                     className="flex-1 rounded-md border border-line-soft px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                   />
-                  <button type="button" onClick={saveCategory} className="rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-[#263a5e]">保存</button>
+                  <button type="button" onClick={saveCategory} className="rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-brand-hover">保存</button>
                 </div>
               </div>
 
@@ -562,7 +568,7 @@ export default function ArchivesPage() {
                     placeholder="如：AI，社招，急聘"
                     className="flex-1 rounded-md border border-line-soft px-3 py-2 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
                   />
-                  <button type="button" onClick={saveTags} className="rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-[#263a5e]">保存</button>
+                  <button type="button" onClick={saveTags} className="rounded-md bg-brand-deep px-4 text-sm font-medium text-white hover:bg-brand-hover">保存</button>
                 </div>
               </div>
 
@@ -574,7 +580,7 @@ export default function ArchivesPage() {
                   <div>
                     <h3 className="text-sm font-semibold text-ink">分析摘要</h3>
                     <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 border-t border-line-soft pt-3 text-sm">
-                      <div><dt className="text-xs text-sub">岗位契合度</dt><dd className="mt-0.5 font-medium text-ink">{snap.job_fit_percentage != null ? `${String(snap.job_fit_percentage)}%` : '--'}</dd></div>
+                      <div><dt className="text-xs text-sub">岗位契合度</dt><dd className="mt-0.5 font-medium text-ink">{snap.final_score != null ? `${String(snap.final_score)} / 100` : '--'}</dd></div>
                       <div><dt className="text-xs text-sub">相关经验年限</dt><dd className="mt-0.5 font-medium text-ink">{str(snap.relevant_years)}</dd></div>
                       <div><dt className="text-xs text-sub">简历美化程度</dt><dd className="mt-0.5 font-medium text-ink">{str(snap.ai_risk_label)}</dd></div>
                     </dl>
@@ -594,7 +600,7 @@ export default function ArchivesPage() {
                   onClick={exportReportImage}
                   disabled={regenerating || !detail.analysis}
                   title={detail.analysis ? '实时生成并导出报告图片' : '该归档无完整分析数据，无法导出，请重新归档'}
-                  className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-[#3e6fd3] px-3 py-2 text-xs font-medium text-white hover:bg-[#2f5cb8] disabled:cursor-not-allowed disabled:opacity-50"
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-brand px-3 py-2 text-xs font-medium text-white hover:bg-brand-hover-soft disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {regenerating ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : <DownloadIcon className="size-3.5" />}
                   导出报告图片
@@ -614,6 +620,32 @@ export default function ArchivesPage() {
           </div>
         </div>
       )}
+
+      {/* 高风险操作确认（P1-2：替代原生 window.confirm） */}
+      <ConfirmDialog
+        open={pendingAction !== null}
+        danger={pendingAction?.kind !== 'trash'}
+        title={pendingAction?.kind === 'trash' ? '移入回收站' : pendingAction?.kind === 'delete' ? '彻底删除' : '清空回收站'}
+        message={
+          pendingAction?.kind === 'trash' ? (
+            <>将「<span className="font-medium text-ink">{pendingAction?.record?.candidate_name}</span>」移入回收站。可在回收站中恢复，不影响人才库统计。</>
+          ) : pendingAction?.kind === 'delete' ? (
+            <>将彻底删除「<span className="font-medium text-ink">{pendingAction?.record?.candidate_name}</span>」的归档记录与关联数据，<span className="font-medium text-bad">此操作不可恢复</span>。</>
+          ) : (
+            <>回收站内所有归档将被彻底删除，<span className="font-medium text-bad">此操作不可恢复</span>。</>
+          )
+        }
+        confirmLabel={pendingAction?.kind === 'trash' ? '移入回收站' : '确认删除'}
+        busy={busyId !== null}
+        onConfirm={() => {
+          const action = pendingAction;
+          setPendingAction(null);
+          if (action?.kind === 'trash' && action.record) handleMoveToTrash(action.record);
+          else if (action?.kind === 'delete' && action.record) handlePermanentDelete(action.record);
+          else if (action?.kind === 'empty') handleEmptyTrash();
+        }}
+        onCancel={() => setPendingAction(null)}
+      />
     </AppShell>
   );
 }

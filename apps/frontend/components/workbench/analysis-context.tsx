@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { setCompletionHandler } from '@/lib/analysis-session';
 
 export interface EmploymentRecord {
   company_name: string;
@@ -10,12 +11,44 @@ export interface EmploymentRecord {
   duration: string;
 }
 
+export interface RequirementChecklistItem {
+  id: string;
+  text: string;
+  category: string;
+  logic: string;
+  status: 'met' | 'not_met' | 'not_mentioned' | 'manual_review';
+  resume_basis: string;
+}
+
+export interface EmploymentOverlap {
+  company_name: string;
+  other_company_name: string;
+  start_date: string;
+  end_date: string;
+  months: number;
+  message: string;
+}
+
+export interface AgentTraceStep {
+  step: string;
+  status: string;
+  detail: string;
+}
+
+export interface AgentTrace {
+  steps?: AgentTraceStep[];
+  requirements?: string[];
+  experiences?: string[];
+  web_search?: boolean;
+}
+
 export interface HrAnalysis {
   candidate_name: string;
   final_score: number;
   fit_grade: string;
   job_fit_score: number;
   job_fit_percentage: number;
+  hard_gate_deduction?: number;
   score_breakdown?: {
     hard_requirements: number;
     responsibility_overlap: number;
@@ -23,6 +56,7 @@ export interface HrAnalysis {
     industry_background: number;
     evidence_bonus: number;
   };
+  requirements_checklist?: RequirementChecklistItem[];
   ai_risk: 'none' | 'light' | 'medium' | 'high';
   ai_risk_level: string;
   ai_risk_label: string;
@@ -52,6 +86,7 @@ export interface HrAnalysis {
     stability: string;
     employment_gaps: string;
     employment_records?: EmploymentRecord[];
+    employment_overlaps?: EmploymentOverlap[];
     responsibility_match: string;
   };
   skill_match: {
@@ -75,6 +110,7 @@ export interface HrAnalysis {
     mode?: string;
     revised?: boolean;
   };
+  agent_trace?: AgentTrace;
 }
 
 export interface CandidateComparison {
@@ -89,7 +125,9 @@ export interface AnalysisData {
   job_id: string;
   candidate_name?: string;
   analysis_result?: string;
+  optimized_markdown?: string;
   hr_analysis?: HrAnalysis;
+  requirements_checklist?: RequirementChecklistItem[];
   studio_markdown?: string;
   batch_analyses?: AnalysisData[];
   batch_failures?: Array<{ resume_id: string; detail: string }>;
@@ -112,6 +150,20 @@ const AnalysisContext = createContext<AnalysisContextValue | undefined>(undefine
 export function AnalysisProvider({ children }: { children: ReactNode }) {
   const [analysisResult, setAnalysisResultState] = useState<AnalysisResult | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
+
+  // 分析任务可能在任何页面后台完成（用户切走工作台时任务仍继续）：
+  // 注册全局完成回调，把结果写入 context + sessionStorage，避免结果"丢失"。
+  useEffect(() => {
+    setCompletionHandler((result) => {
+      setAnalysisResultState(result);
+      try {
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(result));
+      } catch {
+        // Keep the current session usable when browser storage is unavailable.
+      }
+    });
+    return () => setCompletionHandler(null);
+  }, []);
 
   useEffect(() => {
     try {

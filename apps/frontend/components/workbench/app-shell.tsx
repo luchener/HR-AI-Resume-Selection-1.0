@@ -1,14 +1,15 @@
 'use client';
 
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
-import { ArchiveIcon, BarChart3Icon, KeyRoundIcon, LayoutDashboardIcon, LogOutIcon, XIcon } from 'lucide-react';
+import { ArchiveIcon, BarChart3Icon, KeyRoundIcon, LayoutDashboardIcon, LogOutIcon, ShieldCheckIcon, XIcon } from 'lucide-react';
 import { useAuth } from './auth-context';
 import { changePassword } from '@/lib/api/screening';
+import { useDialogBehavior } from './dialog-behavior';
 
 type AppShellProps = {
-  active: 'home' | 'report' | 'archives';
+  active: 'home' | 'report' | 'archives' | 'admin';
   children: ReactNode;
 };
 
@@ -16,10 +17,11 @@ const navigation = [
   { id: 'home' as const, label: '首页控制台', href: '/', icon: LayoutDashboardIcon },
   { id: 'report' as const, label: '分析报告页', href: '/dashboard', icon: BarChart3Icon },
   { id: 'archives' as const, label: '候选人才库', href: '/archives', icon: ArchiveIcon },
+  { id: 'admin' as const, label: '账号管理', href: '/admin', icon: ShieldCheckIcon, adminOnly: true },
 ];
 
 export default function AppShell({ active, children }: AppShellProps) {
-  const { user, logout } = useAuth();
+  const { user, logout, isAdmin } = useAuth();
 
   // 修改密码弹窗状态
   const [showPwdDialog, setShowPwdDialog] = useState(false);
@@ -29,6 +31,10 @@ export default function AppShell({ active, children }: AppShellProps) {
   const [pwdError, setPwdError] = useState('');
   const [pwdLoading, setPwdLoading] = useState(false);
 
+  // P3 弹窗行为统一：Esc/滚动锁定/焦点恢复/Tab 陷阱 → 共享 useDialogBehavior
+  const pwdDialogRef = useRef<HTMLDivElement>(null);
+  const oldPasswordRef = useRef<HTMLInputElement>(null);
+
   const closePwdDialog = () => {
     setShowPwdDialog(false);
     setOldPassword('');
@@ -36,6 +42,13 @@ export default function AppShell({ active, children }: AppShellProps) {
     setConfirmPassword('');
     setPwdError('');
   };
+
+  useDialogBehavior({
+    open: showPwdDialog,
+    onClose: closePwdDialog,
+    panelRef: pwdDialogRef,
+    initialFocusRef: oldPasswordRef,
+  });
 
   const handleChangePassword = async () => {
     setPwdError('');
@@ -68,7 +81,7 @@ export default function AppShell({ active, children }: AppShellProps) {
   };
 
   return (
-    <div className="min-h-screen bg-[#f3f6fa] lg:grid lg:grid-cols-[272px_minmax(0,1fr)]">
+    <div className="min-h-screen bg-soft lg:grid lg:grid-cols-[272px_minmax(0,1fr)]">
       <aside className="relative overflow-hidden bg-navy px-5 py-5 text-white lg:sticky lg:top-0 lg:flex lg:h-screen lg:flex-col lg:px-7 lg:py-8">
         <div className="flex items-center gap-3">
           <Image
@@ -86,7 +99,9 @@ export default function AppShell({ active, children }: AppShellProps) {
         </div>
 
         <nav className="mt-8 grid grid-cols-2 gap-2 lg:grid-cols-1" aria-label="页面导航">
-          {navigation.map((item, index) => {
+          {navigation
+            .filter((item) => !('adminOnly' in item && item.adminOnly) || isAdmin)
+            .map((item, index) => {
             const Icon = item.icon;
             const isActive = item.id === active;
             return (
@@ -94,17 +109,17 @@ export default function AppShell({ active, children }: AppShellProps) {
                 key={item.id}
                 href={item.href}
                 aria-current={isActive ? 'page' : undefined}
-                className={`flex min-w-0 flex-col items-center gap-1 rounded-md border px-1 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#78a0ff] lg:flex-row lg:gap-3 lg:px-3 lg:py-3 ${
+                className={`flex min-w-0 flex-col items-center gap-1 rounded-md border px-1 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-nav-accent lg:flex-row lg:gap-3 lg:px-3 lg:py-3 ${
                   isActive
-                    ? 'border-[#78a0ff]/50 bg-[#1b2a47]'
+                    ? 'border-nav-active-border bg-nav-active-bg'
                     : 'border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-200'
                 }`}
               >
-                <span className={`flex size-8 shrink-0 items-center justify-center rounded-md ${isActive ? 'bg-[#78a0ff] text-[#11203b]' : 'bg-white/5'}`}>
+                <span className={`flex size-8 shrink-0 items-center justify-center rounded-md ${isActive ? 'bg-nav-accent text-nav-accent-fg' : 'bg-white/5'}`}>
                   <Icon className="size-4" aria-hidden="true" />
                 </span>
                 <span className="min-w-0 text-center lg:text-left">
-                  <span className="hidden text-[11px] text-slate-500 lg:block">0{index + 1}</span>
+                  <span className="hidden text-[11px] text-slate-300 lg:block">0{index + 1}</span>
                   <span className={`block truncate text-xs font-medium lg:text-sm ${isActive ? 'text-white' : ''}`}>{item.label}</span>
                 </span>
               </Link>
@@ -114,12 +129,17 @@ export default function AppShell({ active, children }: AppShellProps) {
 
         <div className="mt-auto space-y-4">
           <div className="hidden rounded-md border border-white/10 bg-white/5 p-4 lg:block">
-            <p className="text-xs font-medium text-slate-200">AI 简历智选 1.0</p>
-            <p className="mt-1 text-[11px] leading-5 text-slate-500">Develop By WickLu</p>
-            <p className="text-[11px] leading-5 text-slate-500">luchenstudio@163.com</p>
+            <div className="flex items-center gap-2.5">
+              <Image src="/brand/email-avatar.svg" alt="" width={32} height={32} className="size-8 shrink-0 rounded-full" aria-hidden="true" />
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-slate-200">AI 简历智选 1.0</p>
+                <p className="mt-0.5 text-[11px] leading-5 text-slate-500">Develop By WickLu</p>
+              </div>
+            </div>
+            <p className="mt-2 truncate text-[11px] leading-5 text-slate-500">luchenstudio@163.com</p>
           </div>
           <div className="flex items-center gap-3 rounded-md border border-white/10 bg-white/5 px-3 py-3">
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#78a0ff] text-xs font-bold text-[#11203b]">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-nav-accent text-xs font-bold text-nav-accent-fg">
               {(user?.username || '?').slice(0, 1).toUpperCase()}
             </span>
             <div className="min-w-0 flex-1">
@@ -131,7 +151,7 @@ export default function AppShell({ active, children }: AppShellProps) {
               onClick={() => setShowPwdDialog(true)}
               title="修改密码"
               aria-label="修改密码"
-              className="flex size-8 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
+              className="relative -m-1 flex size-8 shrink-0 items-center justify-center rounded-md p-1 text-slate-400 transition-colors hover:bg-white/10 hover:text-white after:absolute after:-inset-1 after:content-['']"
             >
               <KeyRoundIcon className="size-4" />
             </button>
@@ -140,7 +160,7 @@ export default function AppShell({ active, children }: AppShellProps) {
               onClick={logout}
               title="退出登录"
               aria-label="退出登录"
-              className="flex size-8 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-white/10 hover:text-white"
+              className="relative -m-1 flex size-8 shrink-0 items-center justify-center rounded-md p-1 text-slate-400 transition-colors hover:bg-white/10 hover:text-white after:absolute after:-inset-1 after:content-['']"
             >
               <LogOutIcon className="size-4" />
             </button>
@@ -151,6 +171,7 @@ export default function AppShell({ active, children }: AppShellProps) {
 
       {showPwdDialog && (
         <div
+          ref={pwdDialogRef}
           role="dialog"
           aria-modal="true"
           aria-label="修改密码"
@@ -178,11 +199,12 @@ export default function AppShell({ active, children }: AppShellProps) {
                   旧密码
                 </label>
                 <input
+                  ref={oldPasswordRef}
                   id="old-password"
                   type="password"
                   value={oldPassword}
                   onChange={(e) => setOldPassword(e.target.value)}
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[#78a0ff] focus:ring-2 focus:ring-[#78a0ff]/30"
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-nav-accent focus:ring-2 focus:ring-nav-ring"
                   placeholder="请输入当前密码"
                 />
               </div>
@@ -195,7 +217,7 @@ export default function AppShell({ active, children }: AppShellProps) {
                   type="password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[#78a0ff] focus:ring-2 focus:ring-[#78a0ff]/30"
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-nav-accent focus:ring-2 focus:ring-nav-ring"
                   placeholder="请输入新密码"
                 />
               </div>
@@ -208,7 +230,7 @@ export default function AppShell({ active, children }: AppShellProps) {
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-[#78a0ff] focus:ring-2 focus:ring-[#78a0ff]/30"
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-nav-accent focus:ring-2 focus:ring-nav-ring"
                   placeholder="再次输入新密码"
                 />
               </div>
@@ -221,7 +243,7 @@ export default function AppShell({ active, children }: AppShellProps) {
                 type="button"
                 disabled={pwdLoading}
                 onClick={handleChangePassword}
-                className="w-full rounded-md bg-navy py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#1c2c4d] disabled:cursor-not-allowed disabled:opacity-60"
+                className="w-full rounded-md bg-navy py-2.5 text-sm font-medium text-white transition-colors hover:bg-navy-hover disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {pwdLoading ? '提交中…' : '确认修改'}
               </button>

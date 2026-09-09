@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useState } from 'react';
+import Image from 'next/image';
 import Link from 'next/link';
 import {
   ArrowLeftIcon,
@@ -10,7 +11,6 @@ import {
   LoaderCircleIcon,
   LockKeyholeIcon,
   MailIcon,
-  ShieldCheckIcon,
 } from 'lucide-react';
 import { API_URL } from '@/lib/api/config';
 
@@ -106,8 +106,8 @@ export default function ResetPasswordPage() {
     <div className="flex min-h-screen items-center justify-center bg-[#f3f6fa] px-5 py-10">
       <div className="w-full max-w-md">
         <div className="rounded-lg border border-[#dce2eb] bg-white p-8 shadow-[0_24px_80px_rgba(19,31,51,0.1)] sm:p-10">
-          <div className="flex size-12 items-center justify-center rounded-lg bg-[#17243b] text-white shadow-[6px_6px_0_#88a8ff]">
-            <ShieldCheckIcon className="size-6" />
+          <div className="flex size-12 items-center justify-center rounded-lg shadow-[6px_6px_0_var(--color-nav-accent)]">
+            <Image src="/brand/resume-screening-logo.svg" alt="AI 简历智选" width={48} height={48} className="size-12" priority />
           </div>
           <h1 className="mt-6 text-2xl font-semibold text-[#152137]">重置密码</h1>
           <p className="mt-2 text-sm leading-6 text-[#6d7b91]">
@@ -239,9 +239,9 @@ export default function ResetPasswordPage() {
             </div>
           )}
 
-          <p className="mt-6 text-center text-xs text-[#8a96a7]">
-            <Link href="/login" className="inline-flex items-center gap-1 font-medium text-[#466fd0] hover:underline">
-              <ArrowLeftIcon className="size-3" /> 返回登录
+          <p className="mt-6">
+            <Link href="/login" className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-[#cfd8e5] bg-white text-sm font-medium text-[#3d4a60] transition-colors hover:bg-[#f4f7fb] hover:border-[#b3c1d6]">
+              <ArrowLeftIcon className="size-4" /> 返回登录
             </Link>
           </p>
         </div>

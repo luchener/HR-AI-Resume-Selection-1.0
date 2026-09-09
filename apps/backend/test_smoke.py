@@ -7,6 +7,9 @@ import unittest
 import app as backend
 import auth as auth_module
 
+# 验证码默认开启；冒烟套件登录调用统一关闭（验证码专项用例见 test_captcha_*）
+backend.config.CAPTCHA_ENABLED = False
+
 from xml.sax.saxutils import escape
 
 
@@ -55,7 +58,20 @@ class SmokeTests(unittest.TestCase):
         auth_module._INDEX_FILE = os.path.join(auth_module.USERS_DIR, "_index.json")
         auth_module._INDEX_LOCK = os.path.join(auth_module.USERS_DIR, "_index.lock")
         auth_module.RESETS_DIR = os.path.join(self.temp_dir, "resets")
-        os.makedirs(auth_module.RESETS_DIR, exist_ok=True)
+        auth_module.LOGIN_FAILURES_DIR = os.path.join(self.temp_dir, "login_failures")
+        auth_module.RATE_LIMITS_DIR = os.path.join(self.temp_dir, "rate_limits")
+        auth_module.INVITE_REQUESTS_DIR = os.path.join(self.temp_dir, "invite_requests")
+        auth_module.INVITE_CODES_DIR = os.path.join(self.temp_dir, "invite_codes")
+        auth_module.INVITE_CODES_AUDIT_DIR = os.path.join(self.temp_dir, "invite_codes_audit")
+        for _d in (
+            auth_module.RESETS_DIR,
+            auth_module.LOGIN_FAILURES_DIR,
+            auth_module.RATE_LIMITS_DIR,
+            auth_module.INVITE_REQUESTS_DIR,
+            auth_module.INVITE_CODES_DIR,
+            auth_module.INVITE_CODES_AUDIT_DIR,
+        ):
+            os.makedirs(_d, exist_ok=True)
         user, _err = auth_module.create_user("smoke-user", "smoke-pw123")
         self.user_id = user["user_id"]
         self.token = auth_module.generate_jwt(user["user_id"], user["username"])

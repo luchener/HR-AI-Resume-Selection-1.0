@@ -3,6 +3,16 @@
 > 版本：1.0 Cloud Deployment Version
 > 本文档整理自实际代码，覆盖：项目架构技术栈、登录模块与并发隔离实现、
 > 账号数据保存逻辑、腾讯云 Ubuntu 24.04 成功部署步骤。
+>
+> 📌 **近期更新（2026-09）**：
+> - 登录安全升级：**四位数字图形验证码**（登录前置，一次性，TTL 300s，见 2.6 / 4.2）；**账号软删除 + 90 天可恢复**（仅超级管理员可删、需验证操作者管理员密码、恢复后旧 token 全失效，见 3.2 / 4.2）
+> - **硬性门槛确定性扣分**：学历层级/年限/证书硬性要求由服务端确定性判定 `not_met` 并扣分/封顶（学历不达标封顶淘汰级），不再全靠 LLM 自觉（见 8.5 打分机制 / 8.8 前置判定）
+> - **打分一致性**：LLM 不再自评排名分数，服务端统一用 `final_score` 覆盖排名分数并重排（见 8.9）
+> - **Agent 自校扩展**：预检新增规则 6（分数-证据一致性），深度核查规则 5 → 6 条；前端「Agent 校验」可展开查看检测过程 5 步明细（见 8.8）
+> - 认证安全加固：邀请制注册（邀请码申请/审批/生成/作废全流程）+ 登录防爆破（账号级冷却 → 账号冻结 → IP 限流，见 2.6 / 2.7 / 4.2）
+> - 邀请码修复：过期时间统一 ISO 输出（修复 1970 显示）、作废接口支持完整 64 位哈希（修复无法作废）、注册页输入位数与生成端动态对齐（修复位数不一致，见 2.7）
+> - 登录页 UX：邀请码校验成功/失败交互（抖动动画）、登录失败次数提示、「申请邀请码」返回按钮移至提交下方
+> - 生产部署改用 `docker-compose.secure.yml`（healthcheck + 网络/资源加固，见 6.3）
 
 ---
 
@@ -89,7 +99,7 @@ AIResumeSmartSelection1.0-CloudDeploymentVersion/
 │   │   ├── .env          # 密钥（gitignore，不入库）
 │   │   └── Dockerfile
 │   └── frontend/         # Next.js 前端
-│       ├── app/          # 页面路由（login/dashboard/首页/archives）
+│       ├── app/          # 页面路由（login/dashboard/首页/archives/admin）
 │       ├── app/(default)/css/globals.css  # 全局样式 + @theme 语义色令牌
 │       ├── components/workbench/  # 工作台组件 + auth-context
 │       │   ├── app-shell.tsx         # 侧栏壳（导航 + 用户 + 版权）
@@ -98,10 +108,12 @@ AIResumeSmartSelection1.0-CloudDeploymentVersion/
 │       │   ├── report-export.tsx     # 统一导出中心（图片/PDF/Word）
 │       │   ├── resume-review-panel.tsx # 简历重点标记面板
 │       │   └── auth-context.tsx      # 登录态管理
-│       ├── lib/api/      # API 封装（带 JWT 头，含 archives.ts 归档客户端）
+│       ├── app/(default)/admin/page.tsx  # 账号管理（审批/邀请码/冻结/用户/操作记录 五 Tab）
+│       ├── lib/api/      # API 封装（带 JWT 头；含 auth-admin.ts 认证/管理接口、archives.ts 归档客户端）
 │       └── public/a4cv/  # 独立简历编辑器
 │       └── Dockerfile
 ├── docker-compose.yml
+├── docker-compose.secure.yml  # 生产安全加固 compose（healthcheck/网络/资源限制）
 ├── package.json          # 根脚本（build/start/docker:*）
 ├── .dockerignore
 └── docs/                 # 文档
@@ -157,6 +169,36 @@ LOG_DIR="logs"
 ALLOWED_ORIGINS=""
 GUNICORN_WORKERS=4
 NEXT_PUBLIC_API_URL=""
+
+# 登录防爆破（默认值即示例；生产可调）
+LOGIN_FAIL_LIMIT=3              # 连续失败 N 次 → 冷却
+LOGIN_LOCK_MINUTES=5            # 冷却时长（分钟）
+LOGIN_FREEZE_WINDOW_MINUTES=10  # 冻结统计窗口（分钟）
+LOGIN_FREEZE_THRESHOLD=6        # 窗口内失败 N 次 → 冻结账号
+LOGIN_MAX_FAIL_PER_IP_10MIN=10  # 单 IP 10 分钟失败上限
+LOGIN_IP_LOCK_MINUTES=10        # IP 锁定时长（分钟）
+LOGIN_UNFREEZE_VIA_EMAIL=on     # 冻结账号邮箱自助解冻（on/off）
+LOGIN_FREEZE_AUTO_UNFREEZE_HOURS=0  # 冻结后自动解冻小时数（0=关闭）
+
+# 邀请码（注册邀请制）
+INVITE_CODE_LENGTH=4            # 邀请码位数（≥4，env 可调）
+INVITE_CODE_TTL_HOURS=24        # 邀请码有效期（小时）
+INVITE_REQUEST_NOTE_REQUIRED=true   # 申请邀请码必填申请理由
+INVITE_REQUEST_MAX_REJECTIONS=3     # 同一邮箱被拒上限（此后拒收）
+INVITE_REQUEST_MAX_PER_IP_DAY=3     # 单 IP 每日申请上限
+
+# 登录图形验证码（四位数字，一次性）
+CAPTCHA_ENABLED=on              # 登录前置验证码开关（on/off；默认开启）
+CAPTCHA_TTL_SECONDS=300         # 验证码有效期（秒，最小 30）
+
+# 超级管理员白名单（删除账号等敏感操作仅限白名单邮箱账号）
+ADMIN_EMAILS="admin@example.com"
+
+# 账号软删除
+DELETED_RESTORE_WINDOW_DAYS=90  # 软删除账号可恢复窗口（天）
+
+# AI 配置
+ALLOW_CUSTOM_AI_CONFIG=false    # 是否允许前端自定义 AI 模型配置（默认关闭=用服务端配置）
 ```
 
 生成随机密钥：
@@ -242,29 +284,35 @@ futures = {
 
 | 模块 | 职责 |
 |------|------|
-| `components/workbench/auth-context.tsx` | `AuthProvider`：localStorage 恢复登录态、未登录重定向 `/login`、`login()/logout()`；公开页白名单含 `/login`、`/reset-password` |
-| `app/(default)/login/page.tsx` | 登录/注册页（注册密码≥8位、两次确认、邮箱验证码发送+输入） |
-| `lib/api/screening.ts` | 所有 API 调用统一注入 `Authorization: Bearer <token>`；401 统一处理（清 token + 跳登录） |
-| `components/workbench/app-shell.tsx` | 侧边栏显示用户名 + 登出 + 修改密码（弹窗）；登出时清 sessionStorage 分析结果 |
-| `app/(default)/reset-password/page.tsx` | 忘记密码：两步（邮箱 → 验证码+新密码） |
+| `components/workbench/auth-context.tsx` | `AuthProvider`：localStorage 恢复登录态、挂载后调 `/auth/me` 刷新 `is_admin`（管理员标记不入登录响应）、未登录重定向 `/login`；公开页白名单含 `/login`、`/reset-password` |
+| `app/(default)/login/page.tsx` | 登录/注册页。注册走邀请制：邀请码校验（红色错误/绿色成功态 + 抖动动画）解锁邮箱区 → 发送邮箱验证码 → 注册（服务端三重校验）；另有「申请邀请码」子面板（邮箱+理由，「返回登录/注册」按钮置于提交下方）与 423「账号自助解冻」子面板（用户名/密码/绑定邮箱/验证码，**返回按钮为全宽边框样式置于提交下方**）；423 按 `frozen_by` 分流：`admin` → 弹窗「账号异常请联系系统管理员处理！」（含原因 + 管理员email），`auto` → 自助解冻面板；登录失败次数前端累计提示（连续失败 3 次将暂停登录 5 分钟、6 次将冻结账号） |
+| `lib/api/auth-admin.ts` | 注册页/解冻页/管理页的专用 API：`register-config`、`invite-code/check`、`invite-code/send-email-code`、`invite-request`、`unfreeze/send-code`、`unfreeze` 与全部 `/admin/*` 管理接口（含冻结、使用统计、使用排行、审计导出 `downloadAdminOpsExport` CSV/JSON） |
+| `lib/api/screening.ts` | 分析工作台 API 调用统一注入 `Authorization: Bearer <token>`；401 统一处理（清 token + 跳登录） |
+| `components/workbench/app-shell.tsx` | 侧边栏显示用户名 + 登出 + 修改密码（弹窗）；「账号管理」导航项仅 `is_admin` 可见；登出时清 sessionStorage 分析结果 |
+| `app/(default)/admin/page.tsx` | 账号管理页（仅 `is_admin`，页面守卫 + 403 兜底）：五 Tab —— 申请审批（同意/拒绝+理由/补发码邮件）、邀请码总览（筛选/手动生成/作废）、冻结账号（列表 + 来源/原因 + 兜底解冻）、用户管理（创建/改邮箱/管理员标记/冻结/解冻/重置密码/删除 + **「…」菜单收纳次要操作** + 使用统计/使用排行）、操作记录（类型/关键字过滤、20 条/页分页、**CSV/JSON 导出**）；**Tab 状态 URL 记忆**（`/admin?tab=users` 刷新不丢）；弹窗统一走 `AdminModal`（Esc 关闭/自动聚焦/锁滚动） |
+| `app/(default)/reset-password/page.tsx` | 忘记密码：两步（邮箱 → 验证码+新密码），「返回登录」为全宽边框按钮置于提交下方 |
+| `components/workbench/admin-modal.tsx` | 管理后台统一弹窗组件：Esc 关闭、打开自动聚焦首个输入框、背景滚动锁定、role=dialog + aria-modal；被 admin 页 4 个弹窗（使用统计/冻结/改邮箱/使用排行）复用 |
 
 ### 2.5 邮箱验证码机制（注册绑定 + 忘记密码重置，统一实现）
 
 **统一机制**（`auth.py` 的 `email code` 部分）：验证码按**邮箱 + 用途**存储，磁盘只存 SHA-256 哈希。6 位**全大写字母+数字**（排除易混淆 `0O1lI`，`ABCDEFGHJKMNPQRSTUVWXYZ23456789` 36 字符，36^6≈21.8 亿组合）。
 
-**大小写不敏感**：邮件中显示大写；校验时统一先 `.upper()` 再哈希比对，因此用户填写大写/小写/混合均能通过；前端输入框也自动转大写（`onChange` 直接 `.toUpperCase()`），所见即所得。两种用途用常量区分：
+**大小写不敏感**：邮件中显示大写；校验时统一先 `.upper()` 再哈希比对，因此用户填写大写/小写/混合均能通过；前端输入框也自动转大写（`onChange` 直接 `.toUpperCase()`），所见即所得。三种用途用常量区分：
 - `PURPOSE_EMAIL_VERIFY`（注册绑定邮箱）
 - `PURPOSE_RESET_PASSWORD`（忘记密码重置）
+- `PURPOSE_UNFREEZE`（登录冻结账号的邮箱自助解冻）
 
 ```
-发码  POST /api/v1/auth/email-code/send (body: {email})       ← 仅注册用
+发码  POST /api/v1/auth/invite-code/send-email-code (body: {email, invite_code})   ← 注册（邀请制）
+  ├─ 邀请码校验（须有效未用、且 email 与该码绑定的申请邮箱一致）→ 422
   ├─ 校验邮箱格式 + 未注册 + SMTP 已配置
   ├─ 频率限制：同邮箱 60 秒冷却 → 429
   └─ 生成 6 位码 → 存哈希 → SMTP 发送（mailer.py）
 
-注册  POST /api/v1/auth/register (body: {username,password,email,code})
-  ├─ 先消费式校验注册验证码（失败不建号）
-  └─ 建号（用户名/邮箱唯一 + 密码强度校验）→ 签发 JWT
+注册  POST /api/v1/auth/register (body: {username,password,email,code,invite_code})
+  ├─ ① 非消费校验邀请码（失败不扣码）  ② 消费式校验邮箱验证码（失败不扣码）
+  ├─ ③ 文件锁内：复检邀请码 → 建号 → 消费邀请码（原子；用户名冲突不耗码）
+  └─ 建号成功 → 签发 JWT
 ```
 
 ```
@@ -276,6 +324,15 @@ futures = {
 重置第二步  确认 POST /api/v1/auth/reset-password/confirm (body: {email,code,new_password})
   ├─ 校验验证码：哈希匹配 + 未过期 + 未超限（一次失败累计，5 次作废）
   └─ 更新密码：password_version +1 → 用户所有旧 token 自动失效
+
+解冻发码    POST /api/v1/auth/unfreeze/send-code (body: {username,email})   ← 登录防爆破配套
+  ├─ 账号须存在（404）且处于冻结状态（409）且 email = 账号绑定邮箱（422，未绑定提示联系管理员）
+  └─ 复用邮箱验证码机制（PURPOSE_UNFREEZE，60s 冷却/30 分钟有效）→ SMTP 发送
+
+账号解冻    POST /api/v1/auth/unfreeze (body: {username,password,email,code})
+  ├─ 冻结检查 → 每 IP 只读限流 → 密码校验（错误计入登录失败窗口）
+  ├─ 邮箱=绑定邮箱 + 消费式校验解冻验证码（防重放）
+  └─ 成功 → 清失败记录 → 签发 JWT
 ```
 
 **安全细节**：
@@ -289,6 +346,81 @@ futures = {
 
 **邮件格式**（`mailer.py`）：`multipart/alternative` 双版本 —— HTML（品牌头 + 32px 大字验证码卡片 + 有效期/防骗提示，内联样式 + table 布局，兼容网易/QQ/Gmail）与纯文本降级版（防垃圾邮件误判、兼容旧客户端）。
 
+### 2.6 登录安全（图形验证码 → 账号冷却 → 冻结 → IP 限流，四层防护）
+
+登录接口 `POST /api/v1/auth/login` 在**校验密码之前**依次执行四层策略，全部通过后才验密码：
+
+```
+POST /api/v1/auth/login (body: {username, password, captcha_id, captcha_code})
+  ├─ 第 0 层：四位数字验证码（前置，默认开启）
+  │    └─ GET /api/v1/auth/captcha 获取 {captcha_id, code, ttl_seconds}
+  │    ├─ 缺 captcha_id/code → 422「请填写验证码」
+  │    ├─ 校验失败（verify_captcha：一次性 sha256 比对 + TTL 过期）→ 422「验证码错误或已过期」
+  │    └─ 验证码失败**不记账**（不影响防爆破失败计数与 IP 预算）
+  ├─ 第 1 层：每 IP 失败上限（防跨用户名撞库）
+  │    └─ ip_login_rate_exceeded(ip) → 10 分钟窗口内失败 ≥10 次（LOGIN_MAX_FAIL_PER_IP_10MIN）
+  │         → 429「尝试次数过多，请在 N 分钟后重试」+ Retry-After 头
+  │    （只读检查；计数仅在密码真正错误时由 record_ip_login_failure 落账）
+  ├─ 第 2 层：账号级策略 login_policy_check(username)
+  │    ├─ 已冻结 → 423「该账号已临时冻结…」（含自助解冻引导文案）
+  │    ├─ 冷却中（连续失败 ≥3 次 LOGIN_FAIL_LIMIT，且距上次失败 <5 分钟 LOGIN_LOCK_MINUTES）
+  │    │    → 429「尝试过于频繁，请在 N 分钟后重试」+ Retry-After
+  │    └─ 冻结可自动解冻（LOGIN_FREEZE_AUTO_UNFREEZE_HOURS>0 且到期）→ 先清标记再继续
+  └─ 第 3 层：PBKDF2 密码校验
+       ├─ 成功 → clear_login_failures → 签发 JWT
+       └─ 失败 → record_login_failure（连续计数 +1；10 分钟 LOGIN_FREEZE_WINDOW_MINUTES 窗口内
+            失败 ≥6 次 LOGIN_FREEZE_THRESHOLD → 冻结账号）→ 冻结则 423，否则 401
+```
+
+**验证码实现**（`auth.py`）：四位随机数字，一次性使用（`verify_captcha` 用后即删，防重放）；TTL 默认 300 秒（`CAPTCHA_TTL_SECONDS`，最小 30）；存储只写 `sha256(<id>:<code>)` 哈希到 `data/rate_limits/captcha_<id>.json`（磁盘不存明文码），`_purge_stale_captchas` 随获取惰性清理过期文件。`CAPTCHA_ENABLED=off` 时 `GET /api/v1/auth/captcha` 返回 404，登录跳过验证码校验——前端在验证码不可用时会自动降级为普通登录，不阻塞。
+
+| 参数（config.py） | 默认 | 含义 |
+|---|---|---|
+| `CAPTCHA_ENABLED` | on | 登录前置四位数字验证码开关 |
+| `CAPTCHA_TTL_SECONDS` | 300 | 验证码有效期（秒，最小 30） |
+| `LOGIN_FAIL_LIMIT` | 3 | 连续失败达到该次数后进入冷却 |
+| `LOGIN_LOCK_MINUTES` | 5 | 冷却时长（分钟） |
+| `LOGIN_FREEZE_WINDOW_MINUTES` | 10 | 冻结统计滑动窗口（分钟） |
+| `LOGIN_FREEZE_THRESHOLD` | 6 | 窗口内失败达到该次数 → 冻结账号 |
+| `LOGIN_MAX_FAIL_PER_IP_10MIN` | 10 | 单 IP 10 分钟失败上限 |
+| `LOGIN_IP_LOCK_MINUTES` | 10 | IP 锁定时长（分钟） |
+| `LOGIN_UNFREEZE_VIA_EMAIL` | on | 冻结账号是否允许邮箱自助解冻 |
+| `LOGIN_FREEZE_AUTO_UNFREEZE_HOURS` | 0 | 冻结后自动解冻小时数（0=不自动解冻） |
+
+**实现要点**（`auth.py`）：
+- **内联说明**：验证码存储只写哈希（`data/rate_limits/captcha_<id>.json`，sha256 一次性比对），失败不累计防爆破计数（避免验证码输错连累账号/IP 预算）。
+- **失败记录落盘**：`data/login_failures/<sha256(username)>.json`，文件名即哈希（磁盘不存明文用户名标识），记录 `consecutive_failures`（连续计数，登录成功即清零）、`last_failure_at`、`failures[]`（窗口时间戳 + IP 哈希，供冻结判定）、`frozen`/`frozen_at`。
+- **IP 计数与拦截分离**：IP 限流是「只读检查、失败才计数」——成功登录 / 冷却拦截不会消耗 IP 预算（防误伤共享出口 IP 的正常用户）。
+- **冻结响应码 423**：按 `frozen_by` 分流——`admin` 手动冻结 → 前端弹窗「账号异常请联系系统管理员处理！+ 冻结原因 + 管理员email」（来自响应字段，不展示自助解冻）；`auto` 自动冻结 → 前端自动弹出「账号自助解冻」子面板（用户名 + 密码 + 绑定邮箱 + 邮箱验证码），走 `unfreeze/send-code` + `unfreeze` 全流程；管理员也可在管理页「冻结账号」Tab 直接解冻。管理员手动冻结的账号**禁止**自助解冻与重置密码（重置请求/确认均 423）。
+- **前端失败次数提示**：登录失败时前端累计 `loginFailCount`，底部错误条追加「密码错误 N 次。连续失败 3 次将暂停登录 5 分钟，6 次将冻结账号…」（423 直接开解冻面板，不计入该计数）。
+
+### 2.7 邀请码机制与生命周期（注册邀请制）
+
+```
+管理员生成（审批通过 / 手动应急）          ── generate_invite_code()
+   └─ 明文邀请码仅返回一次（生成响应 / 审批邮件）
+       └─ 磁盘只存哈希：data/invite_codes/<sha256(码)>.json
+            ├─ code_hash（sha256 hex，文件名即哈希）
+            ├─ bound_email（绑定申请邮箱，空=不绑定仅应急）
+            ├─ expires_at（epoch 秒：now + TTL_HOURS×3600）
+            └─ created_by / request_id / note / used / created_at
+用户注册流程
+   ├─ POST /api/v1/auth/invite-code/check   非消费预校验（存在/未用/未过期）→ 解锁邮箱区
+   ├─ POST /api/v1/auth/invite-code/send-email-code  发邮箱验证码（校验绑定邮箱一致）
+   └─ POST /api/v1/auth/register            文件锁内：复检 → 建号 → 消费（原子，用户名冲突不耗码）
+        └─ 消费后：活跃文件删除 → 写入 data/invite_codes_audit/<hash>.json（审计归档）
+管理员作废（未使用的码）
+   └─ POST /api/v1/admin/invite-codes/revoke  → 活跃文件标记 revoked 后移入 audit 归档
+```
+
+**邀请码格式**：长度 `config.INVITE_CODE_LENGTH`（默认 **4**，环境变量可调且下限 4），字符集 `ABCDEFGHJKMNPQRSTUVWXYZ23456789`（32 字符，排除易混淆 `0O1lI`），大小写不敏感（统一转大写）。有效期 `INVITE_CODE_TTL_HOURS`（默认 24 小时）。
+
+**位数一致性**：`GET /api/v1/auth/register-config` 返回 `invite_code_length`（当前为 4），前端注册页邀请码输入框的 `maxLength` 与占位文案「N 位邀请码」**动态取该值**，与管理端生成的邀请码位数永远一致（历史版本前端写死 `maxLength=8`，与后端生成位数脱节，易混淆）。
+
+**过期时间显示**：`expires_at` 磁盘存储为 **epoch 秒**（float），列表接口输出前统一经 `_epoch_or_iso()` 转为 **ISO 字符串**（兼容毫秒级旧数据），前端 `fmtTime` 也兼容 ISO / epoch 秒 / 毫秒三种输入——避免「秒被当毫秒 → 显示 1970-01-01」的历史缺陷。
+
+**作废接口入参**（`revoke_invite_code`）：同时支持**明文邀请码**（内部再哈希定位）与**完整 64 位哈希**（正则 `^[0-9a-fA-F]{64}$` 直接按文件名定位）。管理端列表返回**完整哈希**（不再截断），前端表格用 `前8…后4` 短哈希展示、作废时回传完整哈希——修复历史版本「12 字符截断哈希被再次哈希 → 永远 404 无法作废」的缺陷。
+
 ---
 
 ## 三、账号数据保存逻辑结构
@@ -301,8 +433,17 @@ futures = {
 data/                          # BASE_DIR/data（启动自动创建）
 ├── users/                     # 用户账号
 │   └── <user_id>.json         # 一个用户一个文件（含邮箱、密码版本号）
-├── password_resets/           # 邮箱验证码（注册/重置，只存哈希，30分钟有效）
+├── password_resets/           # 邮箱验证码（注册/重置/自助解冻，只存哈希，30分钟有效）
 │   └── <purpose>.<sha256>.json
+├── invite_requests/           # 邀请码申请单（v3 邀请制）
+│   └── <request_id>.json      # 申请邮箱/理由/状态/审批人/拒信理由（邮箱明文，属申请单本身）
+├── invite_codes/              # 活跃邀请码（只存哈希）
+│   └── <sha256>.json          # 绑定邮箱 + 过期时间（epoch 秒）；文件名即哈希，磁盘零明文
+├── invite_codes_audit/        # 已消费/作废邀请码归档（审计链：码→使用人）
+├── login_failures/            # 登录失败记录（连续/窗口计数 + 冻结标记，sha256 文件名）
+│   └── <sha256(username)>.json # consecutive_failures / failures[] / frozen / frozen_at
+├── rate_limits/               # 各维度限流计数（IP 失败/申请冷却等，按 key 轮转）
+│   ├── captcha_<id>.json      # 登录验证码（只存 sha256 哈希 + 过期时间，一次性，TTL 300s）
 ├── resumes/                   # 简历
 │   └── <resume_id>.json
 ├── jobs/                      # 岗位 JD
@@ -323,11 +464,44 @@ logs/                          # 日志（.env LOG_DIR 可配置）
   "username": "alice",            // 唯一，注册时查重
   "password_hash": "base64...",   // PBKDF2-SHA256 哈希值（200k 迭代）
   "password_salt": "base64...",   // 16 字节随机盐
-  "created_at": "2026-08-20T16:00:00+00:00"
+  "password_version": 1,          // 密码版本号（重置/改密 +1，旧 JWT 全失效；恢复账号时也 +1）
+  "created_at": "2026-08-20T16:00:00+00:00",
+  "deleted_at": null,             // 软删除时间（null=未删除）；删除后 90 天内可恢复
+  "deleted_by": null,             // 操作者 user_id（软删除责任人审计）
+  "restored_at": null             // 恢复时间（null=从未恢复）
 }
 ```
 
 > 🔒 **安全说明**：文件里**不存明文密码**，只存 `哈希 + 盐`。即使 data 目录泄露，也无法反推出密码。
+>
+> 🗑️ **软删除**：删除账号不物理移除文件——置 `deleted_at`/`deleted_by` 后移出活跃索引（JWT 校验立即拒绝），保留使用统计供审计；`list_deleted_users()` 只返回删除时间在 `DELETED_RESTORE_WINDOW_DAYS`（默认 90）内的账号，`restore_user()` 恢复时 `deleted_at`/`deleted_by` 清空、`restored_at` 落时间、`password_version` +1（旧 token 全失效，需重新登录）。
+
+### 3.2.1 邀请码 / 登录失败记录文件结构
+
+```jsonc
+// data/invite_codes/<sha256(邀请码)>.json   （文件名即哈希，磁盘零明文）
+{
+  "code_hash": "sha256 hex…",     // 与文件名一致（64 位 hex）
+  "bound_email": "apply@example.com", // 绑定申请邮箱；"" = 不绑定（仅管理员应急）
+  "expires_at": 1788578607.07,    // epoch 秒（now + TTL_HOURS×3600）；列表输出前转 ISO 字符串
+  "used": false,                  // 已消费标记（消费后文件移入 invite_codes_audit/）
+  "used_by_username": null,       // 使用人（审计链：码→使用人）
+  "used_at": null,
+  "created_at": "ISO 时间",
+  "created_by": "admin",
+  "request_id": "manual-uuid…",   // 手动生成前缀 manual-；审批生成用申请单 id
+  "note": "2026 春招活动"
+}
+
+// data/login_failures/<sha256(username)>.json
+{
+  "consecutive_failures": 2,      // 连续失败计数（登录成功即清零）
+  "last_failure_at": 1788578607.07,
+  "failures": [ {"ts": 1788578607.07, "ip_hash": "rl:<ip> sha256 前 24 位"}, … ],  // 窗口内时间戳
+  "frozen": false,                // 冻结标记（窗口内失败 ≥ LOGIN_FREEZE_THRESHOLD 置 true）
+  "frozen_at": null
+}
+```
 
 ### 3.3 简历 / JD 文件结构
 
@@ -437,19 +611,30 @@ Content-Type: application/json
   "username":"alice",
   "password":"StrongPass123",
   "email":"user@example.com",
-  "code":"A7K2MP"
+  "code":"A7K2MP",
+  "invite_code":"AB3X"
 }
 ```
 
-成功返回 `data.user_id`、`data.username`、`data.token`。
+成功返回 `data.user_id`、`data.username`、`data.token`。邀请码须先通过 `invite-code/check` 预校验（见 2.7）；服务端在文件锁内做「复检邀请码 → 建号 → 消费邀请码」原子操作（用户名冲突不耗码）。
 
 #### `POST /api/v1/auth/login`
 
 ```json
-{"username":"alice","password":"StrongPass123"}
+{"username":"alice","password":"StrongPass123","captcha_id":"...","captcha_code":"1234"}
 ```
 
-用户名大小写不敏感，成功返回 JWT，凭据错误返回 `401`。
+用户名大小写不敏感，成功返回 JWT。**登录前置验证码**（`CAPTCHA_ENABLED=on` 时）：`captcha_id`/`captcha_code` 缺失 → `422`；验证码错误或过期 → `422`（一次性消费，失败不计入防爆破计数）。**防爆破响应码**：`429`（IP 限流 / 账号冷却，含 `Retry-After` 头）、`423`（账号已冻结，前端弹出「账号自助解冻」面板）、`401`（密码错误）。失败计数与冻结判定见 2.6。
+
+#### `GET /api/v1/auth/captcha`
+
+获取登录验证码（四位随机数字）：
+
+```json
+{"request_id":"...","data":{"captcha_id":"...","code":"1234","ttl_seconds":300}}
+```
+
+一次性使用；`CAPTCHA_ENABLED=off` 时返回 `404`（前端登录页自动降级为无验证码提交）。验证码无法获取时（服务端未启用）不影响登录流程。
 
 #### `GET /api/v1/auth/me`
 
@@ -462,6 +647,58 @@ Content-Type: application/json
 ```
 
 成功后密码版本递增，旧 JWT 失效，客户端需要重新登录。
+
+#### 邀请码注册相关接口（注册邀请制，见 2.7）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/auth/register-config` | 注册页配置：`invite_required`、`contact_email`、`invite_code_length`（邀请码位数，前端输入框 maxLength/占位文案动态取用） |
+| `POST` | `/api/v1/auth/invite-code/check` | 非消费预校验邀请码（存在/未用/未过期），通过返回 `{"valid": true}`；不区分失败原因统一文案防枚举；每 IP 每小时限 10 次 |
+| `POST` | `/api/v1/auth/invite-code/send-email-code` | 校验邀请码 + 绑定邮箱一致后发送注册邮箱验证码（同邮箱 60s 冷却） |
+| `POST` | `/api/v1/invite-request` | 提交邀请码申请（公开）：邮箱 + 申请理由，同邮箱 60s 冷却 / 每 IP 每日上限 / 被拒超限拒收 |
+| `POST` | `/api/v1/auth/unfreeze/send-code` | 冻结账号发解冻验证码（账号须存在且冻结，email 须等于绑定邮箱） |
+| `POST` | `/api/v1/auth/unfreeze` | 冻结账号自助解冻：密码 + 绑定邮箱 + 消费式验证码，成功清失败记录并签发 JWT |
+
+#### 管理员邀请码接口（均需管理员 JWT）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/admin/invite-codes?status=all\|active\|used\|expired` | 邀请码总览（不回明文）：返回**完整 64 位 code_hash**、`expires_at`（ISO 字符串）、状态、绑定邮箱（脱敏）、使用人 |
+| `POST` | `/api/v1/admin/invite-codes/generate` | 手动生成邀请码（1–20 个，可选绑定邮箱 / 备注 / 有效天数），明文仅本次响应返回一次 |
+| `POST` | `/api/v1/admin/invite-codes/revoke` | 作废未使用邀请码（入参支持明文码或完整 64 位哈希）；不存在/已使用/已作废 → 404 |
+| `GET` | `/api/v1/admin/users/frozen` | 冻结账号列表（含 `frozen_by`: `admin`手动/`auto`自动、`frozen_reason`；`frozen_at` 输出 ISO 字符串——内部存储 epoch 秒、输出层统一转换，修复前端 1970 显示） |
+| `POST` | `/api/v1/admin/users/<username>/freeze` | 管理员手动冻结（防异常消耗 token 等），body `{reason?}`；冻结后拒绝登录（423）/拒绝重置密码/禁止自助解冻，原因展示在登录弹窗与审计中 |
+| `POST` | `/api/v1/admin/users/<username>/unfreeze` | 管理员兜底解冻 |
+
+#### 管理员用户管理接口（均需管理员 JWT，CRUD）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/admin/users?keyword=&page=&size=` | 用户列表：支持用户名/邮箱关键字搜索与分页；每项含 `is_admin` / `frozen` / `email_bound` / 注册时间（脱敏，不含密码哈希） |
+| `POST` | `/api/v1/admin/users` | 管理员代建用户（绕过邀请码）：`{username, password, email?, is_admin?}`；用户名/邮箱冲突 → 409。**`is_admin` 仅超级管理员可指定**（普通管理员请求 → 403） |
+| `PATCH` | `/api/v1/admin/users/<username>` | 修改用户：`{email?}`（改绑定邮箱，要求格式合法且全局唯一）、`{is_admin?}`（设/取消管理员标记，**仅超级管理员可操作**）；**防锁死**：禁止取消/删除最后一个管理员、白名单邮箱管理员不可改不可降级 |
+| `POST` | `/api/v1/admin/users/<username>/reset-password` | 管理员重置密码：生成 12 位临时密码仅此一次返回，密码版本 +1 使旧 token 全部失效 |
+| `DELETE` | `/api/v1/admin/users/<username>` | 删除用户（**软删除**，90 天内可恢复）：**仅超级管理员**（.env 白名单邮箱）可操作，且必须提交操作者自己的管理员密码 `{admin_password}`（密码校验失败 → 403）；禁止删除自己与最后一个管理员（白名单邮箱管理员除外）。删除留痕 `user_delete` 审计 |
+| `GET` | `/api/v1/admin/users/deleted` | 软删除账号列表（删除时间在 90 天恢复窗口内，按删除时间倒序）：含 `username`/`email`（脱敏）/`deleted_at`/`deleted_by` |
+| `POST` | `/api/v1/admin/users/<username>/restore` | 恢复软删除账号（仅 90 天内）：`password_version` +1、旧 token 全失效、需重新登录；超过窗口 → 400「已超过可恢复期限」；留痕 `user_restore` 审计 |
+| `GET` | `/api/v1/admin/ops?op=&keyword=&page=&size=` | 管理操作审计（创建/删除/冻结/解冻/授予·取消管理员/改邮箱/重置密码），含操作者、目标用户、时间与标准化详情（详情不含临时密码明文）；`op` 精确过滤 + `keyword` 搜索操作者/目标；前端按 20 条/页分页展示 |
+| `GET` | `/api/v1/admin/ops/export?op=&keyword=&format=csv\|json` | 审计导出（管理员）：遵循当前过滤导出**全部结果**（不受分页限制）；`csv` 带 utf-8-sig BOM（Excel 直接打开不乱码）+ `Content-Disposition: attachment`，`json` 返回完整字段数组 |
+| `GET` | `/api/v1/admin/users/<username>/usage?granularity=day\|month\|year&buckets=N` | 用户使用次数聚合：`granularity=day`（默认 30 天）/`month`（12 月）/`year`（5 年），`labels` 一律字符串，返回 `{labels, series:{login, analysis, total}, summary}`；`summary` = 区间合计（total/login_total/analysis_total）、日均/月均/年均（avg_per_bucket）、峰值（peak_label/peak_total）、活跃期数（active_buckets）、首次/最近使用 |
+| `GET` | `/api/v1/admin/users/usage-ranking?limit=N` | 全用户使用排行：按登录+分析总量降序（含 last_usage），帮助发现异常高消耗账号 |
+
+> 管理员判定（`auth.is_admin`）= `.env` 白名单邮箱 `ADMIN_EMAILS` **或** 用户记录 `is_admin` 标记；两者任一为真即管理员（`/auth/me` 的 `is_admin` 与 `require_auth` 的 `/admin/*` 鉴权均按此综合判定）。
+>
+> **权限分级**：`.env` 白名单邮箱用户为**超级管理员**（`auth.is_super_admin`，`/auth/me` 返回 `is_super_admin`）。分配/取消管理员权限（PATCH `is_admin`、POST 创建管理员）仅超级管理员可操作；**管理员身份账号的敏感操作（冻结/解冻/删除/重置密码/改邮箱）同样仅超级管理员**（普通管理员对其操作 → 403）；普通管理员仍可对普通用户做全部管理动作。
+>
+> **使用统计埋点**：登录成功（`login` 路由）与 HR 筛选分析成功（`_run_hr_analysis` 返回前，含缓存命中）各记一次，按天聚合存 `data/usage/<user_id>.json`（UTC 日期键）。删除用户时同步清理统计文件。
+>
+> **HR 分析缓存**：`_HR_ANALYSIS_CACHE` 为 **LRU（最多 1000 条）+ TTL（24h）** 的进程内缓存，命中时「同一简历+同一职位+同一模型配置」重复分析不调 LLM、0 token 消耗；超容量淘汰最久未用、过期条目惰性剔除，避免内存无界增长。
+>
+> **配置**：`ADMIN_OPS_RETENTION_DAYS`（默认 180，`.env` 可覆盖）与 `USER_USAGE_RETENTION_DAYS`（默认 365）控制审计与使用统计的保留天数；**懒清理**（`auth.maybe_prune`）在查询审计/使用统计/使用排行时每日最多执行一次（`data/.last_prune` 哨兵），删除过期审计文件与过期使用统计天键（空文件一并删除）——不依赖 cron，随查询自然发生。
+>
+> **数据备份**：数据存放于 Docker 命名卷 `hr-ai-resume-selection_backend-data`（容器内 `/app/data`）。服务器 `crontab` 每日 03:00 执行 `scripts/backup.sh`（sudo 打包卷 → `/opt/backups/resume-data-<时间戳>.tar.gz`，保留最近 7 天，日志 `/opt/backups/backup.log`）。
+>
+> **管理操作审计**：每次管理动作原子写 `data/admin_ops/<ts>_<uuid>.json` 一条（`data/usage`、`data/admin_ops` 同属 `data/` 目录，随备份/安全补丁清单处理）。审计详情标准化为动词短语（如「删除用户 xxx」「修改邮箱：a@x.com → b@x.com」「重置密码」），**不落临时密码明文**；支持按过滤条件一键导出 CSV/JSON。
 
 ### 4.3 忘记密码
 
@@ -532,7 +769,8 @@ Content-Type: application/json
 | 404 | 资源不存在或不属于当前用户 |
 | 409 | 注册冲突或验证码业务冲突 |
 | 422 | 请求字段或格式不合法 |
-| 429 | 频率限制 |
+| 423 | 账号已冻结（登录防爆破；前端引导邮箱自助解冻） |
+| 429 | 频率限制（登录冷却 / IP 限流 / 发码冷却 / 校验限次） |
 | 502 | SMTP/LLM 外部服务失败 |
 | 503 | 服务未配置或暂不可用 |
 
@@ -568,14 +806,24 @@ npm run dev
 
 ### 5.3 测试
 
+认证 / 安全相关套件**必须各自独立进程运行**（`test_invite_flow` 与 `test_login_lockout` 在同一进程内会互相污染共享的限流/临时目录状态）：
+
 ```powershell
 cd apps/backend
-python -m unittest test_hr_analysis
-python smoke_test_auth.py
+
+# 业务套件（可放同一进程）
+python -m unittest test_hr_analysis test_archives test_archives_api test_resume_review
+python -m unittest test_review_markers_route test_screening_agent test_agent_upgrades test_e2e
+
+# 认证 / 安全套件（各自独立进程）
+python -m unittest test_invite_flow      # 邀请码注册全流程（11 项）
+python -m unittest test_login_lockout    # 登录防爆破：冷却/冻结/解冻（12 项）
 
 cd ../frontend
 npx tsc --noEmit -p tsconfig.json
 ```
+
+> 后端容器验证新版代码：`docker exec hr-ai-resume-selection-backend grep -c _epoch_or_iso /app/app.py`（输出 ≥1 即新版已生效）。
 
 未配置 `LLM_API_KEY` 时，冒烟测试中的 AI 分析部分可能打印预期的模型配置错误；认证、权限和验证码断言仍应通过。
 
@@ -615,23 +863,30 @@ RUN pip install --no-cache-dir \
 
 ### 6.3 更新代码后的正确流程
 
+生产环境使用安全加固 compose 文件（含 healthcheck 与网络加固）：
+
 ```bash
 cd /opt/resume-matcher-agent-cn
 
 # 改后端
-docker compose build backend
-docker compose up -d backend
+docker compose -f docker-compose.secure.yml build backend
+docker compose -f docker-compose.secure.yml up -d --force-recreate --no-deps backend
 
 # 改前端
-docker compose build frontend
-docker compose up -d frontend
+docker compose -f docker-compose.secure.yml build frontend
+docker compose -f docker-compose.secure.yml up -d --force-recreate --no-deps frontend
 
 # 两端都改
-docker compose build backend frontend
-docker compose up -d backend frontend
+docker compose -f docker-compose.secure.yml build backend frontend
+docker compose -f docker-compose.secure.yml up -d --force-recreate backend frontend
+
+# 查看健康状态（healthy 才算就绪）
+docker compose -f docker-compose.secure.yml ps
 ```
 
-仅执行 `docker compose build` 不会自动替换当前运行容器。构建后必须执行对应的 `up -d 服务名`，并检查容器启动时间。
+仅执行 `docker compose build` 不会自动替换当前运行容器。构建后必须执行对应的 `up -d 服务名`，并检查容器启动时间；`--force-recreate` 可同时规避下文 known issue 的挂起风险。
+
+> ⚠️ **服务器 `.env` 保留真实密钥**：`.env` 内含生产密钥，部署更新代码时**只替换源码文件**（tar 包只含 `apps/`、`docker-compose*.yml` 等，不含 `.env`），切勿用本地/示例 `.env` 覆盖服务器配置。
 
 > ⚠️ **已知问题（containerd 网络层挂起）**：本服务器（腾讯云 Ubuntu 24.04）偶发容器网络命名空间挂起，表现为 `127.0.0.1:3000` 连接超时（nginx 504）但容器内进程正常启动。连 `robots.txt` 静态路由都超时即属此问题。处置：`docker compose up -d --force-recreate frontend` 强制重建网络命名空间，约 10-20 秒恢复。若 backend 也挂起：`sudo systemctl restart docker` + `docker compose up -d`（全容器重启，中断约 1-2 分钟）。
 
@@ -925,6 +1180,53 @@ futures = {
 
 ### 8.5 HR 分析输出字段
 
+#### 打分机制（服务端统一计算，`app._normalize_hr_analysis`）
+
+LLM 只输出分项依据，**不计算最终得分**；服务端按固定公式统一定档，保证报告页头部、候选人排名与导出一致：
+
+1. **基础分** `base_score`：五维分项之和，各维上限固定：
+
+   | 分项 | 上限 |
+   |---|---:|
+   | `hard_requirements` 硬性要求 | 25 |
+   | `responsibility_overlap` 职责重合度 | 25 |
+   | `skills_projects` 技能与项目 | 25 |
+   | `industry_background` 行业背景 | 15 |
+   | `evidence_bonus` 加分证据 | 10 |
+   | **合计** | **100** |
+
+   分项缺失（LLM 未输出完整五项）时回退 `job_fit_score`；五项齐全时以分项之和为准（`_validate_report` 要求总和与 `job_fit_score` 一致，不一致触发重试）。
+
+2. **AI 美化扣分** `deduction`：按 `ai_risk` 档位钳制（`_AI_RISK_RULES`）：
+
+   | ai_risk | 扣分范围 |
+   |---|---|
+   | none | 0 |
+   | light（轻微） | 5–10 |
+   | medium（中度） | 15–20 |
+   | high（重度/模板） | 30（固定） |
+
+   LLM 建议的 `ai_deduction` 会被钳到对应档位区间；`final_score = max(0, base_score − deduction)`。
+
+3. **硬门槛确定性扣分** `hard_gate_deduction`（服务端确定性兜底，不依赖 LLM 自觉）：
+   从 `requirements_checklist` 读取 `status == "not_met"` 的硬性要求（见 8.8 前置判定）：
+   - 每条确定性不达标扣 10 分（上限 30 分）；
+   - **学历层级不达标** → `final_score` 额外封顶 **59**（强制淘汰级 D）；
+   - 其他硬门槛（年限/证书）不达标 → 封顶 **69**（储备观察级）。
+   返回字段 `hard_gate_deduction` 记录实际扣除值。
+
+4. **等级与建议**（基于扣分后的 `final_score`）：
+
+   | final_score | 等级 | 招聘建议 | fit_tag |
+   |---|---|---|---|
+   | ≥90 | S级（优质适配） | 优先面试 | 高匹配 |
+   | 80–89 | A级（良好适配） | 优先面试 | 高匹配 |
+   | 70–79 | B级（基本适配） | 储备观察 | 部分匹配 |
+   | 60–69 | C级（适配一般） | 储备观察 | 部分匹配 |
+   | <60 | D级（不适配） | 淘汰 | 不匹配 |
+
+   LLM 请求的 `recruitment_recommendation`/`fit_tag` 只允许**不高于**分数推导档位（防止 LLM 提级），低于则可保留。
+
 #### `basic_screening`（基础信息筛选）
 
 | 字段 | 说明 |
@@ -999,9 +1301,20 @@ URL.createObjectURL + <a download> → 浏览器下载 JPEG
 
 `ResumeReviewPanel` 使用 `key={data.resume_id}` 强制 React 在切换候选人时重新挂载组件，所有内部 state 重置；组件挂载时 `useEffect` 自动加载新候选人的简历重点标记。
 
-### 8.8 Agent 自校（分层）
+### 8.8 Agent 自校（分层）+ 硬性要求前置判定
 
-**位置**：`screening_agent._self_reflect()`，在报告校验通过后执行。
+**位置**：`screening_agent._self_reflect()`，在报告校验通过后执行。硬性要求判定（`_build_requirements_checklist`）在自校前完成，其结果既供打分兜底（8.5 第 3 条）也供自校参考。
+
+**硬性要求前置判定**（确定性，不消耗 LLM）：
+
+| 类别 | 判定逻辑 | 状态 |
+|---|---|---|
+| education（学历层级） | JD 明确要求（如"本科及以上"），简历最高学历档位明确低于 → **not_met**；层级达标 → manual_review（真实性无法自动验证，提示人工核实） | not_met / manual_review |
+| experience（年限） | JD 要求 N 年、简历 `total_years`/`relevant_years` 明确 <N → **not_met**；无数值不断言 | not_met / manual_review |
+| certificate（证书） | JD 用"必须持有/必备"强约束、简历证书列表核心词无匹配 → **not_met**；简历未列证书不断言 | not_met / manual_review |
+| 其他 | 简历有关键词依据 → met；无依据 → not_mentioned（不推断不达标） | met / not_mentioned |
+
+`not_met` 为**确定性不达标**，服务端据此扣分/封顶（见 8.5 第 3 条）；`manual_review` 不扣分，仅保留人工核实提示（前端教育经历模块显示"人工待审核"横幅）。
 
 **第一层：确定性预检**（`_precheck_findings`，0 次 LLM，高精度低误报）：
 
@@ -1010,12 +1323,13 @@ URL.createObjectURL + <a download> → 浏览器下载 JPEG
 | 薪资疑似编造 | 规则 4 | 报告写了薪资期望，但简历原文无任何薪资字样（正则：薪资/薪酬/工资/N k/万…） |
 | 扣分无依据 | 规则 2 | `ai_deduction > 0` 但 `deduction_reasons` 为空 |
 | 强断言无出处 | 规则 1 | 优势含"精通/资深/主导…"等强断言词，且其中的技术项（ASCII 词）在简历原文完全未出现 |
+| 分数与证据不一致 | 规则 6 | `hard_requirements ≥ 20` 且**过半硬性要求**在简历原文找不到证据（2 字中文片段 + ASCII 词宽匹配） |
 
 **触发深度核查的条件**：预检发现疑点，或报告自报 `ai_risk` 为 medium/high。预检干净且无风险 → 直接通过（`mode: "预检"`），**不消耗 LLM**。
 
 **第二层：LLM 深度核查**：预算门槛 `budget["calls"] < MAX_AGENT_LLM_CALLS - 1`（`MAX_AGENT_LLM_CALLS = 5`）。Prompt 包含报告 JSON、简历原文摘录 `experiences[:8]`（论断必须以此为依据核对）、岗位要求，以及预检疑点（供重点核实）。
 
-**5 条核查规则**（Prompt 模板）：
+**6 条核查规则**（Prompt 模板）：
 
 ```python
 【核查规则】
@@ -1029,13 +1343,16 @@ URL.createObjectURL + <a download> → 浏览器下载 JPEG
    例如：简历未提及薪资期望，报告写成"符合预期"——这是编造缺失信息。
 5. 风险判断是否区分了"风险"和"未体现"
    例如：简历未提及空窗期，报告写"无空窗期，稳定性好"——这是将未体现误判为事实。
+6. 分数与证据是否一致（防分数虚高）
+   例如：简历内容很少、无可核验经历，但 hard_requirements 或 skills_projects 打 20/25 以上高分；
+   或岗位要求清单有硬性要求（hard=true），简历经历摘录中完全没有对应证据，报告却给高分——应下调对应维度分数。
 ```
 
 **输出字段**（`hr_analysis.agent_validation`）：
 
 ```python
 {
-    "checked_rules": 5,              # 核查规则总数
+    "checked_rules": 6,              # 核查规则总数
     "issues": [
         {"rule": 1, "problem": "论断超出简历依据", "fix": "已修正为'了解 Python，有 2 年开发经历'"}
     ],
@@ -1047,11 +1364,13 @@ URL.createObjectURL + <a download> → 浏览器下载 JPEG
 
 **修订回退**：深度核查触发修订后，修订稿重新过 `_validate_report`；结构校验不通过（或需求抽取本身失败）时回退保留原报告，`revised` 置回 `false`。
 
-**前端展示**：dashboard 页面「Agent 校验」模块始终显示（只要 `hr_analysis.agent_validation` 存在）：
-- 全部通过 → 绿色单行徽章「✓ Agent 校验：已核查 N 项要求，全部通过」，不可展开
+**前端展示**：dashboard 页面「Agent 校验」模块始终显示（只要 `hr_analysis.agent_validation` 存在），**可展开查看检测过程**：
+- 全部通过 → 绿色单行徽章「✓ Agent 校验：已核查 N 项要求，全部通过」，可展开查看「检测过程」5 步明细（来自 `analysis.agent_trace.steps`：规划→检索→检索中→生成→校验→自校）
 - 检出问题 → 琥珀色折叠徽章「Agent 校验：已核查 N 项要求，检出 N 个问题并已修正」，点「详情」展开问题表格（问题类型/问题/修正三列）
 - 右侧导航「Agent 校验」锚点同步存在，可滚动跳转
 - 导出报告同样始终输出校验结论（通过时一行绿色 `✓ Agent 校验`，有问题时带问题表）
+
+**教育经历人工待审核**：dashboard 教育经历模块在 `education_history` 非空时显示警示横幅「学历信息为简历自述，未经权威渠道核验，请结合学信网或学历/学位证书原件复核（人工待审核）。」——与硬性要求判定中的 `manual_review` 一致。
 
 ### 8.9 跨候选人对比
 
@@ -1064,6 +1383,8 @@ URL.createObjectURL + <a download> → 浏览器下载 JPEG
 | `ranking[]` | 排名列表，每项含 `rank` / `name` / `score` / `difference`（核心差异点） |
 | `pairwise[]` | 两两对比自然语言描述 |
 | `recommendation` | 优先面试建议 |
+
+**分数一致性（关键约束）**：LLM **不允许重新打分**——Prompt 明确排名中的 `score` 仅是占位示例，服务端在后处理（`score_by_name` 映射）用系统 `final_score` **覆盖**每个排名的分数：先精确匹配姓名，再空白不敏感包含匹配兜底；未匹配到 → 0 分；随后按分数降序排序并重新编号 1..N。报告页「候选人排名」得分单元格优先读取 `hr_analysis.final_score`（系统分数），保证排名与报告头部、右侧面板完全一致，杜绝 LLM 自评分造成的显示不一致。
 
 **容错**：LLM 调用失败（无 key / 超时 / 网络异常）时返回 `None` 并记日志，批量响应不受影响（对比只是增强能力）。前端在切换候选人时保留 `comparison` 字段，避免「候选人排名」消失。
 
@@ -1138,3 +1459,35 @@ store.save_archive（读已有 resume/job 文件，自动带出 job_title/final_
    ├─ 详情抽屉：编辑岗位分类 / 标签；「导出报告图片」→ 前端用 detail.analysis 实时生成 JPEG 下载
    └─ 回收站：软删 → GET /archives/trash → 恢复 / 彻底删除 / 清空
 ```
+
+### 认证安全加固（邀请制注册 + 登录防爆破）文件清单
+
+| 文件 | 职责 |
+|------|------|
+| `apps/backend/config.py` | 防爆破参数（`LOGIN_FAIL_LIMIT` / `LOGIN_LOCK_MINUTES` / `LOGIN_FREEZE_WINDOW_MINUTES` / `LOGIN_FREEZE_THRESHOLD` / `LOGIN_MAX_FAIL_PER_IP_10MIN` / `LOGIN_IP_LOCK_MINUTES` / `LOGIN_UNFREEZE_VIA_EMAIL` / `LOGIN_FREEZE_AUTO_UNFREEZE_HOURS`）与邀请码参数（`INVITE_CODE_LENGTH` / `INVITE_CODE_TTL_HOURS` / `INVITE_REQUEST_*`）；🆕 保留策略 `ADMIN_OPS_RETENTION_DAYS`（180）/ `USER_USAGE_RETENTION_DAYS`（365）/ `PRUNE_TOUCH_FILE`（懒清理哨兵）；新增 `INVITE_REQUESTS_DIR` / `INVITE_CODES_DIR` / `INVITE_CODES_AUDIT_DIR` / `LOGIN_FAILURES_DIR` |
+| `apps/backend/auth.py` | 🆕 邀请码生命周期：`generate_invite_code` / `validate_invite_code` / `consume_invite_code` / `revoke_invite_code`（支持明文码或 64 位哈希）/ `list_invite_codes` / 申请单 `create_invite_request` / `list_invite_requests`；🆕 登录防爆破：`login_policy_check`（冷却/冻结）/ `record_login_failure` / `ip_login_rate_exceeded` / `record_ip_login_failure` / `clear_login_failures` / `list_frozen_users` / `unfreeze_user` / 邮箱自助解冻；🆕 保留策略懒清理：`prune_admin_ops` / `prune_user_usage` / `maybe_prune` / `_prune_due`（每日最多一次，随查询触发）；自校验长度与过期均基于 config |
+| `apps/backend/app.py` | 邀请码路由（`register-config` 含 `invite_code_length`、`invite-code/check`、`invite-code/send-email-code`、`invite-request`、管理员 generate/list/revoke/冻结列表/解冻）；登录防爆破三层拦截（IP 限流 → 冷却/冻结 → 密码校验，423/429/401）；列表接口输出完整 64 位哈希 + `_epoch_or_iso()` 统一过期时间为 ISO 字符串 |
+| `apps/backend/mailer.py` | 邀请码邮件（审批通过补发码 / 手动生成邮件通知），HTML + 纯文本双版本 |
+| `apps/frontend/app/(default)/login/page.tsx` | 登录/注册/申请邀请码/自助解冻四面板；邀请码校验前置解锁（成功绿色/失败红色+抖动动画）；邀请码输入框 `maxLength` 与占位文案动态取 `invite_code_length`；登录失败次数累计提示（N 次 → 3 次冷却预警 → 6 次冻结）；「申请邀请码」子面板返回按钮置于提交下方；423 按 `frozen_by` 分流（admin → 冻结弹窗含原因+管理员email / auto → 自助解冻面板）；**解冻面板与重置密码页返回按钮均为全宽边框样式** |
+| `apps/frontend/lib/api/auth-admin.ts` | 🆕 注册配置/邀请码校验/发码/申请/解冻/管理员全部 API；`RegisterConfig` 含 `invite_code_length`；🆕 审计导出 `downloadAdminOpsExport(op, keyword, csv\|json)`（Blob 下载，文件名取自 Content-Disposition） |
+| `apps/frontend/app/(default)/admin/page.tsx` | 邀请码总览 Tab：状态筛选（all/active/used/expired）、手动生成（明文仅展示一次 + 一键复制）、作废（完整 64 位哈希回传，短哈希 `前8…后4` 展示）；冻结账号 Tab（来源/原因列）；🆕 用户管理 Tab（改邮箱/冻结/解冻/管理员标记/使用统计/使用排行，次要操作收「…」菜单）、🆕 操作记录 Tab（类型过滤 + 关键字 + 20 条/页分页 + CSV/JSON 导出 + 保留期提示）、🆕 Tab URL 记忆（`history.replaceState`，刷新不丢）、🆕 弹窗统一 `AdminModal`；`fmtTime` 兼容 epoch 秒/毫秒/ISO 三种时间格式（修复 1970 显示） |
+| `apps/frontend/tailwind.config.js` | 🆕 `animation.shake` + `keyframes.shake`（邀请码校验失败抖动反馈） |
+| `apps/backend/test_invite_flow.py` | 🆕 邀请码注册全流程单测（11 项，独立进程运行） |
+| `apps/backend/test_login_lockout.py` | 🆕 登录防爆破单测（12 项，独立进程运行） |
+| `docker-compose.secure.yml` | 🛡️ 生产安全 compose：healthcheck、容器网络与资源限制、非 root 运行等安全加固（与普通 compose 并存，部署时显式指定） |
+
+### 登录验证码 + 账号软删除 + 硬门槛打分优化文件清单
+
+| 文件 | 职责 |
+|------|------|
+| `apps/backend/config.py` | 🆕 验证码参数（`CAPTCHA_ENABLED` / `CAPTCHA_TTL_SECONDS`）、超级管理员白名单 `ADMIN_EMAILS`、软删除窗口 `DELETED_RESTORE_WINDOW_DAYS` |
+| `apps/backend/auth.py` | 🆕 验证码：`new_captcha` / `verify_captcha`（一次性 sha256，TTL 300s）/ `_purge_stale_captchas`；🆕 账号软删除：`delete_user`（软删置标记）/ `list_deleted_users` / `restore_user`（恢复后 `password_version`+1）/ `is_user_deleted`；`decode_jwt` 拒绝已删除账号；审计新增 `user_restore` 操作类型 |
+| `apps/backend/app.py` | 🆕 `GET /api/v1/auth/captcha`、登录路由验证码前置校验（失败不记账）；🆕 `DELETE /api/v1/admin/users/<username>`（仅超管 + 验证操作者管理员密码 + 软删除）、`GET /api/v1/admin/users/deleted`、`POST /api/v1/admin/users/<username>/restore`；🆕 打分统一化：`_normalize_hr_analysis` 读取 `requirements_checklist` 的 `not_met` 做确定性扣分（每条 10 分上限 30）+ 学历封顶 59 / 其他封顶 69；🆕 `_compare_candidates` 后处理用系统 `final_score` 覆盖 LLM 排名分数并重排 |
+| `apps/backend/screening_agent.py` | 🆕 硬门槛确定性判定：`_check_education_gate`（学历层级）/ `_check_experience_years_gate`（年限）/ `_check_certificate_gate`（证书核心词）接入 `_build_requirements_checklist` 产出 `not_met`；🆕 自校预检规则 6（分数-证据一致性，2 字片段宽匹配），深度核查规则 5 → 6 |
+| `apps/frontend/app/(default)/login/page.tsx` | 🆕 四位验证码 UI（数字展示 + 刷新、`captchaUnavailable` 降级、登录失败自动刷新、切换模式清空） |
+| `apps/frontend/app/(default)/admin/page.tsx` | 🆕 删除账号需弹窗输入管理员密码（仅超管可见删除按钮）；🆕 「已删除账号」恢复区（90 天内可恢复）；操作记录增加 `user_restore` 标签 |
+| `apps/frontend/app/(default)/dashboard/page.tsx` | 🆕 排名得分单元格改读 `hr_analysis.final_score`（与头部一致）；移除硬性要求矩阵展示；教育经历人工待审核横幅；「Agent 校验」可展开查看检测过程 5 步明细 |
+| `apps/frontend/lib/api/auth-admin.ts` | 🆕 `fetchCaptcha` / `adminDeleteUser`（带 `admin_password`）/ `fetchDeletedUsers` / `adminRestoreUser` |
+| `apps/backend/test_captcha.py` | 🆕 验证码单测（7 项，独立进程运行） |
+| `apps/backend/test_user_admin.py` | 🆕 用户管理 + 软删除/恢复单测（36 项，独立进程运行） |
+| `apps/backend/test_hr_analysis.py` | 🆕 硬门槛扣分/封顶与自校规则 6 专项测试（11 项新增，并入业务套件） |

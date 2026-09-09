@@ -12,6 +12,8 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 function handleUnauthorized(response: Response): void {
   if (response.status === 401) {
     try {
+      window.sessionStorage.removeItem('resume-screening-token');
+      window.sessionStorage.removeItem('resume-screening-user');
       window.localStorage.removeItem('resume-screening-token');
       window.localStorage.removeItem('resume-screening-user');
       window.sessionStorage.removeItem('resume-screening-result');

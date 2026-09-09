@@ -51,6 +51,7 @@ apps/backend/data/
 # Test scratch dirs (auth smoke test / unit tests)
 apps/backend/.test-tmp/
 apps/backend/.test-data/
+apps/backend/.test-tmp-*/
 apps/backend/.smoke-tmp/
 apps/backend/.smoke-debug/
 apps/backend/smoke-out.txt
@@ -84,6 +85,18 @@ dist/
 # 一次性部署脚本（含服务器路径，不进开源仓库）
 /deploy-archive.sh
 /verify-archive-deploy.sh
+/deploy-now.sh
+/deploy-session.sh
+/deploy-session-isolation.sh
+/deploy-ui.sh
+/deploy-dashboard.sh
+/deploy-auth-revert.sh
+/deploy.tar
+
+# ---- 本机工具/缓存目录（不进仓库）----
+/.dsh/
+/.npm-cache/
+/.impeccable/
 
 # ---- 个人开发笔记 / 临时文件（不应进入开源仓库）----
 # 注意：README.md、docs/ 下的文档不在忽略范围，仍可正常提交。
@@ -104,3 +117,22 @@ apps/backend/test_quick.py
 apps/backend/test_route.py
 apps/backend/test_static.py
 apps/backend/test_vendor.py
+
+# ---- impeccable 设计 skill 运行时临时文件（官方推荐忽略块）----
+.impeccable/config.local.json
+.impeccable/hook.cache.json
+.impeccable/hook.pending.json
+.impeccable/*.png
+.impeccable/review/
+.impeccable/questions/
+.impeccable/live/server.json
+.impeccable/live/sessions/
+.impeccable/live/previews/
+.impeccable/live/annotations/
+.impeccable/live/cache/
+.impeccable/live/manual-edit-apply-transaction.json
+.impeccable/live/manual-edit-events.jsonl
+.impeccable/live/manual-edit-evidence/
+.impeccable/live/pending-manual-edits.json
+.impeccable/live/deferred-svelte-component-accepts.json
+.impeccable/live/*.png

@@ -83,7 +83,7 @@ function buildReportInner(opts: {
   </tr>
   <tr>
     <td class="val"><b class="green">${esc(a.final_score)}</b><br><span class="sub">${esc(a.fit_grade)}</span></td>
-    <td class="val"><b class="blue">${esc(a.job_fit_percentage)}%</b><br><span class="sub">基础分 ${esc(a.job_fit_score)}/100</span></td>
+    <td class="val"><b class="blue">${esc(a.final_score)} / 100</b><br><span class="sub">${esc(a.job_fit_percentage)}% 基础契合度${a.ai_deduction > 0 ? ` · AI 美化扣 ${esc(a.ai_deduction)}` : ''}${a.hard_gate_deduction ? ` · 硬门槛扣 ${esc(a.hard_gate_deduction)}` : ''}</span></td>
     <td class="val"><b class="purple">${esc(a.ai_risk_level)}</b><br><span class="sub">${esc(a.ai_risk_label)} · 扣 ${esc(a.ai_deduction)} 分</span></td>
     <td class="val"><b>${esc(a.recruitment_recommendation)}</b><br><span class="sub">${esc(a.fit_tag)}</span></td>
   </tr>
@@ -108,7 +108,7 @@ function buildReportInner(opts: {
   </tbody>
 </table>`);
   } else if (av) {
-    out.push(`<p class="para"><b class="green">✓ Agent 校验：</b>已核查 ${esc(av.checked_rules)} 项要求，全部通过</p>`);
+    out.push(`<p class="para"><b class="green">Agent 校验：</b>已核查 ${esc(av.checked_rules)} 项要求，全部通过</p>`);
   }
 
   const bs = a.basic_screening;

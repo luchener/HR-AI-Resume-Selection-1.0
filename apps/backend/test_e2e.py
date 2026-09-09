@@ -132,10 +132,21 @@ def _ensure_token(base: str) -> str:
     )
     if status not in (200, 409):
         raise AssertionError(f"register failed: HTTP {status}: {text[:200]}")
+    # 登录验证码：服务端开启则先取验证码（一次性，成功后失效）
+    login_body = {"username": username, "password": password}
+    cap_status, cap_text = _request(
+        "GET",
+        base.rstrip("/") + "/api/v1/auth/captcha",
+        timeout=15,
+    )
+    if cap_status == 200:
+        cap = (json.loads(cap_text).get("data") or {})
+        login_body["captcha_id"] = cap.get("captcha_id", "")
+        login_body["captcha_code"] = cap.get("code", "")
     status, text = _request(
         "POST",
         base.rstrip("/") + "/api/v1/auth/login",
-        json_body={"username": username, "password": password},
+        json_body=login_body,
         timeout=30,
     )
     if status != 200:

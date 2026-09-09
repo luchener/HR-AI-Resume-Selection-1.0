@@ -18,6 +18,7 @@ class HrAnalysisTests(unittest.TestCase):
         self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-data")
         os.makedirs(self.temp_dir, exist_ok=True)
         backend._HR_ANALYSIS_CACHE.clear()
+        backend.config.ALLOW_CUSTOM_AI_CONFIG = True
         backend.store.RESUMES_DIR = os.path.join(self.temp_dir, "resumes")
         backend.store.JOBS_DIR = os.path.join(self.temp_dir, "jobs")
         # 认证：创建测试用户并生成 JWT（auth 模块的 USERS_DIR 指向临时目录）
@@ -34,6 +35,7 @@ class HrAnalysisTests(unittest.TestCase):
         self.client = backend.app.test_client()
 
     def tearDown(self):
+        backend.config.ALLOW_CUSTOM_AI_CONFIG = False
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
@@ -734,6 +736,299 @@ class HrAnalysisTests(unittest.TestCase):
             [item.kwargs["runtime_config"]["api_key"] for item in call.call_args_list],
             ["sk-first", "sk-second"],
         )
+
+    def test_request_ai_config_rejected_when_custom_disabled(self):
+        previous = backend.config.ALLOW_CUSTOM_AI_CONFIG
+        backend.config.ALLOW_CUSTOM_AI_CONFIG = False
+        try:
+            response = self.client.post(
+                "/api/v1/ai/test",
+                json={
+                    "ai_config": {
+                        "provider": "deepseek",
+                        "api_key": "sk-forbidden",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-chat",
+                    }
+                },
+                headers=self.headers,
+            )
+            self.assertEqual(response.status_code, 403)
+            self.assertIn("自定义", response.get_json()["detail"])
+
+            analysis = self.client.post(
+                "/api/v1/resumes/hr-analysis",
+                json={
+                    "resume_id": "r-none",
+                    "job_id": "j-none",
+                    "ai_config": {"provider": "deepseek", "api_key": "sk-forbidden"},
+                },
+                headers=self.headers,
+            )
+            self.assertEqual(analysis.status_code, 403)
+        finally:
+            backend.config.ALLOW_CUSTOM_AI_CONFIG = previous
+
+    def test_normalizer_carries_requirements_checklist(self):
+        result = backend._normalize_hr_analysis(
+            {
+                "job_fit_score": 70,
+                "ai_risk": "none",
+                "requirements_checklist": [
+                    {
+                        "id": "req-1",
+                        "text": "本科及以上学历",
+                        "category": "education",
+                        "logic": "required",
+                        "status": "manual_review",
+                        "resume_basis": "某大学本科",
+                    }
+                ],
+            }
+        )
+
+        checklist = result["requirements_checklist"]
+        self.assertEqual(len(checklist), 1)
+        self.assertEqual(checklist[0]["status"], "manual_review")
+        self.assertEqual(checklist[0]["resume_basis"], "某大学本科")
+
+    def test_find_employment_overlaps_reports_conflict(self):
+        records = [
+            {"company_name": "甲公司", "job_title": "工程师", "start_date": "2020-01", "end_date": "2020-12", "duration": "1 年"},
+            {"company_name": "乙公司", "job_title": "工程师", "start_date": "2020-06", "end_date": "2021-06", "duration": "1 年 1 个月"},
+        ]
+
+        overlaps = backend._find_employment_overlaps(records)
+
+        self.assertEqual(len(overlaps), 1)
+        self.assertIn("甲公司", overlaps[0]["message"])
+        self.assertIn("乙公司", overlaps[0]["message"])
+        self.assertGreaterEqual(overlaps[0]["months"], 7)
+
+    def test_find_employment_overlaps_ignores_sequential_periods(self):
+        records = [
+            {"company_name": "甲公司", "job_title": "工程师", "start_date": "2020-01", "end_date": "2020-06", "duration": "6 个月"},
+            {"company_name": "乙公司", "job_title": "工程师", "start_date": "2020-07", "end_date": "2020-12", "duration": "6 个月"},
+        ]
+
+        overlaps = backend._find_employment_overlaps(records)
+
+        self.assertEqual(overlaps, [])
+
+
+class HardGateScoreTests(unittest.TestCase):
+    """A/B：硬性门槛确定性判定（学历层级/年限/证书）与服务端扣分/封顶。"""
+
+    def _normalize(self, raw: dict) -> dict:
+        return backend._normalize_hr_analysis(raw, job_content="测试岗位", resume_content="")
+
+    def test_education_below_jd_req_is_not_met_and_capped(self):
+        raw = {
+            "candidate_name": "张三",
+            "score_breakdown": {
+                "hard_requirements": 25,
+                "responsibility_overlap": 25,
+                "skills_projects": 25,
+                "industry_background": 15,
+                "evidence_bonus": 10,
+            },
+            "job_fit_score": 100,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "requirements_checklist": [
+                {"id": "r1", "text": "本科及以上学历", "category": "education", "logic": "required", "status": "not_met", "resume_basis": "岗位要求本科及以上学历，简历最高学历为专科"},
+            ],
+        }
+        result = self._normalize(raw)
+        self.assertEqual(result["final_score"], 59)          # 学历硬门槛不达标 → 淘汰级封顶
+        self.assertEqual(result["hard_gate_deduction"], 10)  # 扣除 10 分
+        self.assertEqual(result["fit_grade"], "D级（不适配）")
+
+    def test_experience_below_jd_req_is_not_met_and_capped(self):
+        raw = {
+            "candidate_name": "张三",
+            "score_breakdown": {
+                "hard_requirements": 22,
+                "responsibility_overlap": 20,
+                "skills_projects": 20,
+                "industry_background": 10,
+                "evidence_bonus": 5,
+            },
+            "job_fit_score": 77,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "requirements_checklist": [
+                {"id": "r1", "text": "5年以上软件开发经验", "category": "experience", "logic": "required", "status": "not_met", "resume_basis": "岗位要求5年以上经验，简历明确年限为3年"},
+            ],
+        }
+        result = self._normalize(raw)
+        self.assertEqual(result["final_score"], 67)          # 77 - 10 = 67，未达 69 封顶位
+        self.assertEqual(result["hard_gate_deduction"], 10)
+
+    def test_multiple_hard_fails_deduction_capped_at_30(self):
+        raw = {
+            "candidate_name": "张三",
+            "score_breakdown": {
+                "hard_requirements": 25,
+                "responsibility_overlap": 20,
+                "skills_projects": 20,
+                "industry_background": 10,
+                "evidence_bonus": 5,
+            },
+            "job_fit_score": 80,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "requirements_checklist": [
+                {"id": "r1", "text": "必须持有PMP证书", "category": "certificate", "logic": "required", "status": "not_met", "resume_basis": "未找到匹配证书"},
+                {"id": "r2", "text": "5年以上经验", "category": "experience", "logic": "required", "status": "not_met", "resume_basis": "年限3年"},
+                {"id": "r3", "text": "本科及以上学历", "category": "education", "logic": "required", "status": "not_met", "resume_basis": "最高学历专科"},
+                {"id": "r4", "text": "必须持有CISP证书", "category": "certificate", "logic": "required", "status": "not_met", "resume_basis": "未找到匹配证书"},
+                {"id": "r5", "text": "8年以上经验", "category": "experience", "logic": "required", "status": "not_met", "resume_basis": "年限3年"},
+            ],
+        }
+        result = self._normalize(raw)
+        self.assertEqual(result["hard_gate_deduction"], 30)  # 上限 30
+        self.assertEqual(result["final_score"], 50)          # 80 - 30 = 50
+
+    def test_checklist_not_met_inside_full_analysis_flow(self):
+        """整条链路：screening_agent 生成 checklist → normalize 扣分。用单测函数直接验证判定逻辑。"""
+        import screening_agent
+
+        requirements = {"requirements": [{"id": "r1", "text": "硕士及以上学历", "category": "education", "hard": True, "logic": "required"}]}
+        report = {
+            "candidate_name": "张三",
+            "education_history": [{"degree": "专科", "school_name": "某职业学院", "school_tier": "专科", "major": "计算机", "graduation_year": "2020"}],
+            "score_breakdown": {"hard_requirements": 25, "responsibility_overlap": 25, "skills_projects": 25, "industry_background": 15, "evidence_bonus": 10},
+        }
+        checklist = screening_agent._build_requirements_checklist(requirements, report, "张三\n专科，某职业学院\n计算机")
+        self.assertEqual(len(checklist), 1)
+        self.assertEqual(checklist[0]["status"], "not_met")
+        self.assertIn("硕士", checklist[0]["resume_basis"])
+
+    def test_education_meets_level_stays_manual_review(self):
+        """学历层级达标（本科 vs 本科）→ 不扣分，保留人工待核实（真实性无法自动验证）。"""
+        import screening_agent
+
+        requirements = {"requirements": [{"id": "r1", "text": "本科及以上学历", "category": "education", "hard": True, "logic": "required"}]}
+        report = {
+            "candidate_name": "张三",
+            "education_history": [{"degree": "本科", "school_name": "复旦大学", "school_tier": "985", "major": "计算机", "graduation_year": "2020"}],
+            "score_breakdown": {"hard_requirements": 25, "responsibility_overlap": 25, "skills_projects": 25, "industry_background": 15, "evidence_bonus": 10},
+        }
+        checklist = screening_agent._build_requirements_checklist(requirements, report, "张三\n本科，复旦大学\n计算机")
+        self.assertEqual(checklist[0]["status"], "manual_review")
+        self.assertIn("真实性", checklist[0]["resume_basis"])
+
+    def test_experience_not_met_inside_checklist(self):
+        import screening_agent
+
+        requirements = {"requirements": [{"id": "r1", "text": "5年以上软件开发经验", "category": "experience", "hard": True, "logic": "required"}]}
+        report = {
+            "candidate_name": "张三",
+            "work_history": {"total_years": "3年", "relevant_years": "2年"},
+            "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 20, "industry_background": 10, "evidence_bonus": 5},
+        }
+        checklist = screening_agent._build_requirements_checklist(requirements, report, "张三\n三年软件实施经验")
+        self.assertEqual(len(checklist), 1)
+        self.assertEqual(checklist[0]["status"], "not_met")
+        self.assertIn("3", checklist[0]["resume_basis"])
+
+    def test_certificate_missing_inside_checklist(self):
+        import screening_agent
+
+        requirements = {"requirements": [{"id": "r1", "text": "必须持有PMP证书", "category": "certificate", "hard": True, "logic": "required"}]}
+        report = {
+            "candidate_name": "张三",
+            "certificates": ["英语六级"],
+            "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 20, "industry_background": 10, "evidence_bonus": 5},
+        }
+        checklist = screening_agent._build_requirements_checklist(requirements, report, "张三\n英语六级")
+        self.assertEqual(checklist[0]["status"], "not_met")
+        self.assertIn("证书", checklist[0]["resume_basis"])
+
+    def test_certificate_present_is_met(self):
+        import screening_agent
+
+        requirements = {"requirements": [{"id": "r1", "text": "必须持有PMP证书", "category": "certificate", "hard": True, "logic": "required"}]}
+        report = {
+            "candidate_name": "张三",
+            "certificates": ["PMP认证 项目管理专业认证"],
+            "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 20, "industry_background": 10, "evidence_bonus": 5},
+        }
+        checklist = screening_agent._build_requirements_checklist(requirements, report, "张三\nPMP认证")
+        self.assertEqual(checklist[0]["status"], "met")
+
+
+class AgentValidationRuleSixTests(unittest.TestCase):
+    """C：Agent 自校规则 6（分数-证据一致性）：高分但岗位硬性要求大多无简历证据 → 检出疑点。"""
+
+    def test_rule6_triggers_when_high_score_without_evidence(self):
+        import screening_agent
+
+        report = {
+            "candidate_name": "张三",
+            "score_breakdown": {"hard_requirements": 25, "responsibility_overlap": 25, "skills_projects": 25, "industry_background": 15, "evidence_bonus": 10},
+            "job_fit_score": 100,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "strengths": ["精通资深Python"],
+        }
+        requirements = {
+            "requirements": [
+                {"id": "r1", "text": "必须掌握Java", "category": "skill", "hard": True, "logic": "required"},
+                {"id": "r2", "text": "必须掌握C++", "category": "skill", "hard": True, "logic": "required"},
+            ]
+        }
+        resume = "张三\n产品经理\n负责需求分析"
+        findings = screening_agent._precheck_findings(report, requirements, resume)
+        rules = {item["rule"] for item in findings}
+        self.assertIn(6, rules)
+        for item in findings:
+            if item["rule"] == 6:
+                self.assertIn("硬性要求维度得分偏高", item["problem"])
+
+    def test_rule6_not_triggered_when_evidence_present(self):
+        import screening_agent
+
+        report = {
+            "candidate_name": "张三",
+            "score_breakdown": {"hard_requirements": 25, "responsibility_overlap": 25, "skills_projects": 25, "industry_background": 15, "evidence_bonus": 10},
+            "job_fit_score": 100,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "strengths": ["有产品经验"],
+        }
+        requirements = {
+            "requirements": [
+                {"id": "r1", "text": "5年以上产品经验", "category": "experience", "hard": True, "logic": "required"},
+            ]
+        }
+        resume = "张三\n5年以上产品经验\n负责 AI Agent 产品，主导需求分析"
+        findings = screening_agent._precheck_findings(report, requirements, resume)
+        rules = {item["rule"] for item in findings}
+        self.assertNotIn(6, rules)
+
+    def test_reflect_checks_six_rules(self):
+        import screening_agent
+
+        report = {
+            "candidate_name": "张三",
+            "score_breakdown": {"hard_requirements": 25, "responsibility_overlap": 25, "skills_projects": 25, "industry_background": 15, "evidence_bonus": 10},
+            "job_fit_score": 100,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+        }
+        result = screening_agent._self_reflect(
+            report,
+            job_content="测试岗位",
+            resume_content="张三\n本科\n5年经验",
+            requirements={"requirements": []},
+            experiences=[],
+            current_date="2026-08",
+            runtime_config=None,
+            budget={"calls": 0},
+        )
+        self.assertEqual(result[1]["checked_rules"], 6)
 
 
 if __name__ == "__main__":

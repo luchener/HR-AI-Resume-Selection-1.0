@@ -6,7 +6,7 @@
 import json
 import os
 import sys
-import tempfile
+import uuid
 
 # 强制使用临时数据目录，避免污染真实数据（放在工作区内以满足沙箱写权限）
 _TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".smoke-tmp")
@@ -74,14 +74,21 @@ def post(path, data=None, token=None, headers=None):
     return client.post(path, data=json.dumps(data) if data is not None else None, headers=h)
 
 
-def reg_with_code(username, password, email):
-    """通过验证码走注册路由：发码 → 从记录取明文码 → 注册。"""
+def reg_with_code(username, password, email, invite=None):
+    """通过验证码走注册路由：生成邀请码（未绑定）→ 发码 → 从记录取明文码 → 注册。"""
+    if invite is None:
+        invite = auth_module.generate_invite_code(
+            bound_email="",
+            request_id=f"smoke-{uuid.uuid4()}",
+            created_by="smoke-test",
+            note="冒烟测试",
+        )
     _sent_verify.clear()
     r = post("/api/v1/auth/email-code/send", {"email": email})
     code = _sent_verify[-1][1] if _sent_verify else ""
     return post(
         "/api/v1/auth/register",
-        {"username": username, "password": password, "email": email, "code": code},
+        {"username": username, "password": password, "email": email, "code": code, "invite_code": invite},
     )
 
 
@@ -213,11 +220,17 @@ print("== 3.8 验证码注册（发码/校验/频率限制）==")
 r = post("/api/v1/auth/register", {"username": "dave", "password": "davepass123", "email": "dave@example.com"})
 check("注册缺验证码被拒 422", r.status_code == 422, f"status={r.status_code}")
 
-# 错误验证码 → 409/400
-r = post("/api/v1/auth/register", {"username": "dave", "password": "davepass123", "email": "dave@example.com", "code": "BADBAD"})
+# 错误验证码 → 409/400（需先有有效邀请码，否则 422 缺码——见 3.9 对缺码的覆盖）
+inv_dave = auth_module.generate_invite_code(
+    bound_email="dave@example.com",
+    request_id=f"smoke-3-8-{uuid.uuid4()}",
+    created_by="smoke-test",
+    note="错误验证码场景",
+)
+r = post("/api/v1/auth/register", {"username": "dave", "password": "davepass123", "email": "dave@example.com", "code": "BADBAD", "invite_code": inv_dave})
 check("注册错误验证码被拒", r.status_code in (400, 409), f"status={r.status_code} body={r.get_data(as_text=True)[:120]}")
 
-# 正确验证码 → 200
+# 正确验证码 → 200（自动生成未绑定邀请码）
 r = reg_with_code("dave", "davepass123", "dave@example.com")
 check("dave 验证码注册成功", r.status_code == 200, f"status={r.status_code} body={r.get_data(as_text=True)[:120]}")
 
@@ -228,6 +241,33 @@ r2 = post("/api/v1/auth/email-code/send", {"email": "another@example.com"})
 check("首次发码成功 200", r2.status_code == 200, f"status={r2.status_code}")
 r3 = post("/api/v1/auth/email-code/send", {"email": "another@example.com"})
 check("冷却期内重复发码被拒 429", r3.status_code == 429, f"status={r3.status_code} body={r3.get_data(as_text=True)[:120]}")
+
+print("== 3.9 邀请码注册流程（申请→审批→发码→注册）==")
+# ① 无邀请码注册 → 422
+_inv_email = "invite-user@example.com"
+inv = auth_module.generate_invite_code(
+    bound_email=_inv_email,
+    request_id=f"smoke3-9-{uuid.uuid4()}",
+    created_by="smoke-test",
+    note="邀请码流程",
+)
+_sent_verify.clear()
+r = post("/api/v1/auth/email-code/send", {"email": _inv_email})
+code_inv = _sent_verify[-1][1] if _sent_verify else ""
+r = post(
+    "/api/v1/auth/register",
+    {"username": "invite_user", "password": "password123", "email": _inv_email, "code": code_inv},
+)
+check("缺邀请码注册被拒 422", r.status_code == 422, f"status={r.status_code}")
+# ② 大小写不敏感的邀请码 → 200
+r = post(
+    "/api/v1/auth/register",
+    {"username": "invite_user", "password": "password123", "email": _inv_email, "code": code_inv, "invite_code": inv.lower()},
+)
+check("邀请码小写注册成功", r.status_code == 200, f"status={r.status_code} body={r.get_data(as_text=True)[:120]}")
+# ③ 一次性：同一邀请码再注册 → 422（码已消费）
+r = post("/api/v1/auth/invite-code/check", {"invite_code": inv})
+check("已消费邀请码校验被拒 422", r.status_code == 422, f"status={r.status_code} body={r.get_data(as_text=True)[:120]}")
 
 print("== 4. 未带 token 访问被拒 ==")
 r = client.get("/api/v1/resumes?resume_id=x")

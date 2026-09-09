@@ -107,6 +107,125 @@ def send_verification_email(to_email: str, code: str, purpose: str = "注册") -
     return True
 
 
+def send_invite_code_email(to_email: str, code: str, expires_hours: int = 24) -> bool:
+    """
+    发送邀请码邮件（管理员审批通过后，自动发到申请人邮箱）。
+    邀请码为短码（默认 4 位），不区分大小写；一次性、限时有效。
+    """
+    if not config.smtp_configured():
+        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+
+    subject = "【AI 简历智选】您的注册邀请码"
+    plain = f"""您好：
+
+您的账号申请已通过审批。请使用以下邀请码完成注册：
+
+  邀请码：{code}
+
+使用说明：
+· 邀请码仅可使用一次，{expires_hours} 小时内有效（过期需重新申请）；
+· 仅限在申请时填写的邮箱注册使用，请勿转借他人；
+· 如非本人申请，请忽略本邮件。
+
+—— AI 简历智选（系统自动发送，请勿回复）
+"""
+    html = _build_invite_email_html(
+        code=code,
+        expires_hours=expires_hours,
+        description="您的账号申请已通过审批，请使用下方邀请码完成注册：",
+    )
+    _send(to_email, subject, plain, html)
+    return True
+
+
+def send_invite_rejection_email(to_email: str, reason: str) -> bool:
+    """
+    发送申请被拒通知邮件（管理员填写拒绝理由时触发）。
+    """
+    if not config.smtp_configured():
+        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+
+    subject = "【AI 简历智选】账号申请未通过"
+    reason_text = str(reason or "").strip() or "暂未说明具体原因，如有疑问可联系管理员。"
+    plain = f"""您好：
+
+很抱歉，您的账号申请未通过审批。
+
+原因：{reason_text}
+
+如需进一步沟通，请回复本邮件或联系管理员。
+
+—— AI 简历智选（系统自动发送，请勿回复）
+"""
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:{_BG};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:{_BG};padding:28px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;border-collapse:collapse;">
+        <tr><td style="background-color:{_NAVY};border-radius:12px 12px 0 0;padding:26px 32px;">
+          <div style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:1px;">AI 简历智选</div>
+          <div style="color:#8fa3c7;font-size:12px;margin-top:5px;">智能简历筛选工作台</div>
+        </td></tr>
+        <tr><td style="background-color:#ffffff;border-radius:0 0 12px 12px;padding:34px 32px 26px;">
+          <div style="color:{_TEXT};font-size:15px;font-weight:600;">您好：</div>
+          <div style="color:{_MUTED};font-size:14px;line-height:1.7;margin-top:10px;">很抱歉，您的账号申请未通过审批。</div>
+          <div style="background-color:#fff4f2;border:1px solid #f1c4bd;border-radius:10px;padding:16px;margin:18px 0;color:{_TEXT};font-size:14px;line-height:1.7;">{reason_text}</div>
+          <div style="color:{_MUTED};font-size:13px;line-height:1.8;">如需进一步沟通，请回复本邮件或联系管理员。</div>
+        </td></tr>
+        <tr><td style="padding:14px 32px 0;text-align:center;">
+          <div style="color:{_FOOTER};font-size:11px;line-height:1.8;">此邮件由系统自动发送，请勿直接回复。</div>
+          <div style="color:{_FOOTER};font-size:11px;">© AI 简历智选 · 智能简历筛选工作台</div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    _send(to_email, subject, plain, html)
+    return True
+
+
+def _build_invite_email_html(code: str, expires_hours: int, description: str) -> str:
+    """邀请码邮件的 HTML 正文（大字卡片 + 使用说明）。"""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background-color:{_BG};">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:{_BG};padding:28px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;border-collapse:collapse;">
+        <tr><td style="background-color:{_NAVY};border-radius:12px 12px 0 0;padding:26px 32px;">
+          <div style="color:#ffffff;font-size:18px;font-weight:700;letter-spacing:1px;">AI 简历智选</div>
+          <div style="color:#8fa3c7;font-size:12px;margin-top:5px;">智能简历筛选工作台</div>
+        </td></tr>
+        <tr><td style="background-color:#ffffff;border-radius:0 0 12px 12px;padding:34px 32px 26px;">
+          <div style="color:{_TEXT};font-size:15px;font-weight:600;">您好：</div>
+          <div style="color:{_MUTED};font-size:14px;line-height:1.7;margin-top:10px;">{description}</div>
+          <div style="background-color:{_BLUE_SOFT};border:1px dashed {_BLUE_BORDER};border-radius:10px;padding:18px;text-align:center;margin:22px 0;">
+            <div style="font-size:12px;color:{_MUTED};letter-spacing:1px;margin-bottom:8px;">注册邀请码</div>
+            <div style="font-size:36px;font-weight:700;letter-spacing:14px;color:{_NAVY};font-family:'Courier New',Consolas,monospace;padding-left:14px;">{code}</div>
+          </div>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:18px 0 4px;">
+            <tr><td style="color:{_MUTED};font-size:13px;line-height:1.8;">
+              · 邀请码<b style="color:{_TEXT}">仅可使用一次</b>，请在 <b style="color:{_TEXT}">{expires_hours} 小时</b>内完成注册<br>
+              · 仅限申请时填写的邮箱使用，请勿转借他人<br>
+              · 如非本人申请，请忽略本邮件
+            </td></tr>
+          </table>
+        </td></tr>
+        <tr><td style="padding:14px 32px 0;text-align:center;">
+          <div style="color:{_FOOTER};font-size:11px;line-height:1.8;">此邮件由系统自动发送，请勿直接回复。</div>
+          <div style="color:{_FOOTER};font-size:11px;">© AI 简历智选 · 智能简历筛选工作台</div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
 def _build_html_email(subject: str, greeting: str, description: str, code: str, ttl_minutes: int) -> str:
     """构建验证码邮件的 HTML 正文（table 布局 + 内联样式，兼容主流邮箱）。"""
     return f"""<!DOCTYPE html>

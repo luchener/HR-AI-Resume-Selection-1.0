@@ -14,6 +14,8 @@ Flask 后端应用。极简化重构，替代旧版 FastAPI + SQLAlchemy + Agent
 
 启动：gunicorn app:app（宝塔/生产）或 python run.py（本地）。
 """
+import csv
+import io
 import json
 import logging
 import os
@@ -22,8 +24,9 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import Flask, g, request, jsonify, Response, stream_with_context
 
@@ -74,7 +77,37 @@ auth_mod.init_auth(app)
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 MAX_RESUME_FILE_SIZE = 30 * 1024 * 1024
 _HR_ANALYSIS_VERSION = "screening-agent-v1-employment-timeline"
-_HR_ANALYSIS_CACHE: dict[tuple[str, str, str, str], dict] = {}
+# HR 分析结果缓存：LRU（最近最久未用淘汰）+ TTL（24h），防内存无界增长，
+# 同时保留"同一简历+同一职位+同一模型配置重复分析不调 LLM"的省 token 语义。
+_HR_ANALYSIS_CACHE_MAX = 1000
+_HR_ANALYSIS_CACHE_TTL_SECONDS = 24 * 3600
+_HR_ANALYSIS_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
+_HR_ANALYSIS_CACHE_LOCK = threading.Lock()
+
+
+def _hr_cache_get(key: tuple) -> dict | None:
+    """取缓存（命中刷新 LRU 位置；过期条目惰性剔除）。"""
+    now = time.time()
+    with _HR_ANALYSIS_CACHE_LOCK:
+        entry = _HR_ANALYSIS_CACHE.get(key)
+        if entry is None:
+            return None
+        if now - entry.get("_ts", 0) > _HR_ANALYSIS_CACHE_TTL_SECONDS:
+            _HR_ANALYSIS_CACHE.pop(key, None)
+            return None
+        _HR_ANALYSIS_CACHE.move_to_end(key)
+        return entry.get("value")
+
+
+def _hr_cache_put(key: tuple, value: dict) -> None:
+    """写缓存：超容量淘汰最久未用条目。"""
+    now = time.time()
+    with _HR_ANALYSIS_CACHE_LOCK:
+        if key in _HR_ANALYSIS_CACHE:
+            _HR_ANALYSIS_CACHE.pop(key, None)
+        _HR_ANALYSIS_CACHE[key] = {"_ts": now, "value": value}
+        while len(_HR_ANALYSIS_CACHE) > _HR_ANALYSIS_CACHE_MAX:
+            _HR_ANALYSIS_CACHE.popitem(last=False)
 
 
 @app.errorhandler(413)
@@ -134,6 +167,25 @@ def _handle_api_error(e: ApiError):
 
 
 # ── request_id 工具（与旧版格式兼容：服务段:uuid）────────────────────
+def is_super_admin():
+    me = g.get("auth_user") or {}
+    return bool(auth_mod.is_super_admin(me))
+
+
+def _is_admin_account(user: dict | None) -> bool:
+    """该账号是否为管理员身份（白名单邮箱或 is_admin 标记）。权限分级用。"""
+    return bool(auth_mod.is_admin(user))
+
+
+def _ensure_super_admin_for_admin_target(rid: str, target_user: dict | None) -> bool:
+    """普通管理员操作管理员身份账号 → 403。返回 True 表示请求应被拒绝（已写响应）。"""
+    if not _is_admin_account(target_user):
+        return False  # 普通用户，任何管理员可操作
+    if is_super_admin():
+        return False  # 超级管理员可操作
+    raise ApiError("该账号为管理员账号，仅超级管理员（admin）可操作。", 403, "admin")
+
+
 def _request_id(service: str = "api") -> str:
     return f"{service}:{uuid.uuid4()}"
 
@@ -161,6 +213,8 @@ def _request_ai_config(data: dict, *, required: bool = False) -> dict | None:
         if required:
             raise ApiError("请先配置 AI 模型。", 422, "ai")
         return None
+    if not config.ALLOW_CUSTOM_AI_CONFIG:
+        raise ApiError("生产环境不允许使用自定义 AI Key，请联系管理员配置。", 403, "ai")
     try:
         return llm.normalize_runtime_config(value)
     except ValueError as exc:
@@ -199,21 +253,35 @@ def ping():
 
 @app.post("/api/v1/auth/register")
 def register():
-    """注册：需先通过注册邮箱验证码校验。body: {username, password, email, code}"""
+    """注册：需有效邀请码 + 注册邮箱验证码。body: {username, password, email, code, invite_code}"""
     rid = auth_mod._request_id("auth")
     data = request.get_json(silent=True) or {}
     username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
     email = (data.get("email") or "").strip()
     code = (data.get("code") or "").strip()
+    invite_code = (data.get("invite_code") or "").strip()
     if not username or not password:
         return jsonify({"detail": "请提供用户名和密码。", "request_id": rid}), 422
     if not email or not code:
         return jsonify({"detail": "请提供邮箱和邮箱验证码。", "request_id": rid}), 422
-    user, error, field = auth_mod.register_with_email_code(username, password, email, code)
+    if not invite_code:
+        return jsonify({"detail": "请填写邀请码。", "request_id": rid}), 422
+    # 注册失败按 IP 计数（防撞库/爆破注册接口）
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    user, error, field = auth_mod.register_with_email_code(
+        username, password, email, code, invite_code
+    )
     if error:
-        return jsonify({"detail": error, "request_id": rid}), 409
+        status = 409 if field != "invite_code" else 422
+        return jsonify({"detail": error, "request_id": rid}), status
     token = auth_mod.generate_jwt(user["user_id"], user["username"])
+    logger.info(
+        "[auth] register ok username=%s email=%s bound_invite=%s",
+        user["username"],
+        email,
+        auth_mod.normalize_invite_code(invite_code),
+    )
     return jsonify({
         "request_id": rid,
         "data": {
@@ -224,6 +292,53 @@ def register():
     })
 
 
+@app.post("/api/v1/auth/invite-code/send-email-code")
+def invite_code_send_email_code():
+    """
+    注册 · 发送邮箱验证码（须先通过邀请码校验，且邮箱与码绑定邮箱一致）。
+    body: {email, invite_code}
+    - 邀请码无效/已用/过期 → 422（统一文案）
+    - 邮箱与码绑定邮箱不匹配 → 422（提示仅限申请邮箱）
+    - 其余逻辑与原 email-code/send 一致（含冷却/已注册/SMTP 检查）
+    """
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    invite_code = (data.get("invite_code") or "").strip()
+    if not email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return jsonify({"detail": "邮箱格式不正确。", "request_id": rid}), 422
+    if not invite_code:
+        return jsonify({"detail": "请先填写并验证邀请码。", "request_id": rid}), 422
+    # 每 IP 邀请码校验失败限流（10 次/小时）
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip_hash = auth_mod._ip_hash(ip)
+    limited, _retry = auth_mod._rate_limited(f"invite_check_ip:{ip_hash}", max_count=10, window=3600)
+    if limited:
+        return jsonify({"detail": "尝试次数过多，请稍后再试。", "request_id": rid}), 429
+
+    check = auth_mod.validate_invite_code(invite_code, email=email)
+    if check is not None:
+        return jsonify({"detail": "邀请码无效或不可用，请联系管理员获取新的邀请码。", "request_id": rid}), 422
+    # 该邮箱已注册
+    if auth_mod.find_user_by_email(email):
+        return jsonify({"detail": "该邮箱已被注册，请直接登录或使用忘记密码。", "request_id": rid}), 422
+    # 频率限制 + SMTP 检查
+    if not auth_mod.can_request_code(email, auth_mod.PURPOSE_EMAIL_VERIFY):
+        return jsonify({"detail": "发送过于频繁，请稍后再试。", "request_id": rid}), 429
+    if not mailer_mod.smtp_available():
+        return jsonify({"detail": "邮件服务未配置，请联系管理员处理。", "request_id": rid}), 503
+    code = auth_mod.create_email_code(email, auth_mod.PURPOSE_EMAIL_VERIFY)
+    if not code:
+        return jsonify({"detail": "发送过于频繁，请稍后再试。", "request_id": rid}), 429
+    try:
+        mailer_mod.send_verification_email(email, code, purpose="注册")
+    except Exception as exc:
+        logger.error("send register email code failed for %s: %s", email, exc)
+        return jsonify({"detail": "邮件发送失败，请稍后重试或联系管理员。", "request_id": rid}), 502
+    logger.info("register email code sent to %s (invite ok)", email)
+    return jsonify({"detail": "验证码已发送，请查收邮件。", "request_id": rid}), 200
+
+
 @app.post("/api/v1/auth/email-code/send")
 def email_code_send():
     """
@@ -232,6 +347,9 @@ def email_code_send():
     - 冷却期内（60 秒）→ 429
     - SMTP 未配置 → 503
     - 成功 → 200
+
+    说明：注册页现在必须先通过邀请码校验，前端走 /invite-code/send-email-code。
+    本端点保留给「忘记密码/其他复用」场景（邀请码闸门不适用于重置验证码）。
     """
     rid = auth_mod._request_id("auth")
     data = request.get_json(silent=True) or {}
@@ -261,17 +379,90 @@ def email_code_send():
     return jsonify({"detail": "验证码已发送，请查收邮件。", "request_id": rid}), 200
 
 
+@app.get("/api/v1/auth/captcha")
+def auth_captcha():
+    """获取登录验证码（四位随机数字）。返回 captcha_id + 明文 code，一次性使用。"""
+    rid = auth_mod._request_id("auth")
+    if not config.CAPTCHA_ENABLED:
+        return jsonify({"detail": "验证码功能未启用。", "request_id": rid}), 404
+    captcha_id, code = auth_mod.new_captcha()
+    return jsonify({
+        "request_id": rid,
+        "data": {"captcha_id": captcha_id, "code": code, "ttl_seconds": auth_mod.CAPTCHA_TTL_SECONDS},
+    })
+
+
 @app.post("/api/v1/auth/login")
 def login():
+    """登录：含防爆破（冷却/冻结/每 IP 限流）+ 四位数字验证码。"""
     rid = auth_mod._request_id("auth")
     data = request.get_json(silent=True) or {}
     username = (data.get("username") or "").strip()
     password = (data.get("password") or "").strip()
     if not username or not password:
         return jsonify({"detail": "请提供用户名和密码。", "request_id": rid}), 422
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+
+    # 0. 验证码校验（一次性）：失败不记账（不影响防爆破计数），直接拒绝
+    if config.CAPTCHA_ENABLED:
+        captcha_id = (data.get("captcha_id") or "").strip()
+        captcha_code = (data.get("captcha_code") or "").strip()
+        if not captcha_id or not captcha_code:
+            return jsonify({"detail": "请填写验证码。", "request_id": rid}), 422
+        if not auth_mod.verify_captcha(captcha_id, captcha_code):
+            return jsonify({"detail": "验证码错误或已过期，请刷新验证码后重试。", "request_id": rid}), 422
+
+    # 0.5 每 IP 失败上限（防跨用户名撞库）—— 只读检查；计数在失败时才落账
+    ip_limited, ip_retry = auth_mod.ip_login_rate_exceeded(ip)
+    if ip_limited:
+        retry_min = max(1, int(ip_retry // 60) + 1)
+        resp = jsonify({"detail": f"尝试次数过多，请在 {retry_min} 分钟后重试。", "request_id": rid}), 429
+        resp[0].headers["Retry-After"] = str(int(ip_retry) + 1)
+        return resp
+
+    # 1. 账号级策略（冷却/冻结）
+    action, retry_after, _ = auth_mod.login_policy_check(username)
+    if action == "frozen":
+        fi = auth_mod.get_frozen_info(username)
+        if fi.get("frozen_by") == "admin":
+            # 管理员手动冻结：拒绝登录 + 提示联系管理员（含原因）
+            detail = "账号异常请联系系统管理员处理！"
+            if fi.get("frozen_reason"):
+                detail += f"（原因：{fi['frozen_reason']}）"
+            return jsonify({
+                "detail": detail,
+                "frozen_by": "admin",
+                "frozen_reason": fi.get("frozen_reason") or "",
+                "admin_email": (list(auth_mod.ADMIN_EMAILS) or [""])[0],
+                "request_id": rid,
+            }), 423
+        return jsonify({
+            "detail": "该账号已临时冻结。若你是账号本人，请在登录页使用正确密码 + 邮箱验证码自助解冻；如需帮助请联系管理员。",
+            "frozen_by": "auto",
+            "request_id": rid,
+        }), 423
+    if action == "cooldown":
+        retry_min = max(1, int(retry_after // 60) + 1)
+        resp = jsonify({"detail": f"尝试过于频繁，请在 {retry_min} 分钟后重试。", "request_id": rid}), 429
+        resp[0].headers["Retry-After"] = str(int(retry_after) + 1)
+        return resp
+
+    # 2. 校验密码
     user = auth_mod.authenticate_user(username, password)
     if not user:
+        frozen_now, _ = auth_mod.record_login_failure(username, ip)
+        auth_mod.record_ip_login_failure(ip)
+        if frozen_now:
+            logger.warning("[auth] login froze account username=%s", username)
+            return jsonify({
+                "detail": "该账号已临时冻结。若你是账号本人，请在登录页使用正确密码 + 邮箱验证码自助解冻；如需帮助请联系管理员。",
+                "request_id": rid,
+            }), 423
         return jsonify({"detail": "用户名或密码错误。", "request_id": rid}), 401
+
+    # 3. 登录成功：清零失败记录 → 签发 JWT → 记录使用次数
+    auth_mod.clear_login_failures(username)
+    auth_mod.record_user_usage(user["user_id"], "login")
     token = auth_mod.generate_jwt(user["user_id"], user["username"])
     return jsonify({
         "request_id": rid,
@@ -283,17 +474,167 @@ def login():
     })
 
 
+@app.post("/api/v1/auth/invite-code/check")
+def invite_code_check():
+    """
+    非消费校验邀请码（注册页前置解锁）。body: {invite_code}
+    只做存在性/过期/已用校验（不校验邮箱，因为此阶段用户还没填邮箱）。
+    不区分失败原因，统一文案，防枚举。
+    """
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    invite_code = (data.get("invite_code") or "").strip()
+    if not invite_code:
+        return jsonify({"detail": "请填写邀请码。", "request_id": rid}), 422
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip_hash = auth_mod._ip_hash(ip)
+    limited, _retry = auth_mod._rate_limited(f"invite_check_ip:{ip_hash}", max_count=10, window=3600)
+    if limited:
+        return jsonify({"detail": "尝试次数过多，请稍后再试。", "request_id": rid}), 429
+    check = auth_mod.validate_invite_code(invite_code)
+    if check is not None:
+        return jsonify({"detail": "邀请码无效或不可用，请联系管理员获取新的邀请码。", "request_id": rid}), 422
+    return jsonify({"request_id": rid, "data": {"valid": True}}), 200
+
+
+@app.get("/api/v1/auth/register-config")
+def register_config():
+    """注册页配置：invite_required（当前固定 True，未来可关）。"""
+    return jsonify({
+        "request_id": auth_mod._request_id("auth"),
+        "data": {
+            "invite_required": True,
+            "contact_email": auth_mod.CONTACT_EMAIL,
+            "invite_code_length": config.INVITE_CODE_LENGTH,
+        },
+    })
+
+
+@app.post("/api/v1/invite-request")
+def invite_request():
+    """提交邀请码申请（公开）。body: {email, note}"""
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    note = (data.get("note") or "").strip()
+    if not email or not note:
+        return jsonify({"detail": "请填写邮箱和申请理由。", "request_id": rid}), 422
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    request_rec, error, status = auth_mod.create_invite_request(email, note, ip)
+    if error:
+        return jsonify({"detail": error, "request_id": rid}), status
+    logger.info("[invite] request submitted email=%s", email)
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "message": "申请已提交，管理员审批通过后邀请码将发送至你的邮箱。",
+            "email": email,
+        },
+    }), 200
+
+
+@app.post("/api/v1/auth/unfreeze/send-code")
+def unfreeze_send_code():
+    """
+    自助解冻第一步：为冻结账号的绑定邮箱发送解冻验证码（公开）。
+    body: {username, email}
+    - 账号不存在 → 404
+    - 邮箱与账号绑定邮箱不匹配 / 账号未绑定邮箱 → 422（提示联系管理员）
+    - 账号未冻结 → 409
+    - 通过后复用邮箱验证码机制（PURPOSE_UNFREEZE，60s 冷却 / 30 分钟有效）
+    """
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    if not username or not email:
+        return jsonify({"detail": "请提供用户名和邮箱。", "request_id": rid}), 422
+    ok, error, status = auth_mod.request_unfreeze_code(username, email)
+    if not ok:
+        return jsonify({"detail": error, "request_id": rid}), status
+    if not auth_mod.can_request_code(email, auth_mod.PURPOSE_UNFREEZE):
+        return jsonify({"detail": "发送过于频繁，请稍后再试。", "request_id": rid}), 429
+    if not mailer_mod.smtp_available():
+        return jsonify({"detail": "邮件服务未配置，请联系管理员处理。", "request_id": rid}), 503
+    code = auth_mod.create_email_code(email, auth_mod.PURPOSE_UNFREEZE)
+    if not code:
+        return jsonify({"detail": "发送过于频繁，请稍后再试。", "request_id": rid}), 429
+    try:
+        mailer_mod.send_verification_email(email, code, purpose="账号解冻")
+    except Exception as exc:
+        logger.error("send unfreeze code failed for %s: %s", email, exc)
+        return jsonify({"detail": "邮件发送失败，请稍后重试或联系管理员。", "request_id": rid}), 502
+    logger.info("[auth] unfreeze code sent email=%s username=%s", email, username)
+    return jsonify({"detail": "解冻验证码已发送，请查收邮件。", "request_id": rid}), 200
+
+
+@app.post("/api/v1/auth/unfreeze")
+def unfreeze():
+    """
+    冻结账号自助解冻（公开）。body: {username, password, email, code}
+    正确密码 + 绑定邮箱验证码 → 解冻并直接返回新 JWT。
+    """
+    rid = auth_mod._request_id("auth")
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    email = (data.get("email") or "").strip()
+    code = (data.get("code") or "").strip()
+    if not username or not password or not email or not code:
+        return jsonify({"detail": "请提供用户名、密码、邮箱和邮箱验证码。", "request_id": rid}), 422
+
+    # 该账号必须处于冻结状态
+    action, _, _ = auth_mod.login_policy_check(username)
+    if action != "frozen":
+        return jsonify({"detail": "该账号未被冻结，无需解冻。", "request_id": rid}), 409
+
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip_limited, _ip_retry = auth_mod.ip_login_rate_exceeded(ip)
+    if ip_limited:
+        return jsonify({"detail": "尝试次数过多，请稍后再试。", "request_id": rid}), 429
+
+    # 密码是本人的第一证明（错误也计入窗口失败，防绕过登录限流）
+    user = auth_mod.authenticate_user(username, password)
+    if not user:
+        frozen_now, _ = auth_mod.record_login_failure(username, ip)
+        auth_mod.record_ip_login_failure(ip)
+        if frozen_now:
+            return jsonify({"detail": "自助解冻失败：密码或验证码有误。", "request_id": rid}), 401
+        return jsonify({"detail": "密码错误，无法自助解冻。", "request_id": rid}), 401
+
+    ok, error = auth_mod.unfreeze_by_email(username, email, code)
+    if not ok:
+        # 验证码失败不额外记登录失败（用户已证明密码正确）
+        return jsonify({"detail": error, "request_id": rid}), 400
+
+    auth_mod.clear_login_failures(username)
+    token = auth_mod.generate_jwt(user["user_id"], user["username"])
+    logger.info("[auth] account unfrozen via email username=%s", username)
+    # 清除本 IP 的登录失败计数（本人自助解冻成功 → 该 IP 恢复）
+    auth_mod._safe_remove(
+        auth_mod._rate_file_path(f"login_ip:{auth_mod._ip_hash(ip)}")
+    )
+    return jsonify({
+        "request_id": rid,
+        "data": {"message": "账号已解冻，欢迎回来。", "token": token, "user_id": user["user_id"], "username": user["username"]},
+    }), 200
+
+
 @app.get("/api/v1/auth/me")
 def auth_me():
-    """返回当前登录用户信息。"""
+    """返回当前登录用户信息（含 is_admin，供前端显示管理入口）。"""
     auth_user = g.get("auth_user")
     if not auth_user:
         return jsonify({"detail": "请先登录。", "request_id": "auth:me"}), 401
+    email = auth_user.get("email") or ""
     return jsonify({
         "request_id": f"auth:me:{auth_user['user_id'][:8]}",
         "data": {
             "user_id": auth_user["user_id"],
             "username": auth_user["username"],
+            "email": email,
+            "is_admin": bool(auth_mod.is_admin(auth_user)),
+            "is_super_admin": bool(auth_mod.is_super_admin(auth_user)),
         },
     })
 
@@ -351,6 +692,15 @@ def reset_password_request():
         logger.info("reset request for unknown email=%s", email)
         return jsonify({"detail": generic_msg, "request_id": rid}), 200
 
+    # 管理员冻结：禁止重置密码（防通过改密绕过冻结）
+    fi = auth_mod.get_frozen_info(user["username"])
+    if fi.get("frozen") and fi.get("frozen_by") == "admin":
+        return jsonify({
+            "detail": "账号异常请联系系统管理员处理！",
+            "admin_email": (list(auth_mod.ADMIN_EMAILS) or [""])[0],
+            "request_id": rid,
+        }), 423
+
     if not mailer_mod.smtp_available():
         return jsonify({
             "detail": "邮件服务未配置，请联系管理员处理。",
@@ -390,6 +740,17 @@ def reset_password_confirm():
     if not email or not code or not new_password:
         return jsonify({"detail": "请提供邮箱、验证码和新密码。", "request_id": rid}), 422
 
+    # 管理员冻结：禁止通过重置密码改变登录状态
+    frozen_user = auth_mod.find_user_by_email(email)
+    if frozen_user:
+        fi = auth_mod.get_frozen_info(frozen_user["username"])
+        if fi.get("frozen") and fi.get("frozen_by") == "admin":
+            return jsonify({
+                "detail": "账号异常请联系系统管理员处理！",
+                "admin_email": (list(auth_mod.ADMIN_EMAILS) or [""])[0],
+                "request_id": rid,
+            }), 423
+
     ok, error = auth_mod.reset_password_with_code(email, code, new_password)
     if not ok:
         return jsonify({"detail": error, "request_id": rid}), 400
@@ -399,6 +760,693 @@ def reset_password_confirm():
         "request_id": rid,
         "data": {"message": "密码重置成功，请使用新密码登录。"},
     })
+
+
+# ════════════════════════════════════════════════════════════════════
+# 管理员接口（require_auth 内已做白名单鉴权：路径前缀 /api/v1/admin/）
+# —— 邀请码申请审批 / 邀请码管理 / 冻结账号管理
+# ════════════════════════════════════════════════════════════════════
+
+def _client_ip() -> str:
+    """统一取客户端 IP（兼容反代 X-Forwarded-For）。"""
+    return (
+        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or request.remote_addr
+        or ""
+    )
+
+
+def _mask_email(email: str) -> str:
+    """邮箱脱敏：l***@163.com。"""
+    email = str(email or "")
+    if "@" not in email:
+        return email
+    local, _, domain = email.partition("@")
+    if len(local) <= 1:
+        return f"***@{domain}"
+    return f"{local[0]}***@{domain}"
+
+
+def _admin_user_id() -> str:
+    auth_user = g.get("auth_user") or {}
+    return auth_user.get("user_id") or ""
+
+
+def _request_payload_serialize(request_id: str) -> dict:
+    return {"request_id": request_id}
+
+
+@app.get("/api/v1/admin/invite-requests")
+def admin_list_invite_requests():
+    """申请单列表。query: status=pending|approved|rejected（默认 pending）"""
+    rid = _request_id("admin")
+    status = (request.args.get("status") or "pending").strip()
+    if status not in ("pending", "approved", "rejected"):
+        status = "pending"
+    records = auth_mod.list_invite_requests(status)
+    items = []
+    for rec in records:
+        items.append(
+            {
+                "request_id": rec.get("request_id"),
+                "email": _mask_email(rec.get("email") or ""),
+                "note": rec.get("note") or "",
+                "status": rec.get("status"),
+                "created_at": rec.get("created_at"),
+                "reviewed_at": rec.get("reviewed_at"),
+                "reject_reason": rec.get("reject_reason") or "",
+                "code_sent": bool(rec.get("code_sent")),
+                "rejected_count": auth_mod.count_rejected_requests(rec.get("email") or ""),
+            }
+        )
+    return jsonify({"request_id": rid, "data": {"items": items, "total": len(items)}})
+
+
+@app.post("/api/v1/admin/invite-requests/<request_id>/approve")
+def admin_approve_invite_request(request_id: str):
+    """审批通过：生成一次性邀请码（绑定申请邮箱）→ SMTP 自动发送。"""
+    rid = _request_id("admin")
+    req, code, status = auth_mod.approve_invite_request(request_id, _admin_user_id())
+    if status != 200:
+        return jsonify({"detail": req or "操作失败。", "request_id": rid}), status
+    # SMTP 发送邀请码邮件（失败不撤销审批；管理页可补发）
+    email = (req.get("email") or "").strip()
+    try:
+        if not mailer_mod.smtp_available():
+            logger.warning("[invite] approve request=%s SMTP unavailable, code=%s", request_id, code)
+            return jsonify({
+                "detail": "已生成邀请码，但邮件服务未配置，无法自动发送。请先配置 SMTP 后使用补发功能；或直接复制下方邀请码告知申请人。",
+                "request_id": rid,
+                "data": {"invite_code": code, "code_sent": False},
+            }), 200
+        mailer_mod.send_invite_code_email(
+            email, code, expires_hours=config.INVITE_CODE_TTL_HOURS
+        )
+        auth_mod.mark_invite_request_sent(request_id)
+    except Exception as exc:
+        logger.error("approve send invite email failed for %s: %s", email, exc)
+        return jsonify({
+            "detail": "审批已通过，但邀请码邮件发送失败。请点击补发，或直接复制下方邀请码告知申请人。",
+            "request_id": rid,
+            "data": {"invite_code": code, "code_sent": False},
+        }), 200
+    logger.info("[invite] approved request=%s email=%s by=%s", request_id, email, _admin_user_id())
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "message": "审批已通过，邀请码已发送至申请邮箱。",
+            "request_id_info": request_id,
+            "invite_code": code,
+            "code_sent": True,
+        },
+    }), 200
+
+
+@app.post("/api/v1/admin/invite-requests/<request_id>/reject")
+def admin_reject_invite_request(request_id: str):
+    """拒绝申请：记录原因；reason 非空 → 发拒信邮件。"""
+    rid = _request_id("admin")
+    data = request.get_json(silent=True) or {}
+    reason = (data.get("reason") or "").strip()
+    req, error, status = auth_mod.reject_invite_request(request_id, _admin_user_id(), reason)
+    if status != 200:
+        return jsonify({"detail": error or "操作失败。", "request_id": rid}), status
+    email = (req.get("email") or "").strip()
+    if reason:
+        try:
+            if mailer_mod.smtp_available():
+                mailer_mod.send_invite_rejection_email(email, reason)
+        except Exception as exc:
+            # 拒信失败不影响拒绝结果（best-effort），降级返回成功并记日志
+            logger.error("reject email failed for %s: %s", email, exc)
+    rejected_total = auth_mod.count_rejected_requests(email)
+    logger.info("[invite] rejected request=%s email=%s by=%s total_rejected=%d", request_id, email, _admin_user_id(), rejected_total)
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "message": "已拒绝该申请。",
+            "rejected_total": rejected_total,
+            "max_rejections": config.INVITE_REQUEST_MAX_REJECTIONS,
+        },
+    }), 200
+
+
+@app.post("/api/v1/admin/invite-requests/<request_id>/resend")
+def admin_resend_invite_request(request_id: str):
+    """补发邀请码邮件（原码明文已不可得 → 重新生成并发送，旧码作废）。"""
+    rid = _request_id("admin")
+    req, code, status = auth_mod.resend_invite_request(request_id)
+    if status != 200:
+        return jsonify({"detail": req or "操作失败。", "request_id": rid}), status
+    email = (req.get("email") or "").strip()
+    try:
+        if not mailer_mod.smtp_available():
+            return jsonify({
+                "detail": "邮件服务未配置，无法补发。请先配置 SMTP。",
+                "request_id": rid,
+            }), 503
+        mailer_mod.send_invite_code_email(
+            email, code, expires_hours=config.INVITE_CODE_TTL_HOURS
+        )
+        auth_mod.mark_invite_request_sent(request_id)
+    except Exception as exc:
+        logger.error("resend invite email failed for %s: %s", email, exc)
+        # 补发失败也返回明文码，便于管理员人工转达
+        return jsonify({
+            "detail": "补发邮件失败，请稍后重试，或直接复制下方邀请码告知申请人。",
+            "request_id": rid,
+            "data": {"invite_code": code},
+        }), 200
+    logger.info("[invite] resent request=%s email=%s", request_id, email)
+    return jsonify({"request_id": rid, "data": {"message": "邀请码已重新生成并发送至申请邮箱。"}}), 200
+
+
+@app.get("/api/v1/admin/invite-codes")
+def admin_list_invite_codes():
+    """邀请码总览（不回明文）。query: status=active|used|expired|all"""
+    rid = _request_id("admin")
+    status = (request.args.get("status") or "all").strip()
+    records = auth_mod.list_invite_codes()
+    now_ts = auth_mod._now_ts()
+    items = []
+    for rec in records:
+        used = bool(rec.get("used"))
+        expired = (not used) and float(rec.get("expires_at", 0)) < now_ts
+        rec_status = "used" if used else ("expired" if expired else "active")
+        if status != "all" and rec_status != status:
+            continue
+        items.append(
+            {
+                # 完整哈希返回（作废接口需用完整哈希定位；展示截断由前端负责）
+                "code_hash": rec.get("code_hash") or "",
+                "status": rec_status,
+                "bound_email": _mask_email(rec.get("bound_email") or ""),
+                "created_at": rec.get("created_at"),
+                # expires_at 统一转 ISO 字符串（历史记录为 epoch 秒），避免前端按毫秒误解析为 1970
+                "expires_at": _epoch_or_iso(rec.get("expires_at")),
+                "used_by_username": rec.get("used_by_username") or None,
+                "note": rec.get("note") or "",
+                "revoked": bool(rec.get("revoked")),
+            }
+        )
+    return jsonify({"request_id": rid, "data": {"items": items, "total": len(items)}})
+
+
+def _epoch_or_iso(value):
+    """兼容：历史记录 expires_at 为 epoch 秒（float），统一输出为 ISO 字符串。"""
+    if value is None:
+        return None
+    try:
+        as_float = float(value)
+        if as_float > 10**12:  # 已是毫秒级时间戳
+            return datetime.fromtimestamp(as_float / 1000, timezone.utc).isoformat()
+        return datetime.fromtimestamp(as_float, timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return str(value)
+
+
+@app.post("/api/v1/admin/invite-codes/generate")
+def admin_generate_invite_codes():
+    """
+    兜底手动生成邀请码（应急/活动）。body: {count, note, days?, email?}
+    email 缺省时不绑定（任何邮箱可用——仅用于管理员应急首号注册等场景）。
+    """
+    rid = _request_id("admin")
+    data = request.get_json(silent=True) or {}
+    try:
+        count = max(1, min(int(data.get("count") or 1), 20))
+    except (TypeError, ValueError):
+        count = 1
+    note = (data.get("note") or "").strip()[:200]
+    email = (data.get("email") or "").strip().lower() or ""
+    days = config.INVITE_CODE_TTL_HOURS / 24
+    codes = []
+    for _i in range(count):
+        request_id = f"manual-{uuid.uuid4()}"
+        code = auth_mod.generate_invite_code(
+            bound_email=email,  # 空 = 不绑定
+            request_id=request_id,
+            created_by=_admin_user_id(),
+            note=note,
+            ttl_hours=int(days * 24) if days else config.INVITE_CODE_TTL_HOURS,
+        )
+        codes.append(code)
+    logger.info("[invite] manual generate count=%d by=%s", count, _admin_user_id())
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "codes": codes,  # 明文仅此一次返回
+            "message": "已生成邀请码，请立即复制保存（服务器不保存明文）。",
+        },
+    }), 200
+
+
+@app.post("/api/v1/admin/invite-codes/<path:code_or_hash>/revoke")
+def admin_revoke_invite_code(code_or_hash: str):
+    """作废未使用邀请码（入参可为明文码或哈希）。"""
+    rid = _request_id("admin")
+    code = code_or_hash.strip()
+    ok = auth_mod.revoke_invite_code(code)
+    if not ok:
+        # 尝试按哈希直接删（仅当入参已是哈希且活跃码存在）
+        return jsonify({"detail": "邀请码不存在、已使用或已作废。", "request_id": rid}), 404
+    return jsonify({"request_id": rid, "data": {"message": "邀请码已作废。"}}), 200
+
+
+@app.get("/api/v1/admin/users")
+def admin_list_users():
+    """用户列表（管理员）：支持 ?keyword= 搜索用户名/邮箱，?page=&size= 分页。"""
+    rid = _request_id("admin")
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        size = min(200, max(1, int(request.args.get("size", "50"))))
+    except (TypeError, ValueError):
+        size = 50
+    keyword = (request.args.get("keyword") or "").strip()
+    items = auth_mod.list_users(keyword=keyword, page=page, size=size)
+    total = auth_mod.count_users(keyword=keyword)
+    return jsonify({
+        "request_id": rid,
+        "data": {"items": items, "total": total, "page": page, "size": size},
+    })
+
+
+@app.post("/api/v1/admin/users")
+def admin_create_user():
+    """管理员创建用户（绕过邀请码）。body: {username, password, email?, is_admin?}
+    is_admin 仅超级管理员（.env 白名单邮箱）可指定；普通管理员创建的用户不带管理员身份。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    email = (data.get("email") or "").strip()
+    is_admin_flag = bool(data.get("is_admin"))
+    if not username or not password:
+        return jsonify({"detail": "请提供用户名和密码。", "request_id": rid}), 422
+
+    # 权限分级：仅超级管理员可创建管理员账号
+    if is_admin_flag and not auth_mod.is_super_admin(me):
+        return jsonify({
+            "detail": "仅超级管理员（admin 账号）可以创建管理员。",
+            "request_id": rid,
+        }), 403
+
+    user, error = auth_mod.create_user(username, password, email)
+    if error:
+        return jsonify({"detail": error, "request_id": rid}), 409 if "已被" in error else 422
+
+    # 设置管理员标记（仅超级管理员路径可达）
+    if is_admin_flag:
+        ok, err = auth_mod.update_user_admin(username, True, operator=_admin_user_id())
+        if not ok:
+            # 创建成功但设管理员失败（白名单用户已默认管理员）→ 忽略
+            pass
+    auth_mod.record_admin_op(
+        "user_create",
+        _admin_user_id(),
+        me.get("username") or "",
+        username,
+        detail=f"创建用户 {username}" + ("（管理员）" if is_admin_flag else ""),
+        request_id=rid,
+    )
+    user = auth_mod.find_user_by_username(username)
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "message": f"用户 {username} 创建成功。",
+            "user": {
+                "user_id": user.get("user_id") if user else None,
+                "username": username,
+                "email": (user or {}).get("email") or "",
+                "is_admin": auth_mod.is_admin(user),
+            },
+        },
+    }), 201
+
+
+@app.patch("/api/v1/admin/users/<username>")
+def admin_update_user(username: str):
+    """修改用户：email（绑定邮箱）/ is_admin（管理员标记）。body 二选一或都要。
+    is_admin 变更仅超级管理员可操作；普通管理员只能改邮箱。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    data = request.get_json(silent=True) or {}
+    user = auth_mod.find_user_by_username(username)
+    if not user:
+        return jsonify({"detail": "用户不存在。", "request_id": rid}), 404
+
+    # 权限分级①：is_admin 变更仅超级管理员；管理员身份账号的改邮箱也仅超级管理员
+    if "is_admin" in data and not is_super_admin():
+        return jsonify({
+            "detail": "仅超级管理员（admin 账号）可以分配或取消管理员权限。",
+            "request_id": rid,
+        }), 403
+    if "email" in data:
+        _ensure_super_admin_for_admin_target(rid, user)
+
+    # 防锁死：不允许降级最后一个管理员（白名单邮箱管理员除外）
+    if "is_admin" in data and not data.get("is_admin"):
+        target_email = (user.get("email") or "").strip().lower()
+        if target_email not in auth_mod.ADMIN_EMAILS:
+            remaining = [
+                u
+                for u in auth_mod.list_users(page=1, size=10**9)
+                if u.get("is_admin") and u.get("username") != username
+            ]
+            if not remaining:
+                return jsonify({
+                    "detail": "不能取消最后一个管理员，系统将失去管理入口。",
+                    "request_id": rid,
+                }), 400
+
+    if "email" in data:
+        old_email = (user.get("email") or "").strip() or "（无）"
+        new_email = (data.get("email") or "").strip()
+        ok, err = auth_mod.admin_update_email(username, new_email, operator=_admin_user_id())
+        if not ok:
+            return jsonify({"detail": err, "request_id": rid}), 422
+        auth_mod.record_admin_op(
+            "email_update",
+            _admin_user_id(),
+            me.get("username") or "",
+            username,
+            detail=f"{username} 的绑定邮箱：{old_email} → {new_email}",
+            request_id=rid,
+        )
+
+    if "is_admin" in data:
+        target = bool(data.get("is_admin"))
+        ok, err = auth_mod.update_user_admin(username, target, operator=_admin_user_id())
+        if not ok:
+            return jsonify({"detail": err, "request_id": rid}), 400
+        auth_mod.record_admin_op(
+            "admin_grant" if target else "admin_revoke",
+            _admin_user_id(),
+            me.get("username") or "",
+            username,
+            detail=f"{'授予' if target else '取消'}管理员权限",
+            request_id=rid,
+        )
+
+    user = auth_mod.find_user_by_username(username)
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "message": f"用户 {username} 已更新。",
+            "user": {
+                "user_id": user.get("user_id"),
+                "username": username,
+                "email": (user or {}).get("email") or "",
+                "is_admin": auth_mod.is_admin(user),
+            },
+        },
+    }), 200
+
+
+@app.post("/api/v1/admin/users/<username>/reset-password")
+def admin_reset_password(username: str):
+    """管理员重置用户密码：生成临时密码并返回，用户旧 token 全部失效。
+    管理员身份账号仅超级管理员可重置。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    target = auth_mod.find_user_by_username(username)
+    if not target:
+        return jsonify({"detail": "用户不存在。", "request_id": rid}), 404
+    _ensure_super_admin_for_admin_target(rid, target)
+    ok, err, temp = auth_mod.admin_reset_password(username, operator=_admin_user_id())
+    if not ok:
+        return jsonify({"detail": err, "request_id": rid}), 404 if err == "用户不存在" else 422
+    auth_mod.record_admin_op(
+        "pwd_reset",
+        _admin_user_id(),
+        me.get("username") or "",
+        username,
+        detail=f"重置密码",
+        request_id=rid,
+    )
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "message": f"用户 {username} 的密码已重置。",
+            "temp_password": temp,  # 明文仅本次响应返回一次
+        },
+    }), 200
+
+
+@app.delete("/api/v1/admin/users/<username>")
+def admin_delete_user(username: str):
+    """删除用户（软删除，90 天内可恢复）。
+    权限：仅超级管理员（.env 白名单邮箱）可操作；需校验操作者管理员密码。
+    禁止删除自己。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    if (me.get("username") or "").lower() == username.lower():
+        return jsonify({"detail": "不能删除当前登录的管理员账号。", "request_id": rid}), 400
+
+    # 权限收紧：仅超级管理员可删除任何账号
+    if not auth_mod.is_super_admin(me):
+        return jsonify({
+            "detail": "仅超级管理员（admin 账号）可以删除账号。",
+            "request_id": rid,
+        }), 403
+
+    user = auth_mod.find_user_by_username(username)
+    if not user:
+        return jsonify({"detail": "用户不存在。", "request_id": rid}), 404
+
+    # 删除需验证操作者（超级管理员）密码
+    data = request.get_json(silent=True) or {}
+    admin_password = (data.get("admin_password") or "").strip()
+    if not admin_password:
+        return jsonify({"detail": "请填写管理员密码以确认删除操作。", "request_id": rid}), 422
+    if not auth_mod.authenticate_user(me.get("username") or "", admin_password):
+        return jsonify({"detail": "管理员密码验证失败，删除已取消。", "request_id": rid}), 403
+
+    # 防锁死：不允许删除最后一个管理员（白名单邮箱管理员除外）
+    target_email = (user.get("email") or "").strip().lower()
+    if auth_mod.is_admin(user) and target_email not in auth_mod.ADMIN_EMAILS:
+        remaining = [
+            u
+            for u in auth_mod.list_users(page=1, size=10**9)
+            if u.get("is_admin") and u.get("username") != username
+        ]
+        if not remaining:
+            return jsonify({
+                "detail": "不能删除最后一个管理员，系统将失去管理入口。",
+                "request_id": rid,
+            }), 400
+
+    # 记录删除审计（先留痕再删，用户名即使文件删除后仍可查）
+    auth_mod.record_admin_op(
+        "user_delete",
+        _admin_user_id(),
+        me.get("username") or "",
+        username,
+        detail=f"软删除用户 {username}（90 天内可恢复）",
+        request_id=rid,
+    )
+    if not auth_mod.delete_user(user["user_id"], operator=_admin_user_id()):
+        return jsonify({"detail": "删除失败，用户不存在。", "request_id": rid}), 404
+    logger.info("[admin] user soft-deleted username=%s by=%s", username, _admin_user_id())
+    return jsonify({"request_id": rid, "data": {"message": f"用户 {username} 已删除（90 天内可恢复）。"}}), 200
+
+
+@app.get("/api/v1/admin/users/deleted")
+def admin_list_deleted_users():
+    """列出可恢复的软删除账号（删除时间在 90 天恢复窗口内），按删除时间倒序。"""
+    rid = _request_id("admin")
+    items = auth_mod.list_deleted_users()
+    return jsonify({"request_id": rid, "data": {"items": items, "total": len(items)}})
+
+
+@app.post("/api/v1/admin/users/<username>/restore")
+def admin_restore_user(username: str):
+    """恢复软删除账号（仅删除后 90 天内）。恢复后需重新登录。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    ok, err = auth_mod.restore_user(username)
+    if not ok:
+        status = 404 if err == "用户不存在" else 400
+        return jsonify({"detail": err, "request_id": rid}), status
+    auth_mod.record_admin_op(
+        "user_restore",
+        _admin_user_id(),
+        me.get("username") or "",
+        username,
+        detail=f"恢复用户 {username}",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": {"message": f"用户 {username} 已恢复。"}}), 200
+
+
+@app.get("/api/v1/admin/ops")
+def admin_list_ops():
+    """管理操作记录（删除/创建/权限变更/重置密码 等审计）。op 精确过滤 + keyword 搜索操作者/目标。"""
+    rid = _request_id("admin")
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        size = min(200, max(1, int(request.args.get("size", "50"))))
+    except (TypeError, ValueError):
+        size = 50
+    op = (request.args.get("op") or "").strip()
+    keyword = (request.args.get("keyword") or "").strip()
+    items = auth_mod.list_admin_ops(op=op, keyword=keyword, page=page, size=size)
+    total = auth_mod.count_admin_ops(op=op, keyword=keyword)
+    return jsonify({
+        "request_id": rid,
+        "data": {"items": items, "total": total, "page": page, "size": size},
+    })
+
+
+@app.get("/api/v1/admin/ops/export")
+def admin_ops_export():
+    """审计导出：csv（Excel 兼容，utf-8-sig）或 json。遵循当前 op/keyword 过滤，导出全部结果不受分页限制。"""
+    rid = _request_id("admin")
+    op = (request.args.get("op") or "").strip()
+    keyword = (request.args.get("keyword") or "").strip()
+    fmt = (request.args.get("format") or "csv").strip().lower()
+    if fmt not in ("csv", "json"):
+        fmt = "csv"
+    items = auth_mod.list_admin_ops(op=op, keyword=keyword, page=1, size=10**9)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    if fmt == "json":
+        payload = json.dumps(
+            {"generated_at": datetime.now(timezone.utc).isoformat(), "items": items},
+            ensure_ascii=False,
+        )
+        return Response(
+            payload,
+            status=200,
+            mimetype="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="admin-ops-{stamp}.json"',
+                "Content-Type": "application/json; charset=utf-8",
+            },
+        )
+    # CSV：utf-8-sig BOM，Excel 双击直接打开不乱码
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["时间(UTC)", "操作类型", "操作者", "目标用户", "详情", "request_id"])
+    for rec in items:
+        writer.writerow([
+            rec.get("created_at", ""),
+            rec.get("op", ""),
+            rec.get("operator_name", ""),
+            rec.get("target_username", ""),
+            rec.get("detail", ""),
+            rec.get("request_id", ""),
+        ])
+    data = "\ufeff" + buf.getvalue()
+    return Response(
+        data,
+        status=200,
+        mimetype="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="admin-ops-{stamp}.csv"',
+            "Content-Type": "text/csv; charset=utf-8",
+        },
+    )
+
+
+@app.get("/api/v1/admin/users/<username>/usage")
+def admin_user_usage(username: str):
+    """用户使用次数（登录 / HR 分析）聚合统计。granularity=day|month|year&buckets=N。"""
+    rid = _request_id("admin")
+    user = auth_mod.find_user_by_username(username)
+    if not user:
+        return jsonify({"detail": "用户不存在。", "request_id": rid}), 404
+    granularity = (request.args.get("granularity") or "day").strip()
+    try:
+        buckets = max(1, min(int(request.args.get("buckets", "30")), 3660))
+    except (TypeError, ValueError):
+        buckets = 30
+    if granularity == "month":
+        buckets = min(buckets, 240)
+    elif granularity == "year":
+        buckets = min(buckets, 10)
+    result = auth_mod.get_user_usage(user["user_id"], granularity=granularity, buckets=buckets)
+    return jsonify({"request_id": rid, "data": {"username": username, **result}})
+
+
+@app.get("/api/v1/admin/users/usage-ranking")
+def admin_usage_ranking():
+    """全用户使用排行：按最近使用总量（登录+分析）降序，帮助发现高消耗账号。"""
+    rid = _request_id("admin")
+    try:
+        limit = max(1, min(int(request.args.get("limit", "20")), 200))
+    except (TypeError, ValueError):
+        limit = 20
+    items = auth_mod.usage_ranking(limit=limit)
+    return jsonify({"request_id": rid, "data": {"items": items, "total": len(items)}})
+
+
+@app.get("/api/v1/admin/users/frozen")
+def admin_list_frozen_users():
+    """冻结账号列表。"""
+    rid = _request_id("admin")
+    items = auth_mod.list_frozen_users()
+    return jsonify({"request_id": rid, "data": {"items": items, "total": len(items)}})
+
+
+@app.post("/api/v1/admin/users/<username>/freeze")
+def admin_freeze_user(username: str):
+    """管理员手动冻结用户（防异常消耗 token 等）。
+    body: {reason?}。冻结后拒绝登录/重置密码/自助解冻。管理员身份账号仅超级管理员可冻结。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    target = auth_mod.find_user_by_username(username)
+    if not target:
+        return jsonify({"detail": "用户不存在。", "request_id": rid}), 404
+    _ensure_super_admin_for_admin_target(rid, target)
+
+    data = request.get_json(silent=True) or {}
+    reason = (data.get("reason") or "").strip()
+    ok, err = auth_mod.freeze_user(username, operator=_admin_user_id(), reason=reason)
+    if not ok:
+        return jsonify({"detail": err, "request_id": rid}), 422
+    auth_mod.record_admin_op(
+        "user_freeze",
+        _admin_user_id(),
+        me.get("username") or "",
+        username,
+        detail=f"冻结用户 {username}" + (f"（原因:{reason}）" if reason else ""),
+        request_id=rid,
+    )
+    return jsonify({
+        "request_id": rid,
+        "data": {"message": f"账号 {username} 已冻结，该用户将无法登录与重置密码。"},
+    }), 200
+
+
+@app.post("/api/v1/admin/users/<username>/unfreeze")
+def admin_unfreeze_user(username: str):
+    """管理员兜底解冻（管理员身份账号仅超级管理员可解冻）。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    target = auth_mod.find_user_by_username(username)
+    if not target:
+        return jsonify({"detail": "解冻失败，用户不存在。", "request_id": rid}), 404
+    _ensure_super_admin_for_admin_target(rid, target)
+
+    ok = auth_mod.unfreeze_user(username, operator=f"admin:{_admin_user_id()}")
+    if not ok:
+        return jsonify({"detail": "解冻失败，用户不存在。", "request_id": rid}), 404
+    auth_mod.record_admin_op(
+        "user_unfreeze",
+        _admin_user_id(),
+        me.get("username") or "",
+        username,
+        detail=f"解冻用户 {username}",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": {"message": f"账号 {username} 已解冻。"}}), 200
 
 
 @app.post("/api/v1/ai/test")
@@ -835,6 +1883,33 @@ def _merge_employment_records(
     return _normalize_employment_records(merged)
 
 
+def _find_employment_overlaps(records: list[dict[str, str]]) -> list[dict[str, str | int]]:
+    """Find overlapping employment periods instead of silently merging them as gaps."""
+    current = datetime.now()
+    parsed = []
+    for record in records:
+        start = _month_index(record.get("start_date", ""), current)
+        end = _month_index(record.get("end_date", ""), current)
+        if start is None or end is None or start > end:
+            continue
+        parsed.append((start, end, record))
+    overlaps = []
+    for index, (start, end, record) in enumerate(parsed):
+        for other_start, other_end, other in parsed[index + 1:]:
+            overlap_start = max(start, other_start)
+            overlap_end = min(end, other_end)
+            if overlap_start <= overlap_end:
+                overlaps.append({
+                    "company_name": record.get("company_name", "未提供"),
+                    "other_company_name": other.get("company_name", "未提供"),
+                    "start_date": _month_label(overlap_start),
+                    "end_date": _month_label(overlap_end),
+                    "months": overlap_end - overlap_start + 1,
+                    "message": f"{record.get('company_name', '未提供')} 与 {other.get('company_name', '未提供')} 任职时间重叠 {_month_duration(overlap_end - overlap_start + 1)}，建议人工核实",
+                })
+    return overlaps
+
+
 def _calculate_employment_gaps(records: list[dict[str, str]], gap_note: str = "") -> str:
     """Calculate calendar-month gaps after merging overlapping employment periods."""
     if not records:
@@ -1060,6 +2135,25 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
     deduction = max(minimum, min(maximum, proposed))
     final_score = max(0, base_score - deduction)
 
+    # 硬门槛确定性扣分（A/B）：requirements_checklist 中的 not_met 为确定性不达标，
+    # 在 AI 美化扣分之后再次扣分并封顶——学历层级不达标封顶 D 级，其余硬门槛封顶 C 级。
+    raw_checklist = raw.get("requirements_checklist") if isinstance(raw.get("requirements_checklist"), list) else []
+    hard_gate_fails = 0
+    education_gate_fail = False
+    for item in raw_checklist:
+        if isinstance(item, dict) and item.get("status") == "not_met":
+            hard_gate_fails += 1
+            if str(item.get("category")) == "education":
+                education_gate_fail = True
+    hard_gate_deduction = 0
+    if hard_gate_fails:
+        hard_gate_deduction = min(30, 10 * hard_gate_fails)  # 每条确定性不达标扣 10 分，上限 30
+        final_score = max(0, final_score - hard_gate_deduction)
+        if education_gate_fail:
+            final_score = min(final_score, 59)   # 学历硬门槛不达标 → 淘汰级封顶
+        else:
+            final_score = min(final_score, 69)   # 年限/证书硬门槛不达标 → 储备观察封顶
+
     if final_score >= 90:
         grade = "S级（优质适配）"
     elif final_score >= 80:
@@ -1100,6 +2194,7 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         model_employment_records,
     )
     work_history["employment_records"] = employment_records
+    work_history["employment_overlaps"] = _find_employment_overlaps(employment_records)
     if employment_records:
         gap_note = _as_text(raw_work_history.get("employment_gap_notes"))
         work_history["employment_gaps"] = _calculate_employment_gaps(employment_records, gap_note)
@@ -1120,10 +2215,12 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
     summary = str(raw.get("summary") or "未提供综合判定说明。").strip()[:240]
     agent_trace = raw.get("agent_trace") if isinstance(raw.get("agent_trace"), dict) else None
     agent_validation = raw.get("agent_validation") if isinstance(raw.get("agent_validation"), dict) else None
+    requirements_checklist = raw_checklist if isinstance(raw_checklist, list) else []
     return {
         "candidate_name": _as_text(raw.get("candidate_name")),
         "final_score": final_score,
         "fit_grade": grade,
+        "hard_gate_deduction": hard_gate_deduction,
         "job_fit_score": base_score,
         "job_fit_percentage": base_score,
         "score_breakdown": score_breakdown,
@@ -1142,6 +2239,7 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         "weaknesses": _list_or_default(raw.get("weaknesses"), "简历未提供足够信息，无法确认关键短板。", 5),
         "risk_points": risk_points or ["未发现明显履历风险；关键事实仍建议在面试中核验。"],
         "role_specific_assessment": _list_or_default(raw.get("role_specific_assessment"), "当前岗位无额外专项判断。", 4),
+        "requirements_checklist": requirements_checklist,
         "deduction_reasons": _short_list(raw.get("deduction_reasons"), 3),
         "recruitment_recommendation": requested_recommendation,
         "fit_tag": requested_fit_tag,
@@ -1259,7 +2357,7 @@ def _run_hr_analysis(
     config_fingerprint = llm.model_config_fingerprint(ai_config)
     agent_fingerprint = _agent_config_fingerprint(agent_config)
     cache_key = (_HR_ANALYSIS_VERSION, user_id, resume_id, job_id, config_fingerprint, agent_fingerprint)
-    cached = _HR_ANALYSIS_CACHE.get(cache_key)
+    cached = _hr_cache_get(cache_key)
     if cached is not None:
         return cached
 
@@ -1286,12 +2384,13 @@ def _run_hr_analysis(
             job.get("content", ""),
             resume.get("content", ""),
         )
-        _HR_ANALYSIS_CACHE[cache_key] = result
+        _hr_cache_put(cache_key, result)
         logger.info(
             "HR analysis completed: candidates=1 input_chars=%s elapsed_ms=%s",
             len(job.get("content", "")) + len(resume.get("content", "")),
             int((time.perf_counter() - started) * 1000),
         )
+        auth_mod.record_user_usage(user_id, "analysis")  # 使用统计埋点
         return result
     except ValueError as e:
         logger.warning("HR model returned invalid JSON after retry: %s", e)
@@ -1323,7 +2422,7 @@ def _run_hr_batch_analysis(
             llm.model_config_fingerprint(ai_config),
             agent_fingerprint,
         )
-        cached = _HR_ANALYSIS_CACHE.get(cache_key)
+        cached = _hr_cache_get(cache_key)
         if cached is not None:
             results[resume_id] = cached
             continue
@@ -1401,9 +2500,11 @@ def _compare_candidates(analysis_results: list[dict], runtime_config: dict | Non
     prompt = f"""你是招聘委员会主席。对比以下 {len(items)} 位候选人：
 {candidates_json}
 
+重要：每位候选人的"final_score"是系统已计算好的最终得分，排名中每一行的 score 必须与该候选人的 final_score 完全一致，严禁重新打分或自由发挥分数。
+
 只输出 JSON：{{
   "ranking": [
-    {{"rank": 1, "name": "...", "score": 82, "difference": "与岗位最相关的差异点"}}
+    {{"rank": 1, "name": "...", "score": <该候选人 final_score 原样> , "difference": "与岗位最相关的差异点"}}
   ],
   "pairwise": [
     "张三 vs 李四：张三带过 15 人团队；李四技术更深但无管理经验"
@@ -1419,11 +2520,26 @@ def _compare_candidates(analysis_results: list[dict], runtime_config: dict | Non
     if isinstance(result, dict):
         ranking = result.get("ranking")
         if isinstance(ranking, list):
+            # 权威分数以系统计算的 final_score 为准（LLM 不得改分）：按姓名回填
+            score_by_name = {item["candidate_name"]: item["final_score"] for item in items}
             for item in ranking:
                 if isinstance(item, dict):
                     item.setdefault("name", "")
-                    item.setdefault("score", 0)
+                    matched = score_by_name.get(item.get("name"))
+                    if matched is None:
+                        # 姓名严格不匹配时尝试包含式匹配（去空白），仍找不到则按名字截断兜底
+                        norm_name = (item.get("name") or "").replace(" ", "").strip()
+                        for cand, score in score_by_name.items():
+                            cand_norm = cand.replace(" ", "").strip()
+                            if cand_norm and (cand_norm in norm_name or norm_name in cand_norm):
+                                matched = score
+                                break
+                    item["score"] = matched if matched is not None else 0
                     item.setdefault("difference", "")
+            # 排序以分数为准（降序），保证排名与报告头/候选人切换条一致
+            ranking.sort(key=lambda r: r.get("score") or 0, reverse=True)
+            for index, item in enumerate(ranking, start=1):
+                item["rank"] = index
             return {
                 "ranking": ranking,
                 "pairwise": result.get("pairwise", []),
