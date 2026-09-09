@@ -30,15 +30,19 @@ export default function AnalysisWorkbench() {
   const { setAnalysisResult } = useAnalysis();
   const session = useAnalysisSession();
   const [isDragging, setIsDragging] = useState(false);
+  // 记录挂载时是否已有旧结果：切回页面（此时 result 非空）不应再次强制跳转报告页，
+  // 只有「挂载时无结果、之后任务在本进程内完成」才自动跳转。
+  const hadResultOnMount = useRef(session.result);
 
   const files = session.files;
   const { jobDescription, webSearch } = session;
   const busy = session.running;
   const canAnalyze = files.length > 0 && jobDescription.trim().length >= 20 && !busy;
 
-  // 任务完成后跳转分析页（任务挂在模块级 store，组件重挂载后此 effect 依然会触发）
+  // 任务完成后跳转分析页。仅在「挂载时无结果、之后任务在本进程内完成」时触发：
+  // 从报告页切回工作台时挂载 snapshot 已有旧结果（hadResultOnMount 非空），不再弹回报告页。
   useEffect(() => {
-    if (!session.result) return;
+    if (!session.result || hadResultOnMount.current) return;
     setAnalysisResult(session.result);
     router.push('/dashboard');
     // eslint-disable-next-line react-hooks/exhaustive-deps
