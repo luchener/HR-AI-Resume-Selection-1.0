@@ -1,7 +1,7 @@
 # AI 简历智选 1.0
 
-![<img width="2866" height="1577" alt="image" src="https://github.com/user-attachments/assets/24d1c4a2-24ff-4041-bba3-222768e90bec" />
-)
+<img width="2866" height="1577" alt="image" src="https://github.com/user-attachments/assets/24d1c4a2-24ff-4041-bba3-222768e90bec" />
+
 
 AI 简历智选是面向公司内部招聘团队的多候选人筛选工作台。HR 可以在一个页面中提交 1 至 3 份 PDF/DOCX 简历和一份岗位描述，系统根据当前岗位要求动态建立量化标准，输出可追溯的匹配证据、短板、风险和招聘建议。
 
