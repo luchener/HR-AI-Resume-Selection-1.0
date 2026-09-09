@@ -152,6 +152,7 @@ AIResumeSmartSelection1.0-CloudDeploymentVersion/
 - 域名 A 记录指向服务器公网 IP；
 - 已开通 SMTP 服务并取得授权码；
 - 服务器可以访问 LLM API。
+- 
 GitHub 部署的正确姿势（三步）
 下载仓库后，用样例模板生成：
 cp apps/backend/.env.sample apps/backend/.env
