@@ -1,9 +1,10 @@
 'use client';
 
-import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   ArrowRightIcon,
+  BanIcon,
   BriefcaseBusinessIcon,
   CheckIcon,
   FileTextIcon,
@@ -17,12 +18,17 @@ import {
 import AppShell from './app-shell';
 import { useAnalysis } from './analysis-context';
 import { setDraft, startAnalysisTask, useAnalysisSession, type WorkbenchPhase } from '@/lib/analysis-session';
+import { fetchMyQuota, type MyQuota } from '@/lib/api/quota';
+import { QuotaModal, type QuotaModalData } from './quota-modal';
 
 const MAX_FILES = 3;
 const MAX_FILE_SIZE = 30 * 1024 * 1024;
 const ACCEPTED_EXTENSIONS = ['pdf', 'docx'];
 
 const formatSize = (size: number) => `${(size / 1024 / 1024).toFixed(size > 1024 * 1024 * 10 ? 0 : 1)} MB`;
+
+/** 配额按 UTC 自然日（与后端 record_user_usage 同口径） */
+const quotaTodayKey = () => new Date().toISOString().slice(0, 10);
 
 export default function AnalysisWorkbench() {
   const router = useRouter();
@@ -34,10 +40,73 @@ export default function AnalysisWorkbench() {
   // 只有「挂载时无结果、之后任务在本进程内完成」才自动跳转。
   const hadResultOnMount = useRef(session.result);
 
+  // ── 使用次数配额 ────────────────────────────────────────────
+  const [quota, setQuota] = useState<MyQuota | null>(null);
+  const [quotaModal, setQuotaModal] = useState<QuotaModalData | null>(null);
+  // 会话内去重：同一天同一类型弹窗只弹一次（用户主动点开不受限制）
+  const modalShownRef = useRef<Set<string>>(new Set());
+
+  /** 账号被管理员禁用分析：前端必须与后端拦截口径一致（403）。 */
+  const quotaDisabled = quota !== null && quota.analysis_enabled === false;
+
+  const openQuotaModal = useCallback((data: QuotaModalData, once = false) => {
+    const key = data.variant + ':' + quotaTodayKey();
+    if (once && modalShownRef.current.has(key)) return;
+    modalShownRef.current.add(key);
+    setQuotaModal(data);
+  }, []);
+
+  /** 被禁用时的弹窗内容（写明原因 + 处理方式，避免「点了没反应」）。 */
+  const disabledModalData = useCallback((): QuotaModalData => ({
+    variant: 'disabled',
+    title: '分析功能已被禁用',
+    detail: '该账号的分析功能已被管理员关闭，请联系管理员重新开启后再使用。',
+  }), []);
+
+  const refreshQuota = useCallback(async () => {
+    try {
+      const q = await fetchMyQuota();
+      setQuota(q);
+      if (q && q.analysis_enabled === false) {
+        // ① 被禁用：进入页面即弹一次，并写明原因
+        openQuotaModal(disabledModalData(), true);
+      } else if (q && q.unlimited === false && q.remaining === 0) {
+        // ② 今日已用完：进入页面即弹一次
+        openQuotaModal({
+          variant: 'exhausted',
+          title: '今日分析次数已用完',
+          limit: q.daily_limit,
+          used: q.used,
+          resets_at: q.resets_at,
+          detail: '如需更多次数，请联系管理员调整配额。',
+        }, true);
+      }
+    } catch { /* 配额读取失败不阻塞主流程 */ }
+  }, [openQuotaModal, disabledModalData]);
+
+  useEffect(() => { void refreshQuota(); }, [refreshQuota]);
+
+  // 页面重新获得焦点时刷新（管理员改完配额后用户无需重登）
+  useEffect(() => {
+    const onFocus = () => void refreshQuota();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [refreshQuota]);
+
+  // 分析失败（含后端 403/429）→ 同步成弹窗，让用户看到明确原因
+  useEffect(() => {
+    const message = session.error;
+    if (!message) return;
+    if (message.includes('已被禁用')) openQuotaModal(disabledModalData(), true);
+    else if (message.includes('已用完')) openQuotaModal({ variant: 'exhausted', title: '今日分析次数已用完', detail: message }, true);
+    else if (message.includes('本次需要') || message.includes('剩余')) openQuotaModal({ variant: 'insufficient', title: '本次分析次数不足', detail: message }, true);
+  }, [session.error, openQuotaModal, disabledModalData]);
+
   const files = session.files;
   const { jobDescription, webSearch } = session;
   const busy = session.running;
-  const canAnalyze = files.length > 0 && jobDescription.trim().length >= 20 && !busy;
+  // 被禁用时不允许发起分析（按钮仍可点击，用于弹出「为什么不能分析」）
+  const canAnalyze = files.length > 0 && jobDescription.trim().length >= 20 && !busy && !quotaDisabled;
 
   // 任务完成后跳转分析页。仅在「挂载时无结果、之后任务在本进程内完成」时触发：
   // 从报告页切回工作台时挂载 snapshot 已有旧结果（hadResultOnMount 非空），不再弹回报告页。
@@ -83,12 +152,31 @@ export default function AnalysisWorkbench() {
     setIsDragging(false);
     if (!busy) addFiles(Array.from(event.dataTransfer.files));
   };
-
   const handleAnalyze = () => {
+    if (busy) return;
+    // 配额前置校验（与后端口径一致；后端仍会二次强校验）
+    if (quota) {
+      if (quota.analysis_enabled === false) {
+        setDraft({ error: '该账号的分析功能已被禁用，请联系管理员。' });
+        openQuotaModal(disabledModalData());
+        return;
+      }
+      if (quota.unlimited === false && quota.remaining !== undefined) {
+        if (quota.remaining <= 0) {
+          openQuotaModal({ variant: 'exhausted', title: '今日分析次数已用完', limit: quota.daily_limit, used: quota.used, resets_at: quota.resets_at, detail: '如需更多次数，请联系管理员调整配额。' });
+          return;
+        }
+        if (files.length > quota.remaining) {
+          openQuotaModal({ variant: 'insufficient', title: '本次分析次数不足', need: files.length, remaining: quota.remaining, limit: quota.daily_limit, used: quota.used, resets_at: quota.resets_at, detail: '请减少所选简历份数，或明天 0 点重置后再试。' });
+          return;
+        }
+      }
+    }
     if (!canAnalyze) return;
     startAnalysisTask({ files, fileObjects: session.fileObjects, jobDescription, webSearch });
+    // 分析结束后刷新配额（成功则会 +1 次已用）
+    window.setTimeout(() => void refreshQuota(), 1500);
   };
-
   const phaseLabel =
     session.phase === 'uploading'
       ? '正在读取简历'
@@ -99,13 +187,51 @@ export default function AnalysisWorkbench() {
           : '开始分析';
 
   return (
-    <AppShell active="home">
+    <>
+      <AppShell active="home">
       <div className="mx-auto w-full max-w-[1480px] px-5 py-8 sm:px-8 lg:px-10 lg:py-10 xl:px-14">
         <header className="border-b border-line pb-6">
           <h1 className="text-2xl font-semibold text-ink sm:text-3xl">AI 简历智选 · 全维度量化人才评估</h1>
           <p className="mt-2 text-sm leading-6 text-sub">上传简历并粘贴岗位描述，生成可直接用于招聘决策的标准化分析报告</p>
         </header>
 
+        {/* 使用次数配额状态条 */}
+        {quota && quotaDisabled && (
+          <div role="alert" className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-bad-border bg-bad-soft px-5 py-3">
+            <span className="inline-flex items-center gap-2 text-sm font-medium text-bad">
+              <BanIcon className="size-4" />
+              当前账号的分析功能已被管理员禁用，无法发起分析。
+            </span>
+            <button
+              type="button"
+              onClick={() => openQuotaModal(disabledModalData())}
+              className="rounded-md border border-bad-border bg-white px-3 py-1.5 text-xs font-medium text-bad transition-colors hover:bg-bad-soft"
+            >
+              查看原因
+            </button>
+          </div>
+        )}
+        {quota && !quotaDisabled && quota.quota_enabled !== false && (
+          <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border border-line bg-white px-5 py-3">
+            <span className="text-xs font-semibold text-sub">今日额度</span>
+            {quota.unlimited ? (
+              <span className="inline-flex items-center gap-1.5 text-sm text-body">不限次数</span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-sm text-body">
+                <span className="font-semibold text-ink">{quota.used}</span>
+                <span className="text-sub">/</span>
+                <span className="text-ink">{quota.daily_limit}</span>
+                <span className="text-sub">次</span>
+              </span>
+            )}
+            <span className="text-xs text-sub">{quota.unlimited ? '管理员不受额度限制' : (quota.remaining !== undefined && quota.remaining <= 2 ? '今日剩余不多，请合理规划' : '每天 0 点重置' )}</span>
+            {quota.remaining !== undefined && quota.unlimited === false && (
+              <span className={"ml-auto inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs " + (quota.remaining === 0 ? 'border-bad-border bg-bad-soft text-bad' : quota.remaining <= 2 ? 'border-warn-border bg-warn-soft text-warn' : 'border-good-border bg-good-soft text-good-deep')}>
+                剩余 {quota.remaining} 次
+              </span>
+            )}
+          </div>
+        )}
         <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 rounded-md border border-line bg-white px-5 py-3">
           <span className="text-xs font-semibold text-sub">分析流程</span>
           {['解析硬性门槛', '比对履历证据', '生成招聘建议'].map((label, index) => (
@@ -227,7 +353,7 @@ export default function AnalysisWorkbench() {
               )}
               <button
                 type="button"
-                disabled={!canAnalyze}
+                disabled={!canAnalyze && !quotaDisabled}
                 onClick={handleAnalyze}
                 className="flex h-12 w-full items-center justify-center gap-2 rounded-md bg-brand-deep px-5 text-sm font-semibold text-white transition-colors hover:bg-brand-hover disabled:cursor-not-allowed disabled:bg-disabled-bg disabled:text-disabled-fg"
               >
@@ -247,6 +373,9 @@ export default function AnalysisWorkbench() {
         </div>
       </div>
     </AppShell>
+
+      <QuotaModal open={Boolean(quotaModal)} data={quotaModal} onClose={() => setQuotaModal(null)} onRefresh={() => { setQuotaModal(null); void refreshQuota(); }} />
+    </>
   );
 }
 

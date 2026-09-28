@@ -248,6 +248,12 @@ LOGIN_FAILURES_DIR = os.path.join(DATA_DIR, "login_failures")
 RATE_LIMITS_DIR = os.path.join(DATA_DIR, "rate_limits")
 ADMIN_OPS_DIR = os.path.join(DATA_DIR, "admin_ops")      # 管理操作审计（删除/创建/改权限/重置密码）
 USER_USAGE_DIR = os.path.join(DATA_DIR, "usage")          # 用户使用次数（按天聚合）
+ANNOUNCEMENTS_DIR = os.path.join(DATA_DIR, "announcements")
+ANNOUNCEMENT_READS_DIR = os.path.join(DATA_DIR, "announcement_reads")
+EMAIL_IMAGES_DIR = os.path.join(DATA_DIR, "email_images")
+EMAIL_LOGS_DIR = os.path.join(DATA_DIR, "email_logs")              # 邮件群发历史
+QUOTA_DIR = os.path.join(DATA_DIR, "quota")                             # 使用次数配额
+QUOTA_LIMITS_PATH = os.path.join(QUOTA_DIR, "limits.json")
 
 # 保留策略（天）：审计记录 / 用户使用统计明细，超过的天数在懒清理时移除
 ADMIN_OPS_RETENTION_DAYS = 180
@@ -279,6 +285,11 @@ for _d in (
     RATE_LIMITS_DIR,
     ADMIN_OPS_DIR,
     USER_USAGE_DIR,
+    ANNOUNCEMENTS_DIR,
+    ANNOUNCEMENT_READS_DIR,
+    EMAIL_IMAGES_DIR,
+    EMAIL_LOGS_DIR,
+    QUOTA_DIR,
     LOG_DIR,
 ):
     os.makedirs(_d, exist_ok=True)

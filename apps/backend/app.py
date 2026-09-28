@@ -35,6 +35,8 @@ from config import ALLOWED_ORIGINS
 import store
 import auth as auth_mod
 import mailer as mailer_mod
+import notifications as notify_mod
+import quota as quota_mod
 import llm
 import parser as doc_parser
 import screening_agent
@@ -183,7 +185,7 @@ def _ensure_super_admin_for_admin_target(rid: str, target_user: dict | None) -> 
         return False  # 普通用户，任何管理员可操作
     if is_super_admin():
         return False  # 超级管理员可操作
-    raise ApiError("该账号为管理员账号，仅超级管理员（admin）可操作。", 403, "admin")
+    raise ApiError("该账号为管理员账号，仅超级管理员（luchen）可操作。", 403, "admin")
 
 
 def _request_id(service: str = "api") -> str:
@@ -1051,7 +1053,7 @@ def admin_create_user():
     # 权限分级：仅超级管理员可创建管理员账号
     if is_admin_flag and not auth_mod.is_super_admin(me):
         return jsonify({
-            "detail": "仅超级管理员（admin 账号）可以创建管理员。",
+            "detail": "仅超级管理员（luchen 账号）可以创建管理员。",
             "request_id": rid,
         }), 403
 
@@ -1102,7 +1104,7 @@ def admin_update_user(username: str):
     # 权限分级①：is_admin 变更仅超级管理员；管理员身份账号的改邮箱也仅超级管理员
     if "is_admin" in data and not is_super_admin():
         return jsonify({
-            "detail": "仅超级管理员（admin 账号）可以分配或取消管理员权限。",
+            "detail": "仅超级管理员（luchen 账号）可以分配或取消管理员权限。",
             "request_id": rid,
         }), 403
     if "email" in data:
@@ -1210,7 +1212,7 @@ def admin_delete_user(username: str):
     # 权限收紧：仅超级管理员可删除任何账号
     if not auth_mod.is_super_admin(me):
         return jsonify({
-            "detail": "仅超级管理员（admin 账号）可以删除账号。",
+            "detail": "仅超级管理员（luchen 账号）可以删除账号。",
             "request_id": rid,
         }), 403
 
@@ -2614,6 +2616,11 @@ def hr_analysis():
     agent_config = _request_agent_config(data)
     user_id = _current_user_id()
 
+    # ── 使用次数配额校验（设计定稿 USAGE_QUOTA_DESIGN §4）
+    quota_err = quota_mod.check_analysis_quota(user_id, len(resume_ids))
+    if quota_err:
+        detail, status = quota_err
+        return _err(detail, status, "resumes")
     if stream:
         return Response(
             stream_with_context(_hr_analysis_stream(resume_ids, job_id, rid, user_id, ai_config, agent_config)),
@@ -3312,6 +3319,376 @@ def _build_fallback_markdown(processed: dict) -> str:
             out.append(f"- {a}")
 
     return "\n".join(out).rstrip() + "\n"
+
+
+
+# ════════════════════════════════════════════════════════════════════
+# 通知公告 + 邮件群发（功能设计定稿）
+# ════════════════════════════════════════════════════════════════════
+@app.get("/api/v1/admin/announcements")
+def admin_list_announcements():
+    """公告列表分页（固定窗口）。query: page / size。"""
+    rid = _request_id("admin")
+    page = request.args.get("page", 1)
+    size = request.args.get("size", 10)
+    data = notify_mod.list_announcements(page=page, size=size)
+    return jsonify({"request_id": rid, "data": data})
+
+
+@app.post("/api/v1/admin/announcements")
+def admin_create_announcement():
+    """创建公告。body: title/content/start_mode(now|at|delay)/delay_value/delay_unit/
+    duration_value/duration_unit/start_at(ISO)。全员可见。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    data = request.get_json(silent=True) or {}
+    try:
+        rec = notify_mod.create_announcement(
+            title=data.get("title") or "",
+            content=data.get("content") or "",
+            start_mode=data.get("start_mode") or "now",
+            delay_value=data.get("delay_value"),
+            delay_unit=data.get("delay_unit") or "minute",
+            duration_value=data.get("duration_value"),
+            duration_unit=data.get("duration_unit") or "day",
+            start_at=data.get("start_at") or "",
+            operator_id=_current_user_id(),
+            operator_name=me.get("username") or "",
+        )
+    except ValueError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 422
+    auth_mod.record_admin_op(
+        "announcement_create",
+        _current_user_id(),
+        me.get("username") or "",
+        "全员",
+        detail=f"创建公告《{rec.get('title')}》 投放 {rec.get('start_at')} ~ {rec.get('end_at')}",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": {"announcement_id": rec["announcement_id"]}}), 201
+
+
+@app.post("/api/v1/admin/announcements/<announcement_id>/cancel")
+def admin_cancel_announcement(announcement_id: str):
+    """撤回公告：立即停止弹出。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    rec = notify_mod.get_announcement(announcement_id)
+    if not rec:
+        return jsonify({"detail": "公告不存在。", "request_id": rid}), 404
+    if not notify_mod.cancel_announcement(announcement_id):
+        return jsonify({"detail": "撤回失败。", "request_id": rid}), 422
+    auth_mod.record_admin_op(
+        "announcement_cancel",
+        _current_user_id(),
+        me.get("username") or "",
+        "全员",
+        detail=f"撤回公告《{rec.get('title')}》",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": {"message": "公告已撤回，将不再弹出。"}})
+
+
+@app.delete("/api/v1/admin/announcements/<announcement_id>")
+def admin_delete_announcement(announcement_id: str):
+    """删除公告（软删除）：记录保留在磁盘，列表不再展示、用户端不再弹出。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    rec = notify_mod.get_announcement(announcement_id)
+    if not rec:
+        return jsonify({"detail": "公告不存在。", "request_id": rid}), 404
+    if not notify_mod.delete_announcement(announcement_id):
+        return jsonify({"detail": "公告删除失败。", "request_id": rid}), 500
+    auth_mod.record_admin_op(
+        "announcement_delete",
+        _current_user_id(),
+        me.get("username") or "",
+        "全员",
+        detail=f"删除公告《{rec.get('title') or ''}》",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": {"message": "公告已删除（删除记录已保留）。"}})
+
+
+
+@app.get("/api/v1/admin/quota/settings")
+def admin_quota_settings():
+    """使用配额：全局配置 + 逐账号明细（含今日已用/剩余/来源）。"""
+    rid = _request_id("admin")
+    return jsonify({"request_id": rid, "data": quota_mod.get_settings()})
+
+
+@app.put("/api/v1/admin/quota/settings")
+def admin_quota_update_settings():
+    """更新全局配额配置（quota_enabled / default_daily / email_notify_enabled）。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = quota_mod.update_settings(payload)
+    except ValueError as e:
+        return jsonify({"detail": str(e), "request_id": rid}), 422
+    auth_mod.record_admin_op(
+        "quota_setting_update",
+        _current_user_id(),
+        me.get("username") or "",
+        "全局",
+        detail=(
+            f"配额全局：enabled={data['quota_enabled']}, "
+            f"默认={data['default_daily'] if data['default_daily'] is not None else '不限'}, "
+            f"邮件={data['email_notify_enabled']}"
+        ),
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": data})
+
+
+@app.put("/api/v1/admin/quota/users/<username>")
+def admin_quota_set_user(username: str):
+    """设置单账号配额（daily_limit / analysis_enabled / email_notify）。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    user = auth_mod.find_user_by_username(username)
+    if not user:
+        return jsonify({"detail": "用户不存在。", "request_id": rid}), 404
+    payload = request.get_json(silent=True) or {}
+    try:
+        data = quota_mod.set_user_quota(username, payload)
+    except ValueError as e:
+        return jsonify({"detail": str(e), "request_id": rid}), 422
+    target = next((u for u in data["users"] if u["username"] == username), None)
+    if target:
+        bits = [
+            f"限额={target['daily_limit'] if target['daily_limit'] is not None else '不限'}",
+            f"分析启用={target['analysis_enabled']}",
+            f"邮件提醒={target['email_notify']}",
+        ]
+        auth_mod.record_admin_op(
+            "quota_user_update",
+            _current_user_id(),
+            me.get("username") or "",
+            username,
+            detail="设置配额：" + "，".join(bits),
+            request_id=rid,
+        )
+    return jsonify({"request_id": rid, "data": target or {"username": username}})
+
+
+@app.delete("/api/v1/admin/quota/users/<username>")
+def admin_quota_reset_user(username: str):
+    """恢复该账号为全局默认（移除自定义配置）。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    if not auth_mod.find_user_by_username(username):
+        return jsonify({"detail": "用户不存在。", "request_id": rid}), 404
+    if not quota_mod.reset_user_quota(username):
+        return jsonify({"detail": "该账号未单独配置配额。", "request_id": rid}), 404
+    auth_mod.record_admin_op(
+        "quota_user_reset",
+        _current_user_id(),
+        me.get("username") or "",
+        username,
+        detail=f"重置用户《{username}》配额为全局默认",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": {"message": "已恢复全局默认。"}})
+
+
+@app.get("/api/v1/quota/me")
+def quota_me():
+    """用户端自身配额视图（禁用优先于配额展示）。"""
+    rid = _request_id("quota")
+    return jsonify({"request_id": rid, "data": quota_mod.get_my_quota(_current_user_id())})
+
+
+@app.get("/api/v1/notifications/announcements")
+def user_announcements():
+    """当前用户可弹出的公告（投放期内且未关闭）。登录即可访问。"""
+    rid = _request_id("notify")
+    items = notify_mod.user_active_announcements(_current_user_id())
+    return jsonify({"request_id": rid, "data": {"items": items}})
+
+
+@app.post("/api/v1/notifications/announcements/<announcement_id>/dismiss")
+def user_dismiss_announcement(announcement_id: str):
+    """关闭公告（持久化，不再重复弹出）。"""
+    rid = _request_id("notify")
+    if not notify_mod.dismiss_announcement(_current_user_id(), announcement_id):
+        return jsonify({"detail": "公告不存在。", "request_id": rid}), 404
+    return jsonify({"request_id": rid, "data": {"message": "已关闭。"}})
+
+
+@app.post("/api/v1/admin/notifications/email/preview")
+def admin_email_preview():
+    """渲染邮件预览（纯渲染，不校验 SMTP；图片以 data URI 内联）。"""
+    rid = _request_id("admin")
+    data = request.get_json(silent=True) or {}
+
+    def _preview_src(image_id: str, width: int) -> str:
+        uri = notify_mod.image_data_uri(image_id)
+        return uri or ""
+
+    try:
+        html = notify_mod.render_preview_email(data, image_src=_preview_src)
+    except ValueError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 422
+    return jsonify({"request_id": rid, "data": {"html": html}})
+
+
+@app.get("/api/v1/admin/notifications/email/image/<image_id>/data")
+def admin_email_image_data(image_id: str):
+    """返回图片 data URI（编辑器缩略图 / 预览展示用）。"""
+    rid = _request_id("admin")
+    uri = notify_mod.image_data_uri(image_id)
+    if not uri:
+        return jsonify({"detail": "图片不存在。", "request_id": rid}), 404
+    return jsonify({"request_id": rid, "data": {"data_uri": uri}})
+
+
+@app.get("/api/v1/admin/notifications/email/images")
+def admin_list_email_images():
+    """已上传邮件图片列表。"""
+    rid = _request_id("admin")
+    items = notify_mod.list_email_images()
+    return jsonify({"request_id": rid, "data": {"items": items}})
+
+
+@app.post("/api/v1/admin/notifications/email/image")
+def admin_upload_email_image():
+    """上传邮件图片（multipart file 字段；PNG/JPG/WebP ≤2MB）。"""
+    rid = _request_id("admin")
+    file = request.files.get("file")
+    if file is None:
+        return jsonify({"detail": "缺少上传文件（字段名 file）。", "request_id": rid}), 422
+    raw = file.read()
+    try:
+        meta = notify_mod.save_email_image(raw, file.filename or "image.png")
+    except ValueError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 422
+    auth_mod.record_admin_op(
+        "email_image_upload",
+        _current_user_id(),
+        (g.get("auth_user") or {}).get("username") or "",
+        "图片",
+        detail=f"上传邮件图片 {meta.get('name')}（{meta.get('size')}B）",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": meta}), 201
+
+
+@app.delete("/api/v1/admin/notifications/email/image/<image_id>")
+def admin_delete_email_image(image_id: str):
+    """删除上传图片（正文引用一并移除，前端已确认）。"""
+    rid = _request_id("admin")
+    if not notify_mod.delete_email_image(image_id):
+        return jsonify({"detail": "图片不存在。", "request_id": rid}), 404
+    auth_mod.record_admin_op(
+        "email_image_delete",
+        _current_user_id(),
+        (g.get("auth_user") or {}).get("username") or "",
+        "图片",
+        detail=f"删除邮件图片 {image_id}",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": {"message": "图片已删除。"}})
+
+
+@app.get("/api/v1/admin/notifications/email/recipients")
+def admin_email_recipients():
+    """收件人信息：全部用户（含邮箱数）+ 可搜索用户列表（选人用）。"""
+    rid = _request_id("admin")
+    keyword = (request.args.get("keyword") or "").strip()
+    all_users = [u for u in auth_mod.list_users(keyword=keyword, page=1, size=10**9)]
+    with_email = [u for u in all_users if (u.get("email") or "").strip()]
+    items = [
+        {"user_id": u.get("user_id"), "username": u.get("username"), "email": u.get("email") or ""}
+        for u in all_users
+    ]
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "total_users": len(all_users),
+            "with_email": len(with_email),
+            "items": items,
+        },
+    })
+
+
+@app.post("/api/v1/admin/notifications/email")
+def admin_send_email():
+    """群发邮件。body: subject/template_id/body/images/items/accent/button/theme/
+    target(all|selected)/user_ids。SMTP 未配置 → 503。"""
+    rid = _request_id("admin")
+    me = g.get("auth_user") or {}
+    data = request.get_json(silent=True) or {}
+    if not config.smtp_configured():
+        return jsonify({
+            "detail": "邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD 后重启后端。",
+            "request_id": rid,
+        }), 503
+    try:
+        summary = notify_mod.send_notification_email(
+            subject=data.get("subject") or "",
+            template_id=data.get("template_id") or "notice",
+            body=data.get("body") or "",
+            images=data.get("images"),
+            items=data.get("items"),
+            accent=data.get("accent"),
+            button=data.get("button"),
+            theme=data.get("theme"),
+            target=data.get("target") or "all",
+            user_ids=data.get("user_ids"),
+            operator_id=_current_user_id(),
+            operator_name=me.get("username") or "",
+        )
+    except ValueError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 422
+    except RuntimeError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 503
+    auth_mod.record_admin_op(
+        "email_broadcast",
+        _current_user_id(),
+        me.get("username") or "",
+        summary.get("target") or "all",
+        detail=(
+            f"群发《{summary.get('subject')}》 目标{summary.get('target_count')}人 "
+            f"成功{summary.get('sent')} 跳过{summary.get('skipped')} 失败{summary.get('failed')}"
+        ),
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": summary})
+
+
+@app.get("/api/v1/admin/notifications/email/logs")
+def admin_email_logs():
+    """邮件发送历史（新 → 旧）。query: page / size（固定窗口分页）。"""
+    rid = _request_id("admin")
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        size = max(1, min(100, int(request.args.get("size", 10))))
+    except (TypeError, ValueError):
+        size = 10
+    all_logs = notify_mod.list_email_logs(limit=10 ** 6)
+    total = len(all_logs)
+    start = (page - 1) * size
+    return jsonify({
+        "request_id": rid,
+        "data": {"total": total, "items": all_logs[start:start + size]},
+    })
+
+
+@app.get("/api/v1/admin/notifications/email/logs/<log_id>")
+def admin_email_log_detail(log_id: str):
+    """历史邮件详情：记录 + 重新渲染的 HTML（历史查看）。"""
+    rid = _request_id("admin")
+    detail = notify_mod.get_email_log_detail(log_id)
+    if not detail:
+        return jsonify({"detail": "发送记录不存在。", "request_id": rid}), 404
+    return jsonify({"request_id": rid, "data": detail})
+
 
 
 if __name__ == "__main__":

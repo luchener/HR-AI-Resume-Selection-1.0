@@ -14,6 +14,7 @@ HTML 全部使用内联样式 + table 布局，兼容网易/QQ/Gmail 等主流�
 import logging
 import smtplib
 from email.header import Header
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
@@ -307,4 +308,63 @@ def _send(to_email: str, subject: str, plain_body: str, html_body: str) -> None:
             server.quit()
     except Exception:
         logger.exception("send email failed for %s", to_email)
+        raise
+
+
+
+def send_broadcast_email(
+    to_email: str,
+    subject: str,
+    plain_body: str,
+    html_body: str,
+    images=None,
+) -> None:
+    """
+    发送群发通知邮件（支持 CID 内联图片）。
+
+    images: [{image_id, content(bytes), mime_subtype}] —— 邮件 HTML 中以
+    <img src="cid:img-<image_id>"> 引用，此处附加同名 Content-ID 的 MIMEImage，
+    不依赖公网图床，QQ/网易/Outlook 等主流客户端均可显示。
+    结构：multipart/related → multipart/alternative(纯文本+HTML) + 内联图片。
+    """
+    if not config.smtp_configured():
+        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+
+    outer = MIMEMultipart("related")
+    outer["Subject"] = Header(subject, "utf-8")
+    outer["From"] = formataddr((str(Header("AI 简历智选", "utf-8")), config.SMTP_FROM))
+    outer["To"] = to_email
+
+    alt = MIMEMultipart("alternative")
+    alt.attach(MIMEText(plain_body, "plain", "utf-8"))
+    alt.attach(MIMEText(html_body, "html", "utf-8"))
+    outer.attach(alt)
+
+    for img in (images or []):
+        cid = "img-{0}".format(str(img.get("image_id") or ""))
+        if cid == "img-":
+            continue
+        payload = img.get("content")
+        if not payload:
+            continue
+        subtype = str(img.get("mime_subtype") or "png").lower()
+        part = MIMEImage(payload, _subtype=subtype)
+        part.add_header("Content-ID", "<{0}>".format(cid))
+        part.add_header("Content-Disposition", "inline", filename="{0}.{1}".format(cid, subtype))
+        outer.attach(part)
+
+    try:
+        if config.SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=15)
+        else:
+            server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=15)
+            server.starttls()
+        try:
+            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
+            server.sendmail(config.SMTP_FROM, [to_email], outer.as_string())
+            logger.info("broadcast email sent to %s (subject=%s)", to_email, subject)
+        finally:
+            server.quit()
+    except Exception:
+        logger.exception("broadcast email failed for %s", to_email)
         raise

@@ -181,3 +181,30 @@
   }
 }
 
+
+/* ── 公告弹窗动画：遮罩淡入 + 卡片上浮；退出反向。prefers-reduced-motion 降级 ── */
+@layer utilities {
+  .announcement-overlay { animation: announcement-fade-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .announcement-enter {
+    animation: announcement-in 200ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .announcement-leave {
+    animation: announcement-out 140ms ease-in both;
+  }
+}
+@keyframes announcement-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes announcement-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes announcement-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(8px) scale(0.98); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .announcement-overlay, .announcement-enter, .announcement-leave { animation: none !important; }
+}
+

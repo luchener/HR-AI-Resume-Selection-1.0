@@ -15,7 +15,9 @@ import {
   KeyRoundIcon,
   LoaderCircleIcon,
   LockKeyholeIcon,
+  GaugeIcon,
   MailIcon,
+  MegaphoneIcon,
   MoreHorizontalIcon,
   RefreshCwIcon,
   SaveIcon,
@@ -30,6 +32,9 @@ import AppShell from '@/components/workbench/app-shell';
 import { useAuth } from '@/components/workbench/auth-context';
 import AdminModal from '@/components/workbench/admin-modal';
 import ConfirmDialog from '@/components/workbench/confirm-dialog';
+import AdminAnnouncements from '@/components/workbench/admin-announcements';
+import AdminEmailBroadcast from '@/components/workbench/admin-email-broadcast';
+import AdminQuota from '@/components/workbench/admin-quota';
 import {
   adminCreateUser,
   adminDeleteUser,
@@ -63,9 +68,9 @@ import {
   type UserUsageData,
 } from '@/lib/api/auth-admin';
 
-type Tab = 'requests' | 'codes' | 'frozen' | 'users' | 'ops';
+type Tab = 'requests' | 'codes' | 'frozen' | 'users' | 'ops' | 'announcements' | 'emails' | 'quota';
 
-const TAB_KEYS: Tab[] = ['requests', 'codes', 'frozen', 'users', 'ops'];
+const TAB_KEYS: Tab[] = ['requests', 'codes', 'frozen', 'users', 'ops', 'announcements', 'emails'];
 
 /** 从 URL query 解析 Tab（非法值回落 'requests'）；仅在浏览器端可用 */
 function tabFromQuery(): Tab {
@@ -778,6 +783,15 @@ export default function AdminPage() {
             <button type="button" onClick={() => setTab('ops')} className={tabCls(tab === 'ops')}>
               <HistoryIcon className="size-4" /> 操作记录
             </button>
+            <button type="button" onClick={() => setTab('announcements')} className={tabCls(tab === 'announcements')}>
+              <MegaphoneIcon className="size-4" /> 公告通知
+            </button>
+            <button type="button" onClick={() => setTab('quota')} className={tabCls(tab === 'quota')}>
+              <GaugeIcon className="size-4" /> 使用配额
+            </button>
+            <button type="button" onClick={() => setTab('emails')} className={tabCls(tab === 'emails')}>
+              <MailIcon className="size-4" /> 邮件通知
+            </button>
           </div>
         </header>
 
@@ -1130,7 +1144,7 @@ export default function AdminPage() {
                       <span className="text-sm text-ink">设为管理员</span>
                     </label>
                   ) : (
-                    <p className="self-end pb-2 text-xs text-sub">仅超级管理员（admin）可创建管理员账号。</p>
+                    <p className="self-end pb-2 text-xs text-sub">仅超级管理员（luchen）可创建管理员账号。</p>
                   )}
                 </div>
                 <div className="mt-3 flex gap-2">
@@ -1280,6 +1294,11 @@ export default function AdminPage() {
                   admin_revoke: '取消管理员',
                   email_update: '修改邮箱',
                   pwd_reset: '重置密码',
+                  announcement_create: '发布公告',
+                  announcement_cancel: '撤回公告',
+                  email_image_upload: '上传邮件图片',
+                  email_image_delete: '删除邮件图片',
+                  email_broadcast: '群发邮件通知',
                 }).map(([value, label]) => (
                   <option key={value} value={value}>{label}</option>
                 ))}
@@ -1393,6 +1412,11 @@ export default function AdminPage() {
             </div>
           </div>
         )}
+
+        {tab === 'announcements' && <AdminAnnouncements />}
+
+        {tab === 'emails' && <AdminEmailBroadcast />}
+        {tab === 'quota' && <AdminQuota />}
 
         {/* 行内「…」菜单浮层 */}
         {rowMenu && (

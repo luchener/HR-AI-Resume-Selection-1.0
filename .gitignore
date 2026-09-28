@@ -136,3 +136,9 @@ apps/backend/test_vendor.py
 .impeccable/live/pending-manual-edits.json
 .impeccable/live/deferred-svelte-component-accepts.json
 .impeccable/live/*.png
+
+# 一次性部署脚本（含服务器路径，不进开源仓库）
+/deploy-*.sh
+/verify-*.sh
+*.tar.gz
+.last-*-backup.txt

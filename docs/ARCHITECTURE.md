@@ -88,6 +88,7 @@ AIResumeSmartSelection1.0-CloudDeploymentVersion/
 │   │   ├── config.py     # 配置（.env 读取）
 │   │   ├── mailer.py     # SMTP HTML/纯文本验证码邮件
 │   │   ├── reset_password_cli.py # 管理员重置无邮箱账号
+│   │   ├── admin_owner_cli.py # 管理员归属迁移（luchen 为超管 / 取消 admin 最高权限）
 │   │   ├── llm.py        # LLM 调用 + JSON 容错解析
 │   │   ├── parser.py     # PDF/DOCX 文本提取
 │   │   ├── prompts.py    # HR 分析 Prompt 模板
@@ -689,6 +690,8 @@ Content-Type: application/json
 > 管理员判定（`auth.is_admin`）= `.env` 白名单邮箱 `ADMIN_EMAILS` **或** 用户记录 `is_admin` 标记；两者任一为真即管理员（`/auth/me` 的 `is_admin` 与 `require_auth` 的 `/admin/*` 鉴权均按此综合判定）。
 >
 > **权限分级**：`.env` 白名单邮箱用户为**超级管理员**（`auth.is_super_admin`，`/auth/me` 返回 `is_super_admin`）。分配/取消管理员权限（PATCH `is_admin`、POST 创建管理员）仅超级管理员可操作；**管理员身份账号的敏感操作（冻结/解冻/删除/重置密码/改邮箱）同样仅超级管理员**（普通管理员对其操作 → 403）；普通管理员仍可对普通用户做全部管理动作。
+>
+> **管理员归属迁移（`admin_owner_cli.py`）**：超级管理员 = 绑定 `ADMIN_EMAILS` 白名单邮箱的账号（默认 `luchenstudio@163.com`）。把管理员换成 luchen、取消 admin 的最高权限：`python admin_owner_cli.py status` 先盘点 → `python admin_owner_cli.py rename admin luchen`（admin 账号改名为 luchen，仍绑定白名单邮箱即超管，admin 账号不复存在），或 `make-owner luchen` + `unbind-email admin` 两步；luchen 账号不存在时先 `python invite_cli.py gen --email luchenstudio@163.com` 注册。所有变更带文件锁 + `data/admin_ops/` 审计；`make-owner` / `unbind-email` 含「最后一个超管」防锁死保护。
 >
 > **使用统计埋点**：登录成功（`login` 路由）与 HR 筛选分析成功（`_run_hr_analysis` 返回前，含缓存命中）各记一次，按天聚合存 `data/usage/<user_id>.json`（UTC 日期键）。删除用户时同步清理统计文件。
 >

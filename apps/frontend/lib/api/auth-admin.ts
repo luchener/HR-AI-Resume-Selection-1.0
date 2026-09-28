@@ -379,6 +379,14 @@ export const ADMIN_OP_LABELS: Record<string, string> = {
   admin_revoke: '取消管理员',
   email_update: '修改邮箱',
   pwd_reset: '重置密码',
+  announcement_create: '发布公告',
+  announcement_cancel: '撤回公告',
+  email_image_upload: '上传邮件图片',
+  email_image_delete: '删除邮件图片',
+  email_broadcast: '群发邮件通知',
+  quota_setting_update: '更新配额全局设置',
+  quota_user_update: '更新账号配额',
+  quota_user_reset: '重置账号配额',
 };
 
 export async function fetchAdminOps(op: string = '', keyword: string = '', page: number = 1, size: number = 50): Promise<AdminOpList> {
