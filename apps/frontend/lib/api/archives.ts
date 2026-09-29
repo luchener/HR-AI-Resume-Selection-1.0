@@ -46,6 +46,8 @@ export interface ArchiveRecord {
   analysis_snapshot: Record<string, unknown>;
   /** 完整 hr_analysis，仅详情接口返回（用于重新生成报告快照）。 */
   analysis?: Record<string, unknown>;
+  /** 原文是否已过保留期自动清除（归档结果仍在，仅原文不可查看）。 */
+  source_purged?: boolean;
   status: 'active' | 'trashed';
   trashed_at: string | null;
   created_at: string;

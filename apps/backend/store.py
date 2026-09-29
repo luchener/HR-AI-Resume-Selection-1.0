@@ -12,6 +12,7 @@ JSON 文件存储。替代 SQLAlchemy + SQLite，零数据库依赖。
 """
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -21,6 +22,23 @@ from config import RESUMES_DIR, JOBS_DIR, ARCHIVES_DIR
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _atomic_replace(tmp: str, path: str) -> None:
+    """
+    os.replace 的 Windows 容错包装。
+
+    Windows 上杀毒软件 / 索引器会瞬间持有刚写出的 .tmp 或目标文件句柄，os.replace 随之抛
+    PermissionError(WinError 5)，在高频写接口上表现为随机 500（真实出现过：
+    /api/v1/archives/<id>/tags 返回 500、登录失败计数写不进去）。短暂退避重试即可绕开。
+    """
+    for _attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (_attempt + 1))
+    os.replace(tmp, path)  # 最后一次仍失败就抛出，让调用方看到真实错误
 
 
 def _write_json(path: str, data: dict) -> None:
@@ -33,7 +51,7 @@ def _write_json(path: str, data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    _atomic_replace(tmp, path)
 
 
 def _read_json(path: str) -> Optional[dict]:
@@ -369,6 +387,37 @@ def save_archive(
     _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), record)
     _update_archive_index(user_id, archive_id, "add_active")
     return archive_id
+
+
+def mark_archives_source_purged(resume_ids: set[str], *, dry_run: bool = False) -> int:
+    """
+    把引用了这些简历的归档标记为"原文已过保留期清除"（归档本身、打分与报告快照都保留）。
+
+    保留期清理专用：原文删掉了，但候选人的打分结果不能跟着消失。
+    dry_run=True 时只统计不写盘。
+    """
+    if not resume_ids:
+        return 0
+    index = _ensure_archive_index()
+    marked = 0
+    for _user_id, buckets in index.items():
+        if not isinstance(buckets, dict):
+            continue
+        for status_key in ("active", "trashed"):
+            for archive_id in list(buckets.get(status_key, [])):
+                path = os.path.join(ARCHIVES_DIR, f"{archive_id}.json")
+                record = _read_json(path)
+                if not record or record.get("source_purged"):
+                    continue
+                if record.get("resume_id") not in resume_ids:
+                    continue
+                marked += 1
+                if dry_run:
+                    continue
+                record["source_purged"] = True
+                record["source_purged_at"] = _now_iso()
+                _write_json(path, record)
+    return marked
 
 
 def find_existing_archive(user_id: str, resume_id: str, job_id: str) -> str | None:

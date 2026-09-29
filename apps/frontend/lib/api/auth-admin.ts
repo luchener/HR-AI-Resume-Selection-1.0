@@ -314,10 +314,11 @@ export async function adminDeleteUser(username: string, adminPassword: string): 
   return data.data?.message || '用户已删除。';
 }
 
-// ── 登录验证码（四位随机数字，一次性）───────────────────────────────
+// ── 登录验证码（四位随机数字图片，一次性）──────────────────────────
+// 后端只回图片，不回明文答案（答案仅有 sha256 落盘），前端不再自绘。
 export interface CaptchaData {
   captcha_id: string;
-  code: string;
+  image: string;
   ttl_seconds: number;
 }
 
@@ -325,7 +326,7 @@ export async function fetchCaptcha(): Promise<CaptchaData> {
   const response = await fetch(`${API_URL}/api/v1/auth/captcha`, { method: 'GET' });
   if (!response.ok) throw new Error((await errorDetail(response)) || '验证码获取失败。');
   const payload = (await response.json()) as { data?: CaptchaData };
-  if (!payload.data?.captcha_id) throw new Error('验证码服务未返回有效数据。');
+  if (!payload.data?.captcha_id || !payload.data?.image) throw new Error('验证码服务未返回有效数据。');
   return payload.data;
 }
 

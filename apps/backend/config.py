@@ -283,6 +283,22 @@ try:
     )
 except (TypeError, ValueError):
     USER_USAGE_RETENTION_DAYS = 365
+# ── 数据保留期（简历/JD 原文自动清理）────────────────────────────────────
+# 超过 RETENTION_DAYS 天的简历原文、岗位原文自动删除；
+# 归档打分结果不删，只标记 source_purged（原文已过保留期清除）。
+#
+# 默认开启：与系统内《隐私政策》"简历原文最长保留 30 天"的对外承诺一致。
+# 注意开启状态下的首次运行会一次性删除所有超期数据（不可逆）。不确定影响面时先看：
+#     python -m retention --dry-run
+# 需要临时关闭时在 apps/backend/.env 写 RETENTION_ENABLED=off。
+RETENTION_ENABLED = _strip_quotes(
+    os.getenv("RETENTION_ENABLED", "on")
+).lower() in {"1", "true", "yes", "on"}
+try:
+    RETENTION_DAYS = max(1, int(_strip_quotes(os.getenv("RETENTION_DAYS", "30"))))
+except (TypeError, ValueError):
+    RETENTION_DAYS = 30
+
 PRUNE_TOUCH_FILE = os.path.join(DATA_DIR, ".last_prune")  # 懒清理哨兵：每日最多清理一次
 for _d in (
     DATA_DIR,

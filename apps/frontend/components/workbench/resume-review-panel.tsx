@@ -187,7 +187,11 @@ export default function ResumeReviewPanel({
         setRawContent(content || '未提供原简历内容');
         setReview(markers);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : '简历重点标记加载失败。'))
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : '';
+        // 404 = 原文已删除或超过保留期被自动清除：给出人话，而不是裸的 HTTP 报错
+        setError(message.includes('404') ? '简历原文已不可用（可能已删除，或超过保留期已自动清除）。' : message || '简历重点标记加载失败。');
+      })
       .finally(() => setLoading(false));
   }
 

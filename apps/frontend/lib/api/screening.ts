@@ -75,6 +75,14 @@ export async function uploadJobDescription(description: string, resumeId: string
   if (!jobId) throw new Error('上传成功，但服务未返回岗位编号。'); return jobId;
 }
 
+/** 删除简历原文（归档会移入回收站，可恢复）。返回被移入回收站的归档数量。 */
+export async function deleteResumeSource(resumeId: string): Promise<{ archivedToTrash: number }> {
+  const response = await fetch(`${API_URL}/api/v1/resumes/${encodeURIComponent(resumeId)}`, { method: 'DELETE', headers: authHeaders() });
+  if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || `简历原文删除失败（HTTP ${response.status}）`); }
+  const payload = (await response.json()) as { data?: { archived_to_trash?: number } };
+  return { archivedToTrash: payload.data?.archived_to_trash ?? 0 };
+}
+
 export async function analyzeResumes(resumeIds: string | string[], jobId: string, signal?: AbortSignal): Promise<AnalysisResult> {
   const response = await fetch(`${API_URL}/api/v1/resumes/hr-analysis`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(Array.isArray(resumeIds) ? { resume_ids: resumeIds, job_id: jobId } : { resume_id: resumeIds, job_id: jobId }), signal });
   if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || `招聘分析失败（HTTP ${response.status}），请稍后重试。`); }

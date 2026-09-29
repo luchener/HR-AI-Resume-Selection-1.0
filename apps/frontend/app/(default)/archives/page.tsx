@@ -7,6 +7,7 @@ import {
   CheckCircle2Icon,
   DownloadIcon,
   FileSearch2Icon,
+  FileX2Icon,
   LoaderCircleIcon,
   SearchIcon,
   Trash2Icon,
@@ -28,6 +29,7 @@ import {
   updateArchiveTags,
   type ArchiveRecord,
 } from '@/lib/api/archives';
+import { deleteResumeSource } from '@/lib/api/screening';
 import { downloadReportImage } from '@/components/workbench/report-export';
 
 const FIT_TAG_STYLE: Record<string, string> = {
@@ -76,7 +78,7 @@ export default function ArchivesPage() {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   /** 待确认的高风险操作（P1-2：替代原生 window.confirm） */
-  const [pendingAction, setPendingAction] = useState<{ kind: 'trash' | 'delete' | 'empty'; record?: ArchiveRecord } | null>(null);
+  const [pendingAction, setPendingAction] = useState<{ kind: 'trash' | 'delete' | 'empty' | 'purge-source'; record?: ArchiveRecord } | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 详情抽屉：统一弹窗行为（Esc 关闭 / 焦点恢复 / Tab 陷阱）——P1-3
@@ -190,6 +192,25 @@ export default function ArchivesPage() {
       showNotice(`「${record.candidate_name}」已彻底删除`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '删除失败。');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  /** 删除简历原文：归档移入回收站（可恢复），原文本身永久删除。 */
+  const handleDeleteSource = async (record: ArchiveRecord) => {
+    setBusyId(record.archive_id);
+    try {
+      const { archivedToTrash } = await deleteResumeSource(record.resume_id);
+      await loadActive();
+      await loadTrash();
+      showNotice(
+        archivedToTrash > 0
+          ? `「${record.candidate_name}」的简历原文已删除，${archivedToTrash} 条归档已移入回收站`
+          : `「${record.candidate_name}」的简历原文已删除`,
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '删除原文失败。');
     } finally {
       setBusyId(null);
     }
@@ -382,6 +403,14 @@ export default function ArchivesPage() {
                           </span>
                           <span className="break-words">{a.candidate_name || '未提供'}</span>
                         </button>
+                        {a.source_purged && (
+                          <span
+                            className="mt-1 inline-block rounded bg-warn-soft px-1.5 py-0.5 text-[11px] text-warn"
+                            title="简历原文已超过保留期被自动清除，打分与报告仍可查看"
+                          >
+                            原文已清除
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-body">{a.category || a.job_title || '--'}</td>
                       <td className="px-4 py-3"><ScoreBadge score={a.final_score} /></td>
@@ -409,6 +438,15 @@ export default function ArchivesPage() {
                             className="relative rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-bad after:absolute after:-inset-1.5 after:content-[''] hover:bg-bad-soft disabled:opacity-50"
                           >
                             {busyId === a.archive_id ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : '移入回收站'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busyId === a.archive_id || a.source_purged}
+                            onClick={() => setPendingAction({ kind: 'purge-source', record: a })}
+                            title={a.source_purged ? '简历原文已过保留期清除' : '永久删除该简历原文（归档移入回收站，可恢复）'}
+                            className="relative inline-flex items-center gap-1 rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-bad after:absolute after:-inset-1.5 after:content-[''] hover:bg-bad-soft disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            <FileX2Icon className="size-3.5" /> 删除原文
                           </button>
                         </div>
                       </td>
@@ -625,23 +663,37 @@ export default function ArchivesPage() {
       <ConfirmDialog
         open={pendingAction !== null}
         danger={pendingAction?.kind !== 'trash'}
-        title={pendingAction?.kind === 'trash' ? '移入回收站' : pendingAction?.kind === 'delete' ? '彻底删除' : '清空回收站'}
+        title={
+          pendingAction?.kind === 'trash'
+            ? '移入回收站'
+            : pendingAction?.kind === 'delete'
+              ? '彻底删除'
+              : pendingAction?.kind === 'purge-source'
+                ? '删除简历原文'
+                : '清空回收站'
+        }
         message={
           pendingAction?.kind === 'trash' ? (
             <>将「<span className="font-medium text-ink">{pendingAction?.record?.candidate_name}</span>」移入回收站。可在回收站中恢复，不影响人才库统计。</>
           ) : pendingAction?.kind === 'delete' ? (
             <>将彻底删除「<span className="font-medium text-ink">{pendingAction?.record?.candidate_name}</span>」的归档记录与关联数据，<span className="font-medium text-bad">此操作不可恢复</span>。</>
+          ) : pendingAction?.kind === 'purge-source' ? (
+            <>
+              将从磁盘永久删除「<span className="font-medium text-ink">{pendingAction?.record?.candidate_name}</span>」的简历原文，
+              <span className="font-medium text-bad">此操作不可恢复</span>；引用了它的归档（含同一简历的其他岗位记录）会移入回收站，可在回收站恢复。
+            </>
           ) : (
             <>回收站内所有归档将被彻底删除，<span className="font-medium text-bad">此操作不可恢复</span>。</>
           )
         }
-        confirmLabel={pendingAction?.kind === 'trash' ? '移入回收站' : '确认删除'}
+        confirmLabel={pendingAction?.kind === 'trash' ? '移入回收站' : pendingAction?.kind === 'purge-source' ? '确认删除原文' : '确认删除'}
         busy={busyId !== null}
         onConfirm={() => {
           const action = pendingAction;
           setPendingAction(null);
           if (action?.kind === 'trash' && action.record) handleMoveToTrash(action.record);
           else if (action?.kind === 'delete' && action.record) handlePermanentDelete(action.record);
+          else if (action?.kind === 'purge-source' && action.record) handleDeleteSource(action.record);
           else if (action?.kind === 'empty') handleEmptyTrash();
         }}
         onCancel={() => setPendingAction(null)}

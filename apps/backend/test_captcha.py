@@ -2,7 +2,8 @@
 登录四位数字验证码 单元测试（test_captcha.py）
 
 覆盖：
-- GET /api/v1/auth/captcha 返回 captcha_id + 4 位数字 code（公开，免认证）
+- GET /api/v1/auth/captcha 返回 captcha_id + 验证码图片 data URI（公开，免认证）
+- 响应里**不得**出现明文答案（回归：防止再退回"把答案交给调用方"）
 - 登录必须携带验证码；缺失 → 422
 - 验证码错误 / 已使用（一次性）→ 422
 - 正确验证码可正常登录
@@ -13,6 +14,7 @@
 运行：python -m unittest test_captcha -v（需独立进程，与 test_* 套件隔离 DATA_DIR）
 """
 
+import base64
 import json
 import os
 import shutil
@@ -64,6 +66,14 @@ auth_module = auth
 backend.config.CAPTCHA_ENABLED = True
 
 
+def _fresh_captcha():
+    """直接向 auth 要一个验证码（拿得到明文答案），用于走完登录流程。
+
+    接口本身不再返回答案，所以测试必须从这里取——这正是本次修复要证明的事。
+    """
+    return auth_module.new_captcha()
+
+
 def _json(resp):
     try:
         return resp.get_json() or {}
@@ -103,14 +113,19 @@ class CaptchaTests(unittest.TestCase):
             headers={"Content-Type": "application/json"},
         )
 
-    def test_captcha_endpoint_public_and_shape(self):
+    def test_captcha_endpoint_returns_image_not_answer(self):
         r = self.client.get("/api/v1/auth/captcha")
         self.assertEqual(r.status_code, 200, _json(r))
         data = _json(r)["data"]
         self.assertTrue(data.get("captcha_id"))
-        code = data.get("code", "")
-        self.assertEqual(len(code), 4)
-        self.assertTrue(code.isdigit())
+        # 只回图片
+        image = data.get("image", "")
+        self.assertTrue(image.startswith("data:image/png;base64,"), image[:40])
+        self.assertTrue(base64.b64decode(image.split(",", 1)[1]).startswith(b"\x89PNG\r\n\x1a\n"))
+        # 明文答案绝不能出现在响应里（任何字段、任何嵌套）
+        self.assertNotIn("code", data)
+        self.assertNotIn("captcha_code", data)
+        self.assertNotIn('"code"', json.dumps(data, ensure_ascii=False))
 
     def test_login_requires_captcha(self):
         r = self._login()
@@ -125,24 +140,22 @@ class CaptchaTests(unittest.TestCase):
         self.assertIn("验证码", _json(r)["detail"])
 
     def test_captcha_is_one_time(self):
-        r = self.client.get("/api/v1/auth/captcha")
-        data = _json(r)["data"]
+        captcha_id, code = _fresh_captcha()
         # 正确验证码 → 登录成功
-        r = self._login(captcha_id=data["captcha_id"], captcha_code=data["code"])
+        r = self._login(captcha_id=captcha_id, captcha_code=code)
         self.assertEqual(r.status_code, 200, _json(r))
         self.assertIn("token", _json(r)["data"])
         # 同一验证码二次使用 → 拒绝（一次性销毁）
-        r = self._login(captcha_id=data["captcha_id"], captcha_code=data["code"])
+        r = self._login(captcha_id=captcha_id, captcha_code=code)
         self.assertEqual(r.status_code, 422, _json(r))
 
     def test_expired_captcha_rejected(self):
-        r = self.client.get("/api/v1/auth/captcha")
-        data = _json(r)["data"]
-        path = auth_module._captcha_file(data["captcha_id"])
+        captcha_id, code = _fresh_captcha()
+        path = auth_module._captcha_file(captcha_id)
         record = auth_module._read_json(path)
         record["expires_at"] = auth_module.time.time() - 10  # 已过期
         auth_module._write_json(path, record)
-        r = self._login(captcha_id=data["captcha_id"], captcha_code=data["code"])
+        r = self._login(captcha_id=captcha_id, captcha_code=code)
         self.assertEqual(r.status_code, 422, _json(r))
 
     def test_captcha_failure_does_not_trigger_freeze(self):

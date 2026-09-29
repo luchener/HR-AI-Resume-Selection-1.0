@@ -47,6 +47,7 @@ export default function LoginPage() {
 
   // 注册状态
   const [username, setUsername] = useState('');          // 注册用用户名
+  const [agreed, setAgreed] = useState(false);           // 是否已同意《用户协议》与《隐私政策》
   const [loginUsername, setLoginUsername] = useState(''); // 登录用用户名（与注册隔离）
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
@@ -146,6 +147,7 @@ export default function LoginPage() {
     setCodeSent(false);
     setInviteChecked(false);
     setInviteCode('');
+    setAgreed(false);
     if (next === 'login') {
       // 登录模式下注册字段归零；登录字段保留用户已输入内容
       setUsername('');
@@ -222,6 +224,10 @@ export default function LoginPage() {
     event.preventDefault();
     setError('');
     if (mode === 'register') {
+      if (!agreed) {
+        setError('请先阅读并同意《用户协议》与《隐私政策》。');
+        return;
+      }
       if (!inviteChecked) {
         setInviteError('请先验证邀请码。');
         return;
@@ -689,19 +695,24 @@ export default function LoginPage() {
                         onClick={loadCaptcha}
                         disabled={captcha === null && !captchaUnavailable}
                         aria-label={captcha ? '验证码，点击刷新' : '验证码加载中'}
-                        className={`h-12 w-32 shrink-0 rounded-md border text-center text-sm font-semibold transition-colors ${
-                          captcha
-                            ? 'border-line-soft bg-soft tracking-[0.6em] text-brand-deep hover:border-line-soft'
-                            : 'cursor-not-allowed border-line-soft bg-soft text-disabled-fg'
+                        className={`h-12 w-32 shrink-0 overflow-hidden rounded-md border border-line-soft transition-colors ${
+                          captcha ? 'bg-white hover:border-line' : 'cursor-not-allowed bg-soft text-xs font-semibold text-disabled-fg'
                         }`}
                         title="点击刷新验证码"
                       >
-                        {captcha ? captcha.code : captchaUnavailable ? '未启用' : '加载中'}
+                        {captcha ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={captcha.image} alt="验证码图片" className="size-full object-contain" />
+                        ) : captchaUnavailable ? (
+                          '未启用'
+                        ) : (
+                          '加载中'
+                        )}
                       </button>
                     </div>
                     <p id="captcha-hint" className="mt-1.5 flex items-center gap-1 text-xs text-sub">
                       <RefreshCwIcon className="size-3" />
-                      点击右侧数字可刷新，验证码一次性使用
+                      看不清？点击图片可换一张，验证码一次性使用
                     </p>
                   </div>
                 )}
@@ -720,9 +731,27 @@ export default function LoginPage() {
                   </div>
                 )}
 
+                {mode === 'register' && (
+                  <label className="flex items-start gap-2 rounded-md border border-line-soft bg-mist px-3 py-2.5 text-xs leading-5 text-sub">
+                    <input
+                      type="checkbox"
+                      checked={agreed}
+                      onChange={(event) => setAgreed(event.target.checked)}
+                      className="mt-0.5 size-4 shrink-0 accent-check-accent"
+                    />
+                    <span>
+                      我已阅读并同意
+                      <Link href="/terms" className="mx-1 font-medium text-brand hover:underline">《用户协议》</Link>
+                      与
+                      <Link href="/privacy" className="mx-1 font-medium text-brand hover:underline">《隐私政策》</Link>
+                      ，并承诺上传的简历均已取得候选人授权。
+                    </span>
+                  </label>
+                )}
+
                 <button
                   type="submit"
-                  disabled={busy}
+                  disabled={busy || (mode === 'register' && !agreed)}
                   className={btnPrimary}
                 >
                   {busy ? <LoaderCircleIcon className="size-4 animate-spin" /> : <ArrowRightIcon className="size-4" />}
@@ -750,6 +779,14 @@ export default function LoginPage() {
                   账号被冻结？自助解冻
                 </button>
               </p>
+              {mode === 'login' && (
+                <p className="mt-3 text-center text-xs leading-5 text-sub">
+                  登录即表示你已阅读并同意
+                  <Link href="/terms" className="mx-1 font-medium text-brand hover:underline">《用户协议》</Link>
+                  与
+                  <Link href="/privacy" className="mx-1 font-medium text-brand hover:underline">《隐私政策》</Link>
+                </p>
+              )}
             </>
           )}
 

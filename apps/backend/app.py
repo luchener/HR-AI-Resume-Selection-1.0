@@ -34,10 +34,12 @@ from flask import Flask, g, request, jsonify, Response, stream_with_context
 import config
 from config import ALLOWED_ORIGINS
 import store
+import captcha_image
 import auth as auth_mod
 import mailer as mailer_mod
 import notifications as notify_mod
 import quota as quota_mod
+import retention
 import llm
 import parser as doc_parser
 import screening_agent
@@ -154,6 +156,19 @@ def _preflight():
             req_headers = request.headers.get("Access-Control-Request-Headers")
             resp.headers["Access-Control-Allow-Headers"] = req_headers or "*"
         return resp
+
+
+@app.before_request
+def _retention_housekeeping():
+    """
+    数据保留期清理（懒执行）：进程内 5 分钟节流 + 磁盘哨兵每日一次。
+
+    未启用时只是一次布尔判断；任何异常都吞掉，绝不影响正常请求。
+    """
+    try:
+        retention.maybe_purge()
+    except Exception:  # 清理失败绝不能影响业务
+        logger.warning("retention purge skipped", exc_info=True)
 
 
 # ── 统一错误类型：替代 _do_improve 的 (jsonify, status) tuple 模式 ────
@@ -388,11 +403,13 @@ def email_code_send():
 @app.get("/api/v1/auth/captcha")
 def auth_captcha():
     """
-    获取登录验证码（四位随机数字）。返回 captcha_id + 明文 code，一次性使用。
+    获取登录验证码（四位随机数字）图片，一次性使用。
 
-    安全说明：答案随响应返回是前端自绘验证码的既有设计，本接口无法防自动化识别，
-    登录防爆破真正依赖的是账号冷却/冻结 + 每 IP 失败限流（见 login）。这里只做
-    每 IP 限流，防止该接口被当作"目录写入 + 全目录扫描"的放大器。
+    响应只回图片（data URI）与 captcha_id，**不回明文答案**：答案仅以 sha256 落盘，
+    校验时由后端比对。之前明文返回等于把验证码答案直接交给调用方，任何脚本读一个
+    字段就能过人机校验。
+
+    额外限流：每 IP 60 次/10 分钟，防止把该接口当作"写目录 + 全目录扫描"的放大器。
     """
     rid = auth_mod._request_id("auth")
     if not config.CAPTCHA_ENABLED:
@@ -405,7 +422,11 @@ def auth_captcha():
     captcha_id, code = auth_mod.new_captcha()
     return jsonify({
         "request_id": rid,
-        "data": {"captcha_id": captcha_id, "code": code, "ttl_seconds": auth_mod.CAPTCHA_TTL_SECONDS},
+        "data": {
+            "captcha_id": captcha_id,
+            "image": captcha_image.render_data_uri(code),
+            "ttl_seconds": auth_mod.CAPTCHA_TTL_SECONDS,
+        },
     })
 
 
@@ -1560,7 +1581,6 @@ def upload_resume():
     # 上传链路不调用 LLM，避免用户等待 60-90 秒；招聘分析阶段一次性处理。
     user_id = _current_user_id()
     resume_id = store.save_resume(content=text, processed={}, user_id=user_id)
-
     return jsonify(
         {
             "message": "Resume uploaded and processed as MD successfully",
@@ -1596,7 +1616,6 @@ def delete_resume(resume_id: str):
 
     if not store.delete_resume(resume_id, user_id=user_id):
         return _err("删除失败，请稍后重试。", 500, "resumes")
-
     logger.info(
         "resume deleted resume_id=%s user=%s trashed_archives=%s",
         resume_id,
@@ -3047,6 +3066,8 @@ def _archive_payload(rec: dict, include_analysis: bool = False) -> dict:
         "archive_id": rec["archive_id"],
         "resume_id": rec.get("resume_id"),
         "job_id": rec.get("job_id"),
+        # 原文是否已过保留期自动清除（归档结果仍在，仅原文不可查看）
+        "source_purged": bool(rec.get("source_purged")),
         "candidate_name": rec.get("candidate_name", ""),
         "final_score": rec.get("final_score", 0) or 0,
         "fit_tag": rec.get("fit_tag", ""),

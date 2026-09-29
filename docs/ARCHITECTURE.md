@@ -81,12 +81,14 @@
 ```
 AIResumeSmartSelection1.0-CloudDeploymentVersion/
 ├── apps/
-│   ├── backend/          # Flask 后端（15 个核心 py 文件）
+│   ├── backend/          # Flask 后端（18 个核心 py 文件）
 │   │   ├── auth.py       # JWT、用户、密码和验证码
 │   │   ├── app.py        # 路由 + 分析编排（含 HR 分析 + 简历重点标记）
 │   │   ├── store.py      # JSON 存储（原子写，含归档人才库）
 │   │   ├── config.py     # 配置（.env 读取）
 │   │   ├── mailer.py     # SMTP HTML/纯文本验证码邮件
+│   │   ├── notifications.py    # 公告 + 站内通知
+│   │   ├── captcha_image.py # 验证码图片渲染（纯标准库手写 PNG，零依赖）
 │   │   ├── reset_password_cli.py # 管理员重置无邮箱账号
 │   │   ├── admin_owner_cli.py # 管理员归属迁移（luchen 为超管 / 取消 admin 最高权限）
 │   │   ├── llm.py        # LLM 调用 + JSON 容错解析
@@ -95,6 +97,8 @@ AIResumeSmartSelection1.0-CloudDeploymentVersion/
 │   │   ├── resume_sanitize.py  # PDF 解析器 ASCII 垃圾过滤
 │   │   ├── resume_review.py    # 零 token 简历重点标记生成
 │   │   ├── screening_agent.py  # Agent 驱动招聘分析（需求抽取→经验匹配→报告→校验）
+│   │   ├── quota.py       # 每日使用次数配额（原子预占/回滚）
+│   │   ├── retention.py   # 数据保留期自动清理（简历/JD 原文，默认开启 30 天）
 │   │   ├── run.py        # 启动辅助
 │   │   └── test_*.py     # 单元测试（不进 Docker 镜像，见 .dockerignore）
 │   │   ├── .env          # 密钥（gitignore，不入库）
@@ -292,6 +296,8 @@ futures = {
 | `components/workbench/app-shell.tsx` | 侧边栏显示用户名 + 登出 + 修改密码（弹窗）；「账号管理」导航项仅 `is_admin` 可见；登出时清 sessionStorage 分析结果 |
 | `app/(default)/admin/page.tsx` | 账号管理页（仅 `is_admin`，页面守卫 + 403 兜底）：五 Tab —— 申请审批（同意/拒绝+理由/补发码邮件）、邀请码总览（筛选/手动生成/作废）、冻结账号（列表 + 来源/原因 + 兜底解冻）、用户管理（创建/改邮箱/管理员标记/冻结/解冻/重置密码/删除 + **「…」菜单收纳次要操作** + 使用统计/使用排行）、操作记录（类型/关键字过滤、20 条/页分页、**CSV/JSON 导出**）；**Tab 状态 URL 记忆**（`/admin?tab=users` 刷新不丢）；弹窗统一走 `AdminModal`（Esc 关闭/自动聚焦/锁滚动） |
 | `app/(default)/reset-password/page.tsx` | 忘记密码：两步（邮箱 → 验证码+新密码），「返回登录」为全宽边框按钮置于提交下方 |
+| `app/(default)/privacy/page.tsx` | 隐私政策（免登录公开页）：要点速览 + 目录 + 13 章节，内容源 `apps/frontend/lib/legal-content.ts` |
+| `app/(default)/terms/page.tsx` | 用户协议（免登录公开页）：含"上传数据的合法性保证"条款，把候选人授权责任明确落在上传方 |
 | `components/workbench/admin-modal.tsx` | 管理后台统一弹窗组件：Esc 关闭、打开自动聚焦首个输入框、背景滚动锁定、role=dialog + aria-modal；被 admin 页 4 个弹窗（使用统计/冻结/改邮箱/使用排行）复用 |
 
 ### 2.5 邮箱验证码机制（注册绑定 + 忘记密码重置，统一实现）
@@ -354,7 +360,8 @@ futures = {
 ```
 POST /api/v1/auth/login (body: {username, password, captcha_id, captcha_code})
   ├─ 第 0 层：四位数字验证码（前置，默认开启）
-  │    └─ GET /api/v1/auth/captcha 获取 {captcha_id, code, ttl_seconds}
+  │    └─ GET /api/v1/auth/captcha 获取 {captcha_id, image, ttl_seconds}
+  │         （image 是 data:image/png;base64, 的验证码图片；**响应不含明文答案**）
   │    ├─ 缺 captcha_id/code → 422「请填写验证码」
   │    ├─ 校验失败（verify_captcha：一次性 sha256 比对 + TTL 过期）→ 422「验证码错误或已过期」
   │    └─ 验证码失败**不记账**（不影响防爆破失败计数与 IP 预算）
@@ -373,12 +380,14 @@ POST /api/v1/auth/login (body: {username, password, captcha_id, captcha_code})
             失败 ≥6 次 LOGIN_FREEZE_THRESHOLD → 冻结账号）→ 冻结则 423，否则 401
 ```
 
-**验证码实现**（`auth.py`）：四位随机数字，一次性使用（`verify_captcha` 用后即删，防重放）；TTL 默认 300 秒（`CAPTCHA_TTL_SECONDS`，最小 30）；存储只写 `sha256(<id>:<code>)` 哈希到 `data/rate_limits/captcha_<id>.json`（磁盘不存明文码），`_purge_stale_captchas` 随获取惰性清理过期文件。`CAPTCHA_ENABLED=off` 时 `GET /api/v1/auth/captcha` 返回 404，登录跳过验证码校验——前端在验证码不可用时会自动降级为普通登录，不阻塞。
+**验证码实现**（`auth.py` + `captcha_image.py`）：四位随机数字，由后端渲染成 PNG 返回（`captcha_image.py` 手写 PNG 编码 + 5x7 点阵字形，逐字符随机旋转/抖动 + 干扰线与噪点，零第三方依赖），**答案不出现在响应里**；一次性使用（`verify_captcha` 用后即删，防重放）；TTL 默认 300 秒（`CAPTCHA_TTL_SECONDS`，最小 30）；存储只写 `sha256(<id>:<code>)` 哈希到 `data/rate_limits/captcha_<id>.json`（磁盘不存明文码），`_purge_stale_captchas` 随获取惰性清理过期文件。`CAPTCHA_ENABLED=off` 时 `GET /api/v1/auth/captcha` 返回 404，登录跳过验证码校验——前端在验证码不可用时会自动降级为普通登录，不阻塞。
 
 | 参数（config.py） | 默认 | 含义 |
 |---|---|---|
 | `CAPTCHA_ENABLED` | on | 登录前置四位数字验证码开关 |
 | `CAPTCHA_TTL_SECONDS` | 300 | 验证码有效期（秒，最小 30） |
+| `RETENTION_ENABLED` | on | 原文保留期自动清理开关（默认开，**仅 `ENV=production` 生效**；测试/本地环境永不自动删）|
+| `RETENTION_DAYS` | 30 | 简历/JD 原文保留天数（归档结果不受影响） |
 | `LOGIN_FAIL_LIMIT` | 3 | 连续失败达到该次数后进入冷却 |
 | `LOGIN_LOCK_MINUTES` | 5 | 冷却时长（分钟） |
 | `LOGIN_FREEZE_WINDOW_MINUTES` | 10 | 冻结统计滑动窗口（分钟） |
