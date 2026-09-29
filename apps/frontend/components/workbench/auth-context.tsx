@@ -109,9 +109,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     })();
   }, []);
 
-  const isOnLoginPage = pathname === '/login';
-  // 公开页面（未登录也可访问）：登录页 + 忘记密码重置页
-  const isPublicPage = isOnLoginPage || pathname === '/reset-password';
+  // 公开页面（未登录也可访问）：登录页、忘记密码重置页、法务文档（隐私政策 / 用户协议）。
+  // 法务页必须公开：注册前用户就要能读协议，否则点链接会被下面的守卫弹回登录页。
+  const publicPath = pathname || '';
+  const isOnLoginPage = publicPath === '/login';
+  const isPublicPage =
+    isOnLoginPage ||
+    publicPath === '/reset-password' ||
+    publicPath === '/privacy' ||
+    publicPath.startsWith('/privacy/') ||
+    publicPath === '/terms' ||
+    publicPath.startsWith('/terms/');
 
   useEffect(() => {
     if (!isHydrated) return;
