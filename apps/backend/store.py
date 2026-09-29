@@ -195,6 +195,30 @@ def archives_referencing(user_id: str, *, resume_id: str = "", job_id: str = "")
     return hits
 
 
+def name_by_resume_id() -> dict:
+    """
+    简历 ID → 归档中的候选人姓名。
+
+    归档姓名取自 AI 分析结果，比从原文首行猜测可靠：PDF 解析残留（pdfminer 字形码）
+    会污染原文开头，猜出来的"姓名"其实是乱码。一次遍历归档索引，供管理端列表使用。
+    """
+    index = _ensure_archive_index() or {}
+    names = {}
+    for bucket in index.values():
+        if not isinstance(bucket, dict):
+            continue
+        for status in ("active", "trashed"):
+            for archive_id in bucket.get(status) or []:
+                record = _read_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"))
+                if not record:
+                    continue
+                resume_id = str(record.get("resume_id") or "")
+                name = str(record.get("candidate_name") or "").strip()
+                if resume_id and name and resume_id not in names:
+                    names[resume_id] = name[:40]
+    return names
+
+
 def save_job(resume_id: str, content: str, processed: dict, user_id: str) -> str:
     """保存 JD，返回 job_id。"""
     job_id = str(uuid.uuid4())
