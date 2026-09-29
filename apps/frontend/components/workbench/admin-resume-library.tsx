@@ -364,7 +364,9 @@ export default function AdminResumeLibrary() {
                 <span className="rounded bg-mist px-2 py-0.5">第 {originalPage} / {detail.original.page_count || 1} 页</span>
               </div>
               <div
-                className="relative mt-2 select-none overflow-auto rounded-md border border-line-soft bg-mist p-2"
+                tabIndex={0}
+                aria-label="原始文件页面，可用鼠标滚轮或方向键上下查看"
+                className="relative mt-2 max-h-[55vh] select-none overflow-y-auto overscroll-contain rounded-md border border-line-soft bg-mist p-2 focus:outline-none focus:ring-1 focus:ring-line-soft"
                 onContextMenu={(event) => event.preventDefault()}
                 onDragStart={(event) => event.preventDefault()}
                 onCopy={(event) => event.preventDefault()}

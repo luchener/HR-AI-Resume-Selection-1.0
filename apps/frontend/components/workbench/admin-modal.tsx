@@ -42,7 +42,7 @@ export default function AdminModal({
         role="dialog"
         aria-modal="true"
         aria-label={typeof title === 'string' ? title : undefined}
-        className={`w-full ${maxWidth} rounded-md border border-line bg-white p-6 shadow-xl`}
+        className={`flex max-h-[calc(100vh-2rem)] w-full ${maxWidth} flex-col rounded-md border border-line bg-white p-6 shadow-xl`}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-3">
@@ -56,7 +56,8 @@ export default function AdminModal({
             <XCircleIcon className="size-5" />
           </button>
         </div>
-        <div className="mt-4">{children}</div>
+        {/* 内容区限高可滚动：长了（如原件整页图片）能滚，标题与按钮始终可见 */}
+        <div className="mt-4 min-h-0 flex-1 overflow-y-auto overscroll-contain">{children}</div>
         {footer && <div className="mt-5 flex justify-end gap-2">{footer}</div>}
       </div>
     </div>
