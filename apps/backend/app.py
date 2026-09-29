@@ -22,6 +22,7 @@ import os
 import queue
 import re
 import threading
+import ipaddress
 import time
 import uuid
 from collections import OrderedDict
@@ -78,6 +79,9 @@ auth_mod.init_auth(app)
 # after Flask has parsed the uploaded part.
 app.config["MAX_CONTENT_LENGTH"] = 32 * 1024 * 1024
 MAX_RESUME_FILE_SIZE = 30 * 1024 * 1024
+# 岗位批量上传硬上限：数量 + 单条长度（防"一条请求写出上千万文件"）
+MAX_JOB_DESCRIPTIONS_PER_REQUEST = 50
+MAX_JOB_DESCRIPTION_CHARS = 20000
 _HR_ANALYSIS_VERSION = "screening-agent-v1-employment-timeline"
 # HR 分析结果缓存：LRU（最近最久未用淘汰）+ TTL（24h），防内存无界增长，
 # 同时保留"同一简历+同一职位+同一模型配置重复分析不调 LLM"的省 token 语义。
@@ -270,7 +274,7 @@ def register():
     if not invite_code:
         return jsonify({"detail": "请填写邀请码。", "request_id": rid}), 422
     # 注册失败按 IP 计数（防撞库/爆破注册接口）
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip = _client_ip()
     user, error, field = auth_mod.register_with_email_code(
         username, password, email, code, invite_code
     )
@@ -312,7 +316,7 @@ def invite_code_send_email_code():
     if not invite_code:
         return jsonify({"detail": "请先填写并验证邀请码。", "request_id": rid}), 422
     # 每 IP 邀请码校验失败限流（10 次/小时）
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip = _client_ip()
     ip_hash = auth_mod._ip_hash(ip)
     limited, _retry = auth_mod._rate_limited(f"invite_check_ip:{ip_hash}", max_count=10, window=3600)
     if limited:
@@ -383,10 +387,21 @@ def email_code_send():
 
 @app.get("/api/v1/auth/captcha")
 def auth_captcha():
-    """获取登录验证码（四位随机数字）。返回 captcha_id + 明文 code，一次性使用。"""
+    """
+    获取登录验证码（四位随机数字）。返回 captcha_id + 明文 code，一次性使用。
+
+    安全说明：答案随响应返回是前端自绘验证码的既有设计，本接口无法防自动化识别，
+    登录防爆破真正依赖的是账号冷却/冻结 + 每 IP 失败限流（见 login）。这里只做
+    每 IP 限流，防止该接口被当作"目录写入 + 全目录扫描"的放大器。
+    """
     rid = auth_mod._request_id("auth")
     if not config.CAPTCHA_ENABLED:
         return jsonify({"detail": "验证码功能未启用。", "request_id": rid}), 404
+    limited, _retry = auth_mod._rate_limited(
+        f"captcha_ip:{auth_mod._ip_hash(_client_ip())}", max_count=60, window=600
+    )
+    if limited:
+        return jsonify({"detail": "请求过于频繁，请稍后再试。", "request_id": rid}), 429
     captcha_id, code = auth_mod.new_captcha()
     return jsonify({
         "request_id": rid,
@@ -403,7 +418,7 @@ def login():
     password = (data.get("password") or "").strip()
     if not username or not password:
         return jsonify({"detail": "请提供用户名和密码。", "request_id": rid}), 422
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip = _client_ip()
 
     # 0. 验证码校验（一次性）：失败不记账（不影响防爆破计数），直接拒绝
     if config.CAPTCHA_ENABLED:
@@ -488,7 +503,7 @@ def invite_code_check():
     invite_code = (data.get("invite_code") or "").strip()
     if not invite_code:
         return jsonify({"detail": "请填写邀请码。", "request_id": rid}), 422
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip = _client_ip()
     ip_hash = auth_mod._ip_hash(ip)
     limited, _retry = auth_mod._rate_limited(f"invite_check_ip:{ip_hash}", max_count=10, window=3600)
     if limited:
@@ -521,7 +536,7 @@ def invite_request():
     note = (data.get("note") or "").strip()
     if not email or not note:
         return jsonify({"detail": "请填写邮箱和申请理由。", "request_id": rid}), 422
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip = _client_ip()
     request_rec, error, status = auth_mod.create_invite_request(email, note, ip)
     if error:
         return jsonify({"detail": error, "request_id": rid}), status
@@ -590,7 +605,7 @@ def unfreeze():
     if action != "frozen":
         return jsonify({"detail": "该账号未被冻结，无需解冻。", "request_id": rid}), 409
 
-    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or ""
+    ip = _client_ip()
     ip_limited, _ip_retry = auth_mod.ip_login_rate_exceeded(ip)
     if ip_limited:
         return jsonify({"detail": "尝试次数过多，请稍后再试。", "request_id": rid}), 429
@@ -770,12 +785,36 @@ def reset_password_confirm():
 # ════════════════════════════════════════════════════════════════════
 
 def _client_ip() -> str:
-    """统一取客户端 IP（兼容反代 X-Forwarded-For）。"""
-    return (
-        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        or request.remote_addr
-        or ""
-    )
+    """
+    取真实客户端 IP。
+
+    反代（nginx 的 $proxy_add_x_forwarded_for）把客户端 IP **追加**到 X-Forwarded-For
+    右侧，客户端自带的伪造值留在左侧 —— 取第一个值等于把限流用的"IP"交给攻击者随意
+    伪造（换一个头就换一个身份，登录防爆破形同虚设）。因此按可信代理跳数
+    （config.TRUSTED_PROXY_COUNT，默认 1 = 一层 nginx）从右往左取，并且必须是合法
+    IP，畸形输入一律退回 request.remote_addr。
+    """
+    try:
+        trust = int(config.TRUSTED_PROXY_COUNT)
+    except (TypeError, ValueError):
+        trust = 1
+    trust = max(0, trust)
+
+    candidate = request.remote_addr or ""
+    if trust > 0:
+        parts = [
+            item.strip()
+            for item in request.headers.get("X-Forwarded-For", "").split(",")
+            if item.strip()
+        ]
+        if len(parts) >= trust:
+            candidate = parts[-trust] or candidate
+
+    try:
+        ipaddress.ip_address(candidate)
+    except ValueError:
+        return request.remote_addr or ""
+    return candidate
 
 
 def _mask_email(email: str) -> str:
@@ -1532,6 +1571,50 @@ def upload_resume():
     )
 
 
+@app.delete("/api/v1/resumes/<resume_id>")
+def delete_resume(resume_id: str):
+    """
+    删除简历原文（用户对自己数据的删除权）。
+
+    设计：引用该简历的**归档**一并移入回收站（可恢复），而不是直接物理删除 ——
+    误删后还能从回收站找回筛选结果；简历原文本身立即物理删除，不再留存。
+    """
+    rid = _request_id("resumes")
+    user_id = _current_user_id()
+
+    if not store.get_resume(resume_id, user_id=user_id):
+        return _err(
+            f"resume corresponding to resume_id: {resume_id} not found", 404, "resumes"
+        )
+
+    trashed = 0
+    for archive in store.archives_referencing(user_id, resume_id=resume_id):
+        if archive.get("status") != "active":
+            continue
+        if store.soft_delete_archive(archive["archive_id"], user_id):
+            trashed += 1
+
+    if not store.delete_resume(resume_id, user_id=user_id):
+        return _err("删除失败，请稍后重试。", 500, "resumes")
+
+    logger.info(
+        "resume deleted resume_id=%s user=%s trashed_archives=%s",
+        resume_id,
+        user_id,
+        trashed,
+    )
+    return jsonify(
+        {
+            "request_id": rid,
+            "data": {
+                "message": "简历已删除。",
+                "resume_id": resume_id,
+                "archived_to_trash": trashed,
+            },
+        }
+    )
+
+
 @app.post("/api/v1/resumes/improve")
 def improve_resume():
     """分析简历 vs JD。?stream=true 走 SSE 流式。"""
@@ -1576,6 +1659,13 @@ def _do_improve(
     if not job:
         raise ApiError(f"Job not found: {job_id}", 404, "resumes")
 
+    # 使用次数配额：improve 同样调用 LLM 消耗额度，必须与 hr-analysis 同一套校验 +
+    # 原子预占（此前该接口完全没有配额检查，等于一条绕过限额的旁路）。
+    quota_err = quota_mod.reserve_analysis(user_id, 1)
+    if quota_err:
+        detail, status = quota_err
+        raise ApiError(detail, status, "resumes")
+
     try:
         prompt = PROMPT_HR_JUDGE.format(
             Job_Description=job.get("content", ""),
@@ -1588,9 +1678,11 @@ def _do_improve(
             runtime_config=ai_config,
         )
     except ApiError:
+        quota_mod.release_analysis(user_id, 1)
         raise
     except Exception as e:
         logger.error(f"improve LLM call failed: {e}", exc_info=True)
+        quota_mod.release_analysis(user_id, 1)
         raise ApiError(f"Analysis failed: {e}", 500, "resumes") from e
 
     return {
@@ -1627,6 +1719,13 @@ def _improve_stream(
 
         yield sse({"status": "parsing", "message": "Preparing analysis with hr_judge prompt..."})
 
+        # 使用次数配额：与 hr-analysis 同源（原子预占；失败/中断回滚）
+        quota_err = quota_mod.reserve_analysis(user_id, 1)
+        if quota_err:
+            detail, _status = quota_err
+            yield sse({"status": "error", "message": detail})
+            return
+
         prompt = PROMPT_HR_JUDGE.format(
             Job_Description=job.get("content", ""),
             raw_resume=resume.get("content", ""),
@@ -1652,6 +1751,7 @@ def _improve_stream(
         yield sse({"status": "completed", "result": {"request_id": rid, "data": final_result}})
     except Exception as e:
         logger.error(f"improve stream failed: {e}", exc_info=True)
+        quota_mod.release_analysis(user_id, 1)  # 流式失败：回滚预占的次数
         yield sse({"status": "error", "message": str(e)})
 
 
@@ -2370,6 +2470,13 @@ def _run_hr_analysis(
     if not job:
         raise ApiError(f"Job not found: {job_id}", 404, "resumes")
 
+    # ── 使用次数配额：原子预占（检查 + 自增在同一把跨进程文件锁内完成）。
+    # 原来的"先检查、成功后再记账"在 gunicorn -w 4 + 多线程下可被并发击穿每日限额。
+    quota_err = quota_mod.reserve_analysis(user_id, 1)
+    if quota_err:
+        detail, status = quota_err
+        raise ApiError(detail, status, "resumes")
+
     started = time.perf_counter()
     try:
         raw = screening_agent.run_screening_agent(
@@ -2392,13 +2499,14 @@ def _run_hr_analysis(
             len(job.get("content", "")) + len(resume.get("content", "")),
             int((time.perf_counter() - started) * 1000),
         )
-        auth_mod.record_user_usage(user_id, "analysis")  # 使用统计埋点
         return result
     except ValueError as e:
         logger.warning("HR model returned invalid JSON after retry: %s", e)
+        quota_mod.release_analysis(user_id, 1)  # 分析失败：回滚预占的次数
         raise ApiError("AI 分析结果无法解析，请重试。", 502, "resumes") from e
     except Exception as e:
         logger.error(f"HR recruitment analysis failed: {e}", exc_info=True)
+        quota_mod.release_analysis(user_id, 1)  # 分析失败：回滚预占的次数
         raise ApiError("AI 分析服务暂时不可用，请检查模型配置后重试。", 503, "resumes") from e
 
 
@@ -2836,7 +2944,25 @@ def upload_job():
 
     if not resume_id:
         return _err("resume_id is required", 422, "jobs")
-    if not job_descriptions:
+    # 严格校验：必须是字符串数组。Python 中字符串本身也是可迭代对象，若直接 for 循环
+    # 会按"字符"切分 —— 一个 200 字符的字符串会变成 200 个岗位文件，32MB 请求体下
+    # 可写出千万级文件把磁盘写满。数量与单条长度同样必须封顶。
+    if not isinstance(job_descriptions, list):
+        return _err("job_descriptions must be an array of strings", 422, "jobs")
+    if len(job_descriptions) > MAX_JOB_DESCRIPTIONS_PER_REQUEST:
+        return _err(
+            f"一次最多上传 {MAX_JOB_DESCRIPTIONS_PER_REQUEST} 条岗位描述", 422, "jobs"
+        )
+    cleaned_descriptions: list[str] = []
+    for item in job_descriptions:
+        if not isinstance(item, str) or not item.strip():
+            return _err("每条岗位描述都必须是非空字符串", 422, "jobs")
+        if len(item.strip()) > MAX_JOB_DESCRIPTION_CHARS:
+            return _err(
+                f"单条岗位描述不能超过 {MAX_JOB_DESCRIPTION_CHARS} 字", 422, "jobs"
+            )
+        cleaned_descriptions.append(item.strip())
+    if not cleaned_descriptions:
         return _err("job_descriptions is required", 422, "jobs")
 
     # 校验 resume 存在（且属于当前用户）
@@ -2845,7 +2971,7 @@ def upload_job():
         return _err(f"resume corresponding to resume_id: {resume_id} not found", 400, "jobs")
 
     job_ids = []
-    for desc in job_descriptions:
+    for desc in cleaned_descriptions:
         processed = doc_parser.summarize_job_locally(desc)
         jid = store.save_job(resume_id=resume_id, content=desc, processed=processed, user_id=user_id)
         job_ids.append(jid)
@@ -2856,6 +2982,38 @@ def upload_job():
             "message": "data successfully processed",
             "request_id": rid,
             "job_id": job_ids,
+        }
+    )
+
+
+@app.delete("/api/v1/jobs/<job_id>")
+def delete_job(job_id: str):
+    """删除岗位描述原文；引用它的归档移入回收站（可恢复）。"""
+    rid = _request_id("jobs")
+    user_id = _current_user_id()
+
+    if not store.get_job(job_id, user_id=user_id):
+        return _err(f"job corresponding to job_id: {job_id} not found", 404, "jobs")
+
+    trashed = 0
+    for archive in store.archives_referencing(user_id, job_id=job_id):
+        if archive.get("status") != "active":
+            continue
+        if store.soft_delete_archive(archive["archive_id"], user_id):
+            trashed += 1
+
+    if not store.delete_job(job_id, user_id=user_id):
+        return _err("删除失败，请稍后重试。", 500, "jobs")
+
+    logger.info("job deleted job_id=%s user=%s trashed_archives=%s", job_id, user_id, trashed)
+    return jsonify(
+        {
+            "request_id": rid,
+            "data": {
+                "message": "岗位已删除。",
+                "job_id": job_id,
+                "archived_to_trash": trashed,
+            },
         }
     )
 

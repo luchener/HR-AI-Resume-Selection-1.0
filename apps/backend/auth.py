@@ -171,6 +171,9 @@ _LOCK = threading.RLock()
 # Unix 下按线程缓存锁文件 fd：同线程嵌套 flock 同一 fd 幂等（可重入），
 # 不同线程/进程各自独立 fd → 仍互斥。Windows 用 RLock（进程内可重入互斥）。
 _UNIX_LOCK_FDS: dict[int, Any] = {}
+# 同线程可重入深度：嵌套 with _UserLock() 只在最外层真正解锁。
+# 少了这个计数，内层退出会提前放锁（历史缺陷：邀请码在锁外被消费，可被并发复用）。
+_UNIX_LOCK_DEPTH: dict[int, int] = {}
 
 
 class _UserLock:
@@ -186,6 +189,7 @@ class _UserLock:
                 fd = open(_INDEX_LOCK, "w")
                 _UNIX_LOCK_FDS[tid] = fd
             fcntl.flock(fd, fcntl.LOCK_EX)
+            _UNIX_LOCK_DEPTH[tid] = _UNIX_LOCK_DEPTH.get(tid, 0) + 1
         else:
             _LOCK.acquire()
         return self
@@ -193,6 +197,12 @@ class _UserLock:
     def __exit__(self, *exc):
         if fcntl is not None:
             tid = threading.get_ident()
+            depth = _UNIX_LOCK_DEPTH.get(tid, 1) - 1
+            if depth > 0:
+                # 内层退出：把锁留给外层，稍后由最外层释放
+                _UNIX_LOCK_DEPTH[tid] = depth
+                return
+            _UNIX_LOCK_DEPTH[tid] = 0
             fd = _UNIX_LOCK_FDS.get(tid)
             if fd is not None:
                 try:
@@ -323,11 +333,24 @@ def _captcha_file(captcha_id: str) -> str:
     return os.path.join(RATE_LIMITS_DIR, f"captcha_{captcha_id}.json")
 
 
-def _purge_stale_captchas() -> None:
-    """清理已过期验证码文件（每次生成时顺手做，避免目录膨胀）。"""
+_CAPTCHA_PURGE_INTERVAL = 60.0
+_CAPTCHA_PURGE_LAST = 0.0
+
+
+def _purge_stale_captchas(force: bool = False) -> None:
+    """
+    清理已过期验证码文件（顺手做，避免目录膨胀）。
+
+    全目录扫描有成本：每次生成都全扫一遍，等于给"无限刷 captcha 接口"提供了一个
+    O(n) 放大器。这里节流到最多每 60 秒一次（多进程下各 worker 各自节流）。
+    """
+    global _CAPTCHA_PURGE_LAST
     if not os.path.isdir(RATE_LIMITS_DIR):
         return
     now = time.time()
+    if not force and now - _CAPTCHA_PURGE_LAST < _CAPTCHA_PURGE_INTERVAL:
+        return
+    _CAPTCHA_PURGE_LAST = now
     for filename in os.listdir(RATE_LIMITS_DIR):
         if not filename.startswith("captcha_"):
             continue
@@ -739,6 +762,12 @@ def admin_update_email(username: str, new_email: str, operator: str = "") -> tup
         if (user["email"]).strip().lower() in ADMIN_EMAILS:
             return False, "该用户由 .env 白名单配置为管理员，不可修改邮箱"
 
+    # 安全红线：白名单邮箱 = 超级管理员身份，禁止把任何账号改成白名单邮箱。
+    # 否则普通管理员可以先重置某个普通用户的密码，再把它的邮箱改成白名单地址，
+    # 从而把该账号升为超级管理员（越权提权链）。
+    if email_clean in ADMIN_EMAILS and email_clean != (user.get("email") or "").strip().lower():
+        return False, "该邮箱属于系统管理员白名单，不能分配给其他账号。"
+
     with _UserLock():
         existing = find_user_by_email(email_clean)
         if existing and existing.get("user_id") != user.get("user_id"):
@@ -959,21 +988,26 @@ def _usage_path(user_id: str) -> str:
     return os.path.join(USER_USAGE_DIR, f"{user_id}.json")
 
 
-def record_user_usage(user_id: str, action: str) -> None:
+def record_user_usage(user_id: str, action: str, count: int = 1) -> None:
     """
-    记录一次用户使用行为。action ∈ {"login", "analysis"}。
+    记录用户使用行为。action ∈ {"login", "analysis"}。
     存储格式：data/usage/<user_id>.json = {"2026-09-04": {"login": n, "analysis": m}, ...}
+
+    count 支持负数，用于回滚"预占"的次数（配额原子化）；计数下限为 0。
     """
     if not user_id:
         return
     action = (action or "").strip()
     if action not in ("login", "analysis"):
         return
+    step = int(count or 0)
+    if step == 0:
+        return
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with _UserLock():
         data = _read_json(_usage_path(user_id)) or {}
         entry = data.get(day) or {}
-        entry[action] = int(entry.get(action, 0)) + 1
+        entry[action] = max(0, int(entry.get(action, 0)) + step)
         data[day] = entry
         _write_json(_usage_path(user_id), data)
 
@@ -1584,7 +1618,18 @@ def register_with_email_code(
         if err:
             # 建号失败（用户名冲突等）：不消费邀请码，用户可换名重试
             return None, err, "username"
-        consume_invite_code(invite_code, user.get("user_id", ""), user.get("username", ""))
+        # 消费结果必须检查：消费失败而账号已建 → 同一个一次性邀请码还能再用一次。
+        # （锁内消费是原子的，这里失败说明邀请码状态异常，立即重试一次并告警。）
+        if not consume_invite_code(invite_code, user.get("user_id", ""), user.get("username", "")):
+            logger.error(
+                "[invite] consume failed after user created; retry once username=%s",
+                user.get("username", ""),
+            )
+            if not consume_invite_code(invite_code, user.get("user_id", ""), user.get("username", "")):
+                logger.error(
+                    "[invite] invite code still not consumed username=%s",
+                    user.get("username", ""),
+                )
     return user, None, None
 
 

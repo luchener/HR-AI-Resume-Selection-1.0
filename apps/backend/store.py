@@ -108,6 +108,53 @@ def get_resume_view(resume_id: str, user_id: str = "") -> Optional[dict]:
 
 # ── 岗位 ──────────────────────────────────────────────────────────────
 
+def delete_resume(resume_id: str, user_id: str = "") -> bool:
+    """
+    删除简历原文（含归属校验）。返回是否真的删除。
+    注意：调用方需自行处理引用该简历的归档（通常先移入回收站）。
+    """
+    path = os.path.join(RESUMES_DIR, f"{resume_id}.json")
+    record = _read_json(path)
+    if record is None:
+        return False
+    if user_id and record.get("user_id") != user_id:
+        return False
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+    return True
+
+
+def delete_job(job_id: str, user_id: str = "") -> bool:
+    """删除岗位描述原文（含归属校验）。返回是否真的删除。"""
+    path = os.path.join(JOBS_DIR, f"{job_id}.json")
+    record = _read_json(path)
+    if record is None:
+        return False
+    if user_id and record.get("user_id") != user_id:
+        return False
+    try:
+        os.remove(path)
+    except OSError:
+        return False
+    return True
+
+
+def archives_referencing(user_id: str, *, resume_id: str = "", job_id: str = "") -> list[dict]:
+    """列出引用了该简历/岗位的归档（含回收站状态），供级联处理。"""
+    if not resume_id and not job_id:
+        return []
+    hits = []
+    for status in ("active", "trashed"):
+        for record in list_archives(user_id, status=status):
+            if resume_id and record.get("resume_id") == resume_id:
+                hits.append(record)
+            elif job_id and record.get("job_id") == job_id:
+                hits.append(record)
+    return hits
+
+
 def save_job(resume_id: str, content: str, processed: dict, user_id: str) -> str:
     """保存 JD，返回 job_id。"""
     job_id = str(uuid.uuid4())

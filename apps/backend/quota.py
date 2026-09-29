@@ -131,9 +131,10 @@ def _analysis_enabled(username: str, data: dict | None = None) -> bool:
     return bool(cfg.get("analysis_enabled", True))
 
 
-def check_analysis_quota(user_id: str, requested_count: int):
+def check_analysis_quota(user_id: str, requested_count: int, notify: bool = True):
     """
     校验本次分析是否允许。返回 None=放行；否则 (detail, status_code)。
+    notify=False 时不发"额度用尽"邮件（调用方若持锁，必须在出锁后自行补发）。
     优先级：账号分析开关（独立于配额开关，管理员同样生效）→ 全局限额开关 → 生效限额
     （管理员默认不限，显式配置 daily_limit 后同样受限额约束）→ 额度校验。
     返回 None=放行；否则 (detail, status)；403=账号被禁用，429=额度不足。
@@ -162,11 +163,59 @@ def check_analysis_quota(user_id: str, requested_count: int):
     used = today_analysis_count(user_id)
     remaining = limit - used
     if remaining <= 0:
-        _notify_quota_exhausted(username, limit, used)
+        if notify:
+            _notify_quota_exhausted(username, limit, used)
         return (f"今日分析次数已用完（限额 {limit} 次），明天 0 点重置。", 429)
     if requested_count > remaining:
         return (f"本次需要 {requested_count} 次，今日剩余 {remaining} 次，请减少选择或明天再试。", 429)
     return None
+
+
+def reserve_analysis(user_id: str, requested_count: int = 1):
+    """
+    原子的「校验 + 预占次数」：读-校验-自增在同一个跨进程文件锁内完成。
+
+    为什么需要它：check_analysis_quota 是纯检查，真正计数发生在分析成功之后，
+    多进程（gunicorn -w 4）+ 多线程下并发请求可以同时通过检查，突破每日限额。
+    预占后计数立即可见，同一账号的并发请求无法再全部放行。
+
+    返回 None = 已预占（调用方负责在失败时 release_analysis 回滚）；
+    否则 (detail, status_code)，与 check_analysis_quota 一致。
+    """
+    import auth as auth_mod
+
+    requested = max(1, int(requested_count or 1))
+    err = None
+    notify_exhausted = False
+    with auth_mod._UserLock():
+        err = check_analysis_quota(user_id, requested, notify=False)
+        if err is None:
+            auth_mod.record_user_usage(user_id, "analysis", count=requested)
+        else:
+            notify_exhausted = err[1] == 429
+    if err is None:
+        return None
+
+    # 出锁之后再发通知：SMTP 最长 15 秒超时，绝不能占着跨进程用户锁
+    # （那把锁同时管注册、验证码消费、使用统计，占住等于全员排队）。
+    if notify_exhausted:
+        try:
+            user = auth_mod.find_user_by_id(user_id)
+            username = (user or {}).get("username") or ""
+            if username:
+                limit = _effective_limit(username, user, _load())
+                if limit is not None and limit >= 0:
+                    _notify_quota_exhausted(username, limit, today_analysis_count(user_id))
+        except Exception:
+            pass
+    return err
+
+
+def release_analysis(user_id: str, count: int = 1) -> None:
+    """回滚预占的次数（分析失败/中断时调用，保证用户不为失败的调用买单）。"""
+    import auth as auth_mod
+
+    auth_mod.record_user_usage(user_id, "analysis", count=-max(1, int(count or 1)))
 
 
 def _notify_quota_exhausted(username: str, limit: int, used: int) -> None:

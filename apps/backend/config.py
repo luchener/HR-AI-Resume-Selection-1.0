@@ -237,6 +237,17 @@ except (TypeError, ValueError):
     LOGIN_FREEZE_AUTO_UNFREEZE_HOURS = 0
 
 
+# 反代层数：nginx 等可信反代会把客户端 IP 追加到 X-Forwarded-For 的右侧。
+# 取值 = 可信代理跳数（默认 1 = 只经过一层 nginx）。客户端自带的伪造值留在左侧，
+# 绝不可信 —— 取错一侧等于把限流的"IP"交给攻击者控制。
+try:
+    TRUSTED_PROXY_COUNT = max(
+        0, int(_strip_quotes(os.getenv("TRUSTED_PROXY_COUNT", "1")))
+    )
+except (TypeError, ValueError):
+    TRUSTED_PROXY_COUNT = 1
+
+
 # 子目录（启动时自动创建）
 RESUMES_DIR = os.path.join(DATA_DIR, "resumes")
 JOBS_DIR = os.path.join(DATA_DIR, "jobs")
@@ -311,4 +322,12 @@ def check_production():
             raise SystemExit(
                 "[config] ENV=production 时 JWT_SECRET_KEY 必须改成随机字符串。\n"
                 "生成：python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
+        # ADMIN_EMAILS 决定超级管理员：默认值写在公开仓库源码里，照默认部署等于自带
+        # 一个公开的超管身份，因此生产环境必须显式配置（值与默认相同也算显式配置）。
+        if not _strip_quotes(os.getenv("ADMIN_EMAILS", "")).strip():
+            raise SystemExit(
+                "[config] ENV=production 时必须在 .env 中显式配置 ADMIN_EMAILS"
+                "（超级管理员白名单邮箱，逗号分隔）。\n"
+                "不能依赖源码默认值：默认值在公开仓库里，照默认部署的环境带有公开超管身份。"
             )

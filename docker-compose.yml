@@ -9,15 +9,21 @@ services:
     container_name: hr-ai-resume-selection-backend
     restart: unless-stopped
     env_file:
+      # required: true —— 缺少 .env 时【拒绝启动】，而不是静默回退到源码默认值。
+      # 源码里的默认 JWT/SESSION 密钥与默认 ADMIN_EMAILS 都是公开的：靠默认值启动
+      # 等于把签发 token 的密钥和超级管理员身份一起公开发布。
+      # 首次部署：cp apps/backend/.env.sample apps/backend/.env 并填好密钥。
       - path: apps/backend/.env
-        required: false  # 新 clone 时如未 cp .env.sample .env，仍可启动（ENV 默认 local）
+        required: true
     environment:
       # 注意：不要在 environment 里设置 ENV —— 它的优先级高于 env_file，
       # 会覆盖 .env 里的 ENV=production，导致生产模式校验失效。
       # ENV 与密钥均从 apps/backend/.env 读取；无 .env 时回退 local。
       LOG_DIR: /app/logs
     ports:
-      - "0.0.0.0:8000:8000"
+      # 后端只绑回环：前端容器通过 compose 内网 http://backend:8000 访问它，
+      # 外部流量一律经 nginx 反代进入，不需要把 API 直接暴露到公网。
+      - "127.0.0.1:8000:8000"
     volumes:
       - backend-data:/app/data
       - backend-logs:/app/logs
