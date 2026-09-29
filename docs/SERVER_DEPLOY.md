@@ -577,7 +577,7 @@ sudo dpkg-reconfigure -plow unattended-upgrades   # 选 Yes
 
 ```bash
 #!/bin/bash
-# 备份 JSON 存储 + .env + 上传过的简历原始文件
+# 备份 JSON 存储（简历原文/岗位/归档）+ .env
 # 推荐 cron: 0 3 * * * /opt/resume-matcher/scripts/backup.sh
 
 set -euo pipefail
