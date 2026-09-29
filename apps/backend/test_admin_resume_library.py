@@ -127,6 +127,7 @@ class AdminResumeLibraryTests(unittest.TestCase):
         self.assertEqual(ids, {self.r1, self.r2})
         for item in data["items"]:
             self.assertGreater(item["chars"], 0)
+            self.assertEqual(item["residue_lines_removed"], 0, "正常简历不得被剔除任何行")
             self.assertNotIn("content", item, "列表不得返回原文内容")
 
     def test_normal_admin_forbidden(self):
@@ -242,6 +243,83 @@ class AdminResumeLibraryTests(unittest.TestCase):
         self.assertEqual(report["resumes"], 1)
         data = self._get("/api/v1/admin/resumes", self.sup_token).get_json()["data"]
         self.assertEqual([i["resume_id"] for i in data["items"]], [self.r2])
+
+    # ── PDF 解析残留（pdfminer 字形码）：姓名与原文标注 ─────────────────
+    _JUNK = (
+        "Rj\n\nR\n\nQ\n\nH\n\nG q n P\n\nO\n\nP q a W\n\nY 2 9 W\n\n"
+        "w\n\nX\n\nF B\n\nN -0t6 0 G\n\nM\n\n名：王龙龙\n\n汪林军\n\n"
+        "男 | 年龄：31岁 |\n\n个人优势\n\n"
+    )
+
+    def _save_junk_resume(self, user_id):
+        return store.save_resume(self._JUNK, {}, user_id)
+
+    def _archive(self, user_id, resume_id, name="汪林军"):
+        return store.save_archive(
+            user_id=user_id,
+            resume_id=resume_id,
+            job_id=f"job-{resume_id[:8]}",
+            candidate_name=name,
+            final_score=40,
+            fit_tag="一般",
+            recruitment_recommendation="待定",
+            job_title="Java 开发",
+        )
+
+    def test_candidate_name_skips_pdf_junk_lines(self):
+        """残留操作符行不得被当成姓名；能认出被拆开的「名：王龙龙」。"""
+        self.assertEqual(
+            backend._candidate_name_from_resume({"content": self._JUNK, "processed": {}}, {}),
+            "王龙龙",
+        )
+
+    def test_candidate_name_never_returns_operator_line(self):
+        junk_only = "Rj\n\nR\n\nQ\n\nH\n\nG q n P\n\nO\n\nP q a W\n\nY 2 9 W\n"
+        self.assertEqual(
+            backend._candidate_name_from_resume({"content": junk_only, "processed": {}}, {}),
+            "未识别姓名",
+        )
+
+    def test_content_suspect_flags_junk_but_not_clean_text(self):
+        self.assertTrue(backend._content_suspect(self._JUNK))
+        self.assertFalse(backend._content_suspect("张三\nPython 后端工程师\n5 年经验\n负责订单系统"))
+        self.assertFalse(backend._content_suspect(""))
+
+    def test_list_prefers_archive_name_over_garbled_content(self):
+        """原文被解析残留污染时，列表用归档里的分析姓名，而不是乱码首行。"""
+        rid = self._save_junk_resume(self.u1["user_id"])
+        self._archive(self.u1["user_id"], rid)
+        items = self._get("/api/v1/admin/resumes?size=50", self.sup_token).get_json()["data"]["items"]
+        row = next(i for i in items if i["resume_id"] == rid)
+        self.assertEqual(row["candidate_name"], "汪林军")
+        self.assertTrue(row["content_suspect"])
+        self.assertGreater(row["residue_lines_removed"], 0, "列表应报告自动剔除的残留行数")
+
+    def test_list_never_shows_section_heading_as_name(self):
+        """清洗后章节标题成为首行时，列表不得把它显示为候选人姓名。"""
+        rid = store.save_resume(
+            "个人优势\n\n1.熟悉常见通讯协议及网络协议\n\n2.熟练掌握 Linux 命令及系统安装\n\n3.责任心强，适应出差",
+            {},
+            self.u1["user_id"],
+        )
+        items = self._get("/api/v1/admin/resumes?size=50", self.sup_token).get_json()["data"]["items"]
+        row = next(i for i in items if i["resume_id"] == rid)
+        self.assertEqual(row["candidate_name"], "未识别姓名")
+
+    def test_detail_flags_suspect_and_uses_archive_name(self):
+        rid = self._save_junk_resume(self.u2["user_id"])
+        self._archive(self.u2["user_id"], rid)
+        data = self._get(f"/api/v1/admin/resumes/{rid}", self.sup_token).get_json()["data"]
+        self.assertEqual(data["candidate_name"], "汪林军")
+        self.assertTrue(data["content_suspect"])
+        self.assertEqual(data["archived_count"], 1)
+        # 详情返回的正文必须已自动过滤：乱码行消失、中文完整
+        self.assertGreater(data["residue_lines_removed"], 0)
+        self.assertNotIn("Rj", data["content"])
+        self.assertNotIn("G q n P", data["content"])
+        self.assertIn("王龙龙", data["content"])
+        self.assertIn("个人优势", data["content"])
+        self.assertEqual(data["chars"], len(data["content"]))
 
 
 if __name__ == "__main__":

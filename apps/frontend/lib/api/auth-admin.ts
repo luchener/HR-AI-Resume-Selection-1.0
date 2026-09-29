@@ -506,6 +506,10 @@ export interface AdminResumeItem {
   chars: number;
   content_type: string;
   created_at: string;
+  /** 原文疑似含 PDF 解析残留（字体缺 Unicode 映射），用于管理端标注 */
+  content_suspect: boolean;
+  /** 展示时自动剔除的解析残留行数 */
+  residue_lines_removed: number;
 }
 
 export interface AdminResumeDetail {
@@ -519,6 +523,8 @@ export interface AdminResumeDetail {
   created_at: string;
   chars: number;
   archived_count: number;
+  content_suspect: boolean;
+  residue_lines_removed: number;
 }
 
 export interface AdminResumeList {
@@ -538,7 +544,11 @@ export async function fetchAdminResumes(keyword: string = '', userId: string = '
   if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '简历列表读取失败。'); }
   const payload = (await response.json()) as { data?: Partial<AdminResumeList> };
   return {
-    items: payload.data?.items || [],
+    items: (payload.data?.items || []).map((item) => ({
+      ...item,
+      content_suspect: Boolean(item.content_suspect),
+      residue_lines_removed: Number(item.residue_lines_removed) || 0,
+    })),
     total: payload.data?.total ?? 0,
     page: payload.data?.page ?? 1,
     size: payload.data?.size ?? size,
@@ -560,6 +570,8 @@ export async function fetchAdminResumeDetail(resumeId: string): Promise<AdminRes
     created_at: payload.data?.created_at || '',
     chars: payload.data?.chars ?? 0,
     archived_count: payload.data?.archived_count ?? 0,
+    content_suspect: Boolean(payload.data?.content_suspect),
+    residue_lines_removed: Number(payload.data?.residue_lines_removed) || 0,
   };
 }
 

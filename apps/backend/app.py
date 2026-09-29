@@ -1643,18 +1643,27 @@ def delete_resume(resume_id: str):
 
 
 # ── 用户简历库（仅超级管理员：查看全部用户上传的简历原文，只读、不可下载）──
-def _admin_resume_summary(record: dict) -> dict:
+def _admin_resume_summary(record: dict, name_map: dict = None) -> dict:
     """列表摘要：**不含 content**（原文只在详情接口按次返回，且每次留审计）。"""
     owner = auth_mod.find_user_by_id(record.get("user_id") or "") or {}
+    resume_id = record.get("resume_id")
+    # 归档里的姓名来自 AI 分析结果，比从（可能带 PDF 解析残留的）原文首行猜测可靠。
+    # 原文可能带 PDF 解析残留：展示与统计一律用清洗后文本，落盘数据不动。
+    content, residue_removed = resume_sanitize.strip_residue_lines(str(record.get("content") or ""))
+    candidate_name = str((name_map or {}).get(resume_id or "") or "").strip()
+    if not candidate_name:
+        candidate_name = _candidate_name_from_resume(dict(record, content=content), {})
     return {
-        "resume_id": record.get("resume_id"),
+        "resume_id": resume_id,
         "user_id": record.get("user_id") or "",
         "owner_username": owner.get("username") or "",
         "owner_email": owner.get("email") or "",
-        "candidate_name": _candidate_name_from_resume(record, {}) or "未命名",
-        "chars": len(str(record.get("content") or "")),
+        "candidate_name": candidate_name or "未命名",
+        "chars": len(content),
         "content_type": record.get("content_type") or "md",
         "created_at": record.get("created_at"),
+        "residue_lines_removed": residue_removed,
+        "content_suspect": _content_suspect(str(record.get("content") or "")),
     }
 
 
@@ -1681,7 +1690,8 @@ def admin_resume_library():
     records = store.list_resumes()
     if want_user:
         records = [r for r in records if (r.get("user_id") or "") == want_user]
-    summaries = [_admin_resume_summary(r) for r in records]
+    name_map = store.name_by_resume_id()
+    summaries = [_admin_resume_summary(r, name_map) for r in records]
     if keyword:
         summaries = [
             s
@@ -1718,13 +1728,21 @@ def admin_resume_detail(resume_id: str):
     if not record:
         return _err(f"resume corresponding to resume_id: {resume_id} not found", 404, "admin")
     owner = auth_mod.find_user_by_id(record.get("user_id") or "") or {}
-    content = str(record.get("content") or "")
+    raw_content = str(record.get("content") or "")
+    # 自动剔除 PDF 解析残留后再展示（不落盘改写）；审计记录原始字符数。
+    content, residue_removed = resume_sanitize.strip_residue_lines(raw_content)
+    archives = store.archives_referencing(record.get("user_id") or "", resume_id=resume_id)
+    archived_name = ""
+    for item in archives:
+        archived_name = str(item.get("candidate_name") or "").strip()
+        if archived_name:
+            break
     auth_mod.record_admin_op(
         op="resume_view",
         operator_id=me.get("user_id") or "",
         operator_name=me.get("username") or "",
         target_username=owner.get("username") or "",
-        detail=f"resume_id={resume_id} chars={len(content)}",
+        detail=f"resume_id={resume_id} chars={len(raw_content)} residue_removed={residue_removed}",
         request_id=rid,
     )
     return jsonify(
@@ -1735,14 +1753,14 @@ def admin_resume_detail(resume_id: str):
                 "user_id": record.get("user_id") or "",
                 "owner_username": owner.get("username") or "",
                 "owner_email": owner.get("email") or "",
-                "candidate_name": _candidate_name_from_resume(record, {}) or "未命名",
+                "candidate_name": archived_name or _candidate_name_from_resume(record, {}) or "未命名",
                 "content": content,
                 "content_type": record.get("content_type") or "md",
                 "created_at": record.get("created_at"),
                 "chars": len(content),
-                "archived_count": len(
-                    store.archives_referencing(record.get("user_id") or "", resume_id=resume_id)
-                ),
+                "archived_count": len(archives),
+                "residue_lines_removed": residue_removed,
+                "content_suspect": _content_suspect(raw_content),
             },
         }
     )
@@ -2619,7 +2637,9 @@ def _resume_studio_markdown(resume: dict) -> str:
     processed = resume.get("processed") or {}
     if any(processed.get(key) for key in ("personal_data", "experiences", "projects", "education", "skills")):
         return _normalize_md_for_a4cv(_build_fallback_markdown(processed))
-    return _normalize_md_for_a4cv(_build_raw_resume_markdown(resume.get("content", "")))
+    return _normalize_md_for_a4cv(
+        _build_raw_resume_markdown(resume_sanitize.sanitize_resume_content(resume.get("content", "")))
+    )
 
 
 def _run_hr_analysis(
@@ -2656,7 +2676,7 @@ def _run_hr_analysis(
     try:
         raw = screening_agent.run_screening_agent(
             job_content=job.get("content", ""),
-            resume_content=resume.get("content", ""),
+            resume_content=resume_sanitize.sanitize_resume_content(resume.get("content", "")),
             current_date=datetime.now().strftime("%Y-%m"),
             runtime_config=ai_config,
             precomputed_requirements=precomputed_requirements,
@@ -2833,6 +2853,46 @@ def _compare_candidates(analysis_results: list[dict], runtime_config: dict | Non
     return None
 
 
+_NAME_LABEL_RE = re.compile(r"(?:姓名|名字|Name)\s*[:：]\s*([A-Za-z\u4e00-\u9fff·]{2,20})")
+_NAME_SOLO_RE = re.compile(r"^名\s*[:：]\s*([\u4e00-\u9fff·]{2,4})$")
+# PDF 解析残留：pdfminer 遇到缺 ToUnicode 映射的中文 CID 字体时，会把字形码与内容流
+# 操作符当成文字吐出（如 "Rj" / "G q n P"），并与真文字混排。两处共用该判定：
+# 1) 猜姓名时跳过这类行；2) 管理端简历库据此对原文标注「解析异常」。
+_PDF_JUNK_LINE_RE = re.compile(r"^[A-Za-z]{1,3}(?:\s+[A-Za-z]{1,3}){0,3}$")
+
+
+# 简历章节标题：清洗掉 PDF 解析残留后，标题常变成首行，绝不能被当成候选人姓名。
+_RESUME_HEADINGS = frozenset({
+    "个人信息", "基本信息", "个人资料", "个人优势", "个人简介", "自我介绍", "自我评价", "自我描述",
+    "求职意向", "求职目标", "求职意愿", "联系方式", "联络方式", "个人评价", "简历", "个人简历",
+    "教育背景", "教育经历", "学历背景", "工作经历", "工作经验", "职业经历", "教育及工作经历",
+    "项目经历", "项目经验", "实习经历", "实习经验", "校园经历", "实践经历",
+    "专业技能", "技能特长", "技能清单", "工作技能", "语言能力", "计算机能力",
+    "荣誉奖项", "获奖情况", "所获奖励", "证书", "资格证书", "培训经历", "研究成果", "科研经历",
+    "兴趣爱好", "兴趣特长", "附加信息", "其他信息",
+})
+_HEADING_SUFFIXES = (
+    "优势", "简介", "评价", "描述", "意向", "目标", "信息", "资料", "经历", "经验", "背景",
+    "技能", "特长", "能力", "证书", "奖项", "荣誉", "爱好", "兴趣", "成果", "概述", "总结", "声明", "备注",
+)
+
+
+def _looks_like_heading(line: str) -> bool:
+    """章节标题不是姓名（如「个人优势」「工作经历」「核心技能」）。"""
+    if line in _RESUME_HEADINGS:
+        return True
+    return len(line) >= 3 and line.endswith(_HEADING_SUFFIXES)
+
+
+def _content_suspect(text: str) -> bool:
+    """粗判原文是否为 PDF 字形编码残留（真中文里混着操作符行）。"""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if len(lines) < 8:
+        return False
+    junk = sum(1 for line in lines if _PDF_JUNK_LINE_RE.match(line))
+    return junk >= 6 and junk / len(lines) >= 0.3
+
+
 def _candidate_name_from_resume(resume: dict, result: dict) -> str:
     analyzed_name = str(result.get("candidate_name") or "").strip()
     if analyzed_name and analyzed_name not in {"未提供", "未知", "无法识别"}:
@@ -2847,9 +2907,22 @@ def _candidate_name_from_resume(resume: dict, result: dict) -> str:
     if structured_name:
         return structured_name[:40]
 
-    for raw_line in str(resume.get("content") or "").splitlines()[:5]:
+    content = resume_sanitize.sanitize_resume_content(str(resume.get("content") or ""))
+    # 先认显式标签：PDF 解析残留会把「姓名」拆成「姓」「名」，所以额外认单字「名：」。
+    for raw_line in content.splitlines()[:60]:
+        matched = _NAME_LABEL_RE.search(raw_line) or _NAME_SOLO_RE.match(raw_line.strip())
+        if matched:
+            candidate = matched.group(1).strip()
+            if candidate:
+                return candidate[:40]
+
+    for raw_line in content.splitlines()[:5]:
         line = raw_line.strip().lstrip("#").strip()
         if not line or len(line) > 40:
+            continue
+        if _PDF_JUNK_LINE_RE.match(line):  # 跳过解析残留（如 "Rj" / "G q n P"）
+            continue
+        if _looks_like_heading(line):  # 章节标题不是姓名（如「个人优势」）
             continue
         if any(
             token in line
@@ -2859,7 +2932,9 @@ def _candidate_name_from_resume(resume: dict, result: dict) -> str:
             )
         ):
             continue
-        if sum(char.isdigit() for char in line) > 1:
+        if any(char.isdigit() for char in line):  # 姓名不含数字（挡 "1.熟悉…" 这类正文行）
+            continue
+        if line.endswith(("。", "，", "、", "！", "？", "；", ";", ".")):
             continue
         return line
     return "未识别姓名"
@@ -3286,7 +3361,7 @@ def create_archive():
     candidate_name = str(data.get("candidate_name") or hr.get("candidate_name") or "").strip()
     if not candidate_name:
         # 兜底：从简历原文第一行取姓名
-        first_line = (resume.get("content") or "").strip().splitlines()
+        first_line = resume_sanitize.sanitize_resume_content(resume.get("content") or "").strip().splitlines()
         candidate_name = first_line[0].strip() if first_line else "未提供"
 
     try:

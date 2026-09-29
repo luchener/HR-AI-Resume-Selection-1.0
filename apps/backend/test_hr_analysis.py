@@ -141,6 +141,43 @@ class HrAnalysisTests(unittest.TestCase):
         self.assertIn("AI 产品经理", call.call_args.kwargs["job_content"])
         self.assertIn("Python AI 产品经理", call.call_args.kwargs["resume_content"])
 
+    def test_hr_analysis_feeds_sanitized_resume_to_agent(self):
+        """AI 分析入口必须吃清洗后的文本：PDF 解析残留不得进入模型。"""
+        polluted = (
+            "Rj\n\nR\n\nQ\n\nG q n P\n\nY 2 9 W\n\n912 cf79 e4 c4712351 H\n\n"
+            "金利源\n\n男 | 年龄：32岁 |\n\n779221546@qq.com\n\n个人优势\n\n"
+            "1.熟悉常见通讯协议及网络协议，具备良好的技术理解能力\n\n"
+            "2.熟练掌握 Linux 命令及系统安装，具备服务器运维经验\n\n"
+            "3.熟悉办公设备操作，能够高效完成日常技术支持工作\n\n"
+            "4.具备较强的责任心与耐心，适应频繁出差的工作安排"
+        )
+        resume_id = backend.store.save_resume(polluted, {}, self.user_id)
+        job_id = backend.store.save_job(resume_id, "招聘运维工程师，要求 3 年经验", {}, self.user_id)
+
+        with patch.object(backend.screening_agent, "run_screening_agent", return_value={"candidate_name": "金利源", "final_score": 70}) as call:
+            response = self.client.post(
+                "/api/v1/resumes/hr-analysis",
+                json={"resume_id": resume_id, "job_id": job_id},
+                headers=self.headers,
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        sent = call.call_args.kwargs.get("resume_content") or ""
+        self.assertIn("金利源", sent, "真中文必须原样进入模型")
+        self.assertIn("个人优势", sent)
+        for junk in ("Rj", "G q n P", "Y 2 9 W", "912 cf79"):
+            self.assertNotIn(junk, sent, f"残留不得进入模型：{junk!r}")
+
+    def test_candidate_name_never_returns_section_heading(self):
+        """清洗掉解析残留后章节标题会变成首行，不得被当成姓名。"""
+        for heading in ("个人优势", "工作经历", "教育背景", "自我评价", "核心技能", "求职意向", "个人信息"):
+            content = heading + "\n\n1.熟悉常见通讯协议及网络协议\n\n2.熟练掌握 Linux 命令\n\n3.责任心强，适应出差"
+            self.assertEqual(
+                backend._candidate_name_from_resume({"content": content, "processed": {}}, {}),
+                "未识别姓名",
+                f"章节标题被当成姓名：{heading}",
+            )
+
     def test_normalized_report_protocol_contains_all_frontend_fields(self):
         raw = {
             "candidate_name": "协议候选人",

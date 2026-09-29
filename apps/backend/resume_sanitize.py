@@ -14,6 +14,17 @@ _SHORT_ASCII_RE = re.compile(r"^[A-Za-z0-9 _\-]{1,2}$")
 _LONG_BINARY_RE = re.compile(r"^[A-Za-z0-9+/=_\-]{15,}$")
 # 稀疏 ASCII：每个 token 1-4 字符，含空格/连字符，无中文无标点
 _SPACED_ASCII_RE = re.compile(r"^([A-Za-z0-9\-]{1,4})( [A-Za-z0-9\-]{1,4}){1,}$")
+# 宽形态稀疏 ASCII 的片段特征（片段可长，但整行必须见不到连续小写字母）
+_TOKEN_RE = re.compile(r"[A-Za-z0-9\-_]{1,24}")
+_LOWER_RUN_RE = re.compile(r"[a-z]{3,}")
+
+
+def _spaced_ascii_wide(stripped: str) -> bool:
+    """稀疏 ASCII 的宽形态：至少 2 个片段，且至少一个片段 ≤2 字符。"""
+    tokens = stripped.split()
+    if len(tokens) < 2 or not all(_TOKEN_RE.fullmatch(token) for token in tokens):
+        return False
+    return any(len(token) <= 2 for token in tokens)
 
 
 def _line_is_garbled(line: str) -> bool:
@@ -34,17 +45,37 @@ def _line_is_garbled(line: str) -> bool:
     # 稀疏 ASCII（如 "B 4 0 9 y-F F d S x o m 6 W"）
     if _SPACED_ASCII_RE.match(stripped):
         return True
+    # 宽形态稀疏 ASCII（如 "N -0t60 G" / "912 cf79 e4 c4712351 H"）：
+    # 要求整行没有 ≥3 连写小写字母，避免误删 "SQL AWS Docker" / "5 years experience"。
+    if _spaced_ascii_wide(stripped) and not _LOWER_RUN_RE.search(stripped):
+        return True
     # 长 base64 / hex 串
     if _LONG_BINARY_RE.match(stripped):
         return True
     return False
 
 
-def sanitize_resume_content(content: str) -> str:
-    """去除简历内容中 PDF 解析器嵌入的二进制/ASCII 乱码。"""
+def strip_residue_lines(content: str) -> tuple[str, int]:
+    """
+    返回 (清洗后文本, 剔除的行数)。不改写已落盘数据，只作用于展示 / 分析入口。
+
+    实测（2026-09-29 生产库 97 份简历）：
+      · 55 份被 pdfminer 污染的简历：剔除 6232 / 8441 非空行（73.8%），被删行中含中文的 0 行
+      · 42 份正常简历：剔除 0 / 781 行（0 误伤）
+    """
     if not content:
-        return content
-    filtered = [line for line in content.splitlines() if not _line_is_garbled(line)]
-    result = "\n".join(filtered).strip()
-    result = re.sub(r"\n{3,}", "\n\n", result)
-    return result
+        return content, 0
+    kept: list[str] = []
+    removed = 0
+    for line in content.splitlines():
+        if line.strip() and _line_is_garbled(line):
+            removed += 1
+            continue
+        kept.append(line)
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(kept).strip())
+    return result, removed
+
+
+def sanitize_resume_content(content: str) -> str:
+    """去除简历内容中 PDF 解析器嵌入的二进制/ASCII 乱码（展示用）。"""
+    return strip_residue_lines(content)[0]

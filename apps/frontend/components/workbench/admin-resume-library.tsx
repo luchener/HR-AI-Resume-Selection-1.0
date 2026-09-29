@@ -209,6 +209,11 @@ export default function AdminResumeLibrary() {
                     <FileTextIcon className="size-4 text-sub" /> {item.candidate_name || '未命名候选人'}
                   </span>
                   <span className="mt-0.5 block text-xs text-sub">{item.content_type || '未知格式'}</span>
+                  {item.content_suspect && (
+                    <span className="mt-1 inline-flex items-center gap-1 rounded border border-warn-border bg-warn-panel px-1.5 py-0.5 text-[11px] leading-4 text-warn-ink-deep">
+                      <AlertTriangleIcon className="size-3" /> 解析异常
+                    </span>
+                  )}
                 </td>
                 <td className="px-4 py-3">
                   <span className="block font-medium text-ink">{item.owner_username || '--'}</span>
@@ -254,6 +259,16 @@ export default function AdminResumeLibrary() {
               <p className="mt-0.5">下方为后端解析后的原文文本，仅供审核查阅；本页面不提供下载、导出、另存或打印入口。</p>
             </div>
           </div>
+
+          {detail?.content_suspect && (
+            <div className="mt-2 flex items-start gap-2 rounded-md border border-warn-border bg-warn-panel px-3 py-2.5 text-xs leading-5 text-warn-ink-deep">
+              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
+              <div>
+                <p className="font-semibold">原文含 PDF 解析残留</p>
+                <p className="mt-0.5">该 PDF 的字体缺少 Unicode 映射，解析结果里混入了字形码与内容流操作符（如 Rj、G q n P）。下方正文已自动过滤 {detail.residue_lines_removed} 行解析残留，真文字完整保留；原始文本仍原样留存于存储中，本页不再展示。</p>
+              </div>
+            </div>
+          )}
 
           <div className="mt-3 grid grid-cols-1 gap-x-6 gap-y-1.5 text-xs text-sub sm:grid-cols-3">
             <p>候选人：<span className="text-ink">{detailTarget.candidate_name || '未命名候选人'}</span></p>
