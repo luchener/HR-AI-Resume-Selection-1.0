@@ -1,12 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangleIcon, EyeIcon, FileTextIcon, LoaderCircleIcon, RefreshCwIcon, SearchIcon, Trash2Icon } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AlertTriangleIcon, ChevronLeftIcon, ChevronRightIcon, EyeIcon, FileTextIcon, ImageIcon, LoaderCircleIcon, RefreshCwIcon, SearchIcon, Trash2Icon } from 'lucide-react';
 import AdminModal from './admin-modal';
 import ConfirmDialog from './confirm-dialog';
 import {
   deleteAdminResume,
   fetchAdminResumeDetail,
+  fetchAdminResumeOriginalPage,
   fetchAdminResumes,
   type AdminResumeDetail,
   type AdminResumeItem,
@@ -49,6 +50,14 @@ export default function AdminResumeLibrary() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
 
+  // 原件只读查看：文本原文 / 原始文件两个视图（图片逐页拉取，全部转 objectURL）
+  const [detailView, setDetailView] = useState<'text' | 'original'>('text');
+  const [originalPage, setOriginalPage] = useState(1);
+  const [originalPages, setOriginalPages] = useState<Record<number, string>>({});
+  const [originalLoading, setOriginalLoading] = useState(false);
+  const [originalError, setOriginalError] = useState('');
+  const pageUrlsRef = useRef<string[]>([]);
+
   const [pendingDelete, setPendingDelete] = useState<AdminResumeItem | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -81,11 +90,51 @@ export default function AdminResumeLibrary() {
   function goPrev() { if (page > 1) void load(keyword, page - 1, size); }
   function goNext() { if (page < pageCount) void load(keyword, page + 1, size); }
 
+  function resetPageUrls() {
+    pageUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    pageUrlsRef.current = [];
+    setOriginalPages({});
+  }
+
+  /** 拉取原件某一页并转成 objectURL（fetch 带鉴权头，<img> 拿不到鉴权头） */
+  async function loadOriginalPage(resumeId: string, page: number) {
+    setOriginalLoading(true);
+    setOriginalError('');
+    try {
+      const blob = await fetchAdminResumeOriginalPage(resumeId, page);
+      const url = URL.createObjectURL(blob);
+      pageUrlsRef.current.push(url);
+      setOriginalPages((prev) => ({ ...prev, [page]: url }));
+    } catch (err) {
+      setOriginalError(err instanceof Error ? err.message : '原件页面读取失败。');
+    } finally {
+      setOriginalLoading(false);
+    }
+  }
+
+  function switchDetailView(next: 'text' | 'original') {
+    setDetailView(next);
+    if (next === 'original' && detail && !originalPages[originalPage]) {
+      void loadOriginalPage(detail.resume_id, originalPage);
+    }
+  }
+
+  function gotoOriginalPage(next: number) {
+    const total = detail?.original?.page_count || 1;
+    if (next < 1 || next > total) return;
+    setOriginalPage(next);
+    if (detail && !originalPages[next]) void loadOriginalPage(detail.resume_id, next);
+  }
+
   /** 打开只读原文面板：详情接口才返回 content 与归档数 */
   async function openDetail(item: AdminResumeItem) {
     setDetailTarget(item);
     setDetail(null);
     setDetailError('');
+    setDetailView('text');
+    setOriginalPage(1);
+    setOriginalError('');
+    resetPageUrls();
     setDetailLoading(true);
     try {
       setDetail(await fetchAdminResumeDetail(item.resume_id));
@@ -100,6 +149,10 @@ export default function AdminResumeLibrary() {
     setDetailTarget(null);
     setDetail(null);
     setDetailError('');
+    setDetailView('text');
+    setOriginalPage(1);
+    setOriginalError('');
+    resetPageUrls();
   }
 
   async function confirmDelete() {
@@ -256,7 +309,7 @@ export default function AdminResumeLibrary() {
             <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
             <div>
               <p className="font-semibold">仅可查看，不可下载</p>
-              <p className="mt-0.5">下方为后端解析后的原文文本，仅供审核查阅；本页面不提供下载、导出、另存或打印入口。</p>
+              <p className="mt-0.5">可取「文本原文」（后端解析结果，已自动过滤解析残留）与「原始文件」（PDF 逐页图片）两种只读视图；本页面不提供下载、导出、另存或打印入口，右键与拖拽已禁用。</p>
             </div>
           </div>
 
@@ -267,6 +320,25 @@ export default function AdminResumeLibrary() {
                 <p className="font-semibold">原文含 PDF 解析残留</p>
                 <p className="mt-0.5">该 PDF 的字体缺少 Unicode 映射，解析结果里混入了字形码与内容流操作符（如 Rj、G q n P）。下方正文已自动过滤 {detail.residue_lines_removed} 行解析残留，真文字完整保留；原始文本仍原样留存于存储中，本页不再展示。</p>
               </div>
+            </div>
+          )}
+
+          {detail?.original?.available && (
+            <div className="mt-3 inline-flex rounded-md border border-line-soft bg-white p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => switchDetailView('text')}
+                className={`inline-flex items-center rounded px-2.5 py-1 ${detailView === 'text' ? 'bg-mist font-medium text-ink' : 'text-sub hover:text-ink'}`}
+              >
+                <FileTextIcon className="mr-1 size-3.5" />文本原文
+              </button>
+              <button
+                type="button"
+                onClick={() => switchDetailView('original')}
+                className={`inline-flex items-center rounded px-2.5 py-1 ${detailView === 'original' ? 'bg-mist font-medium text-ink' : 'text-sub hover:text-ink'}`}
+              >
+                <ImageIcon className="mr-1 size-3.5" />原始文件
+              </button>
             </div>
           )}
 
@@ -285,6 +357,54 @@ export default function AdminResumeLibrary() {
             </div>
           ) : detailError ? (
             <div className="mt-3 rounded-md border border-bad-border bg-bad-soft px-4 py-3 text-sm text-bad">{detailError}</div>
+          ) : detailView === 'original' && detail?.original?.available && detail.original.renderable ? (
+            <div className="mt-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-sub">
+                <span>原始文件：<span className="text-ink">{detail.original.name}</span> · {detail.original.ext.toUpperCase()} · {fmtNum(detail.original.bytes)} 字节</span>
+                <span className="rounded bg-mist px-2 py-0.5">第 {originalPage} / {detail.original.page_count || 1} 页</span>
+              </div>
+              <div
+                className="relative mt-2 select-none overflow-auto rounded-md border border-line-soft bg-mist p-2"
+                onContextMenu={(event) => event.preventDefault()}
+                onDragStart={(event) => event.preventDefault()}
+                onCopy={(event) => event.preventDefault()}
+              >
+                {originalError ? (
+                  <p className="px-2 py-10 text-center text-sm text-bad">{originalError}</p>
+                ) : originalPages[originalPage] ? (
+                  <>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={originalPages[originalPage]}
+                      alt={`原始文件第 ${originalPage} 页`}
+                      draggable={false}
+                      className="mx-auto w-full max-w-2xl rounded border border-line-soft bg-white"
+                    />
+                    {/* 透明遮罩：右键/拖拽落在遮罩上，浏览器的「图片另存为」取不到图片元素 */}
+                    <div className="absolute inset-0" aria-hidden="true" />
+                  </>
+                ) : (
+                  <div className="flex items-center justify-center py-16 text-sm text-sub">
+                    <LoaderCircleIcon className="mr-2 size-4 animate-spin" /> 原文件页面渲染中…
+                  </div>
+                )}
+              </div>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <button type="button" disabled={originalPage <= 1 || originalLoading} onClick={() => gotoOriginalPage(originalPage - 1)} className="inline-flex items-center rounded-md border border-line-soft bg-white px-2.5 py-1 text-xs text-ink hover:bg-mist disabled:opacity-40">
+                  <ChevronLeftIcon className="mr-0.5 size-3.5" />上一页
+                </button>
+                <span className="text-[11px] text-sub">仅可在线查看：不提供下载 / 导出 / 另存 / 打印入口，查看行为均记入审计。</span>
+                <button type="button" disabled={originalPage >= (detail.original.page_count || 1) || originalLoading} onClick={() => gotoOriginalPage(originalPage + 1)} className="inline-flex items-center rounded-md border border-line-soft bg-white px-2.5 py-1 text-xs text-ink hover:bg-mist disabled:opacity-40">
+                  下一页<ChevronRightIcon className="ml-0.5 size-3.5" />
+                </button>
+              </div>
+            </div>
+          ) : detailView === 'original' ? (
+            <div className="mt-3 rounded-md border border-line-soft bg-mist px-4 py-3 text-sm text-sub">
+              {detail?.original?.available
+                ? `该简历留存的是 ${detail.original.ext.toUpperCase() || 'DOCX'} 原文件，当前仅支持 PDF 逐页查看；解析文本可靠性高，请切换「文本原文」查阅。`
+                : '该简历未留存原始文件（原件留存功能上线前上传的历史简历）。'}
+            </div>
           ) : (
             <pre className="mt-3 max-h-[55vh] overflow-auto whitespace-pre-wrap break-words rounded-md border border-line-soft bg-mist p-4 text-sm leading-6 text-body">{detail?.content || '（该简历没有可展示的文本内容）'}</pre>
           )}

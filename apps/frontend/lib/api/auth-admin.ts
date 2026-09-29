@@ -510,6 +510,21 @@ export interface AdminResumeItem {
   content_suspect: boolean;
   /** 展示时自动剔除的解析残留行数 */
   residue_lines_removed: number;
+  /** 是否留存了原始文件（PDF/DOCX）；功能上线前上传的历史简历为 false */
+  original_available: boolean;
+}
+
+/** 留存的原件元信息：只用于在线查看，不提供下载/导出 */
+export interface AdminResumeOriginal {
+  available: boolean;
+  ext: string;
+  name: string;
+  bytes: number;
+  sha256: string;
+  stored_at: string;
+  /** PDF 可逐页渲染为图片；DOCX 仅留存，查看仍走文本视图 */
+  renderable: boolean;
+  page_count: number;
 }
 
 export interface AdminResumeDetail {
@@ -525,6 +540,8 @@ export interface AdminResumeDetail {
   archived_count: number;
   content_suspect: boolean;
   residue_lines_removed: number;
+  /** 原件元信息；未留存时为 null */
+  original: AdminResumeOriginal | null;
 }
 
 export interface AdminResumeList {
@@ -548,10 +565,25 @@ export async function fetchAdminResumes(keyword: string = '', userId: string = '
       ...item,
       content_suspect: Boolean(item.content_suspect),
       residue_lines_removed: Number(item.residue_lines_removed) || 0,
+      original_available: Boolean(item.original_available),
     })),
     total: payload.data?.total ?? 0,
     page: payload.data?.page ?? 1,
     size: payload.data?.size ?? size,
+  };
+}
+
+function mapAdminResumeOriginal(raw?: Partial<AdminResumeOriginal> | null): AdminResumeOriginal | null {
+  if (!raw || !raw.available) return null;
+  return {
+    available: true,
+    ext: raw.ext || '',
+    name: raw.name || '',
+    bytes: Number(raw.bytes) || 0,
+    sha256: raw.sha256 || '',
+    stored_at: raw.stored_at || '',
+    renderable: Boolean(raw.renderable),
+    page_count: Number(raw.page_count) || 0,
   };
 }
 
@@ -572,7 +604,20 @@ export async function fetchAdminResumeDetail(resumeId: string): Promise<AdminRes
     archived_count: payload.data?.archived_count ?? 0,
     content_suspect: Boolean(payload.data?.content_suspect),
     residue_lines_removed: Number(payload.data?.residue_lines_removed) || 0,
+    original: mapAdminResumeOriginal(payload.data?.original),
   };
+}
+
+/**
+ * 逐页拉取原件渲染图（仅超级管理员）。
+ *
+ * 用 fetch 带 Authorization 头取 Blob 再交给 <img>：<img src> 无法携带鉴权头，
+ * 这样原件也不会暴露成一个可直接打开的 URL。没有任何下载/导出入口。
+ */
+export async function fetchAdminResumeOriginalPage(resumeId: string, page: number): Promise<Blob> {
+  const response = await fetch(`${API_URL}/api/v1/admin/resumes/${encodeURIComponent(resumeId)}/original/pages/${page}`, { method: 'GET', headers: authHeaders() });
+  if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '原件页面读取失败。'); }
+  return await response.blob();
 }
 
 export async function deleteAdminResume(resumeId: string): Promise<string> {

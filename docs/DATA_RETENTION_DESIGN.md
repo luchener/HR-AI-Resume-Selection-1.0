@@ -8,6 +8,7 @@
 | 对象 | 到期行为 |
 |---|---|
 | 简历原文 `data/resumes/<id>.json` | **删除** |
+| 简历原始文件 `data/resume_originals/<id>.<ext>` | **删除**（随简历记录一并删除；另回收记录已不存在的孤儿文件） |
 | 岗位原文 `data/jobs/<id>.json` | **删除** |
 | 归档 `data/archives/<id>.json` | **保留**，只加 `source_purged=true` + `source_purged_at` |
 | 审计记录 / 使用统计 | 原有策略不变（180 天 / 365 天） |

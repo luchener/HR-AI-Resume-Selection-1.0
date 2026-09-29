@@ -61,6 +61,20 @@ def _read_json(path: str) -> Optional[dict]:
         return json.load(f)
 
 
+def _delete_original_file(resume_id: str) -> None:
+    """
+    删除留存的原始文件（与简历记录同生命周期）。
+
+    挂在 store.delete_resume 上：用户自助删除、超管删除、保留期超期清理三条路径
+    都会经过这里，避免"记录删了、原件还在"的漏删。清理失败不阻塞记录删除。
+    """
+    try:
+        import resume_original  # 局部导入：store 不依赖渲染库
+        resume_original.delete(resume_id)
+    except Exception:  # noqa: BLE001 - 清理失败不能影响主流程
+        pass
+
+
 # ── 简历 ──────────────────────────────────────────────────────────────
 
 def save_resume(content: str, processed: dict, user_id: str, content_type: str = "md") -> str:
@@ -163,6 +177,18 @@ def delete_resume(resume_id: str, user_id: str = "") -> bool:
         os.remove(path)
     except OSError:
         return False
+    _delete_original_file(resume_id)
+    return True
+
+
+def set_resume_original(resume_id: str, meta: dict) -> bool:
+    """把原始文件元信息（文件名/大小/哈希/留存时间）写入简历记录。"""
+    path = os.path.join(RESUMES_DIR, f"{resume_id}.json")
+    record = _read_json(path)
+    if record is None:
+        return False
+    record["original"] = dict(meta or {})
+    _write_json(path, record)
     return True
 
 

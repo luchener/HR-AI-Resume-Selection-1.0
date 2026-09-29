@@ -13,7 +13,7 @@ from tools import web_search
 MAX_AGENT_RETRIES = 1
 MAX_AGENT_LLM_CALLS = 5
 _MAX_JOB_CHARS = 6000
-_MAX_RESUME_CHARS = 8000
+_MAX_RESUME_CHARS = 16000  # 简历原文送入模型的上限（超限取头 78% + 尾 22%）
 _MAX_REQUIREMENT_COUNT = 24
 _MAX_REQUIREMENT_TEXT = 300
 _COMPOUND_SPLIT_RE = re.compile(r"(?<=[。；;])|(?:(?<=\s)|(?<=，)|(?<=,))(?:并且|同时|以及|且|或|至少|优先)(?=\S)")

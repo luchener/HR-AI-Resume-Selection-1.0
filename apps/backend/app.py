@@ -42,6 +42,7 @@ import quota as quota_mod
 import retention
 import llm
 import parser as doc_parser
+import resume_original
 import screening_agent
 import resume_review
 import resume_sanitize
@@ -1589,12 +1590,22 @@ def upload_resume():
     # 上传链路不调用 LLM，避免用户等待 60-90 秒；招聘分析阶段一次性处理。
     user_id = _current_user_id()
     resume_id = store.save_resume(content=text, processed={}, user_id=user_id)
+    # 留存原始文件：提取文本可能丢字（缺 ToUnicode 映射的 PDF），原件是唯一完整真相，
+    # 也支持将来换解析引擎重提。留存失败不影响上传成功（文本已入库）。
+    original_meta = {}
+    try:
+        original_meta = resume_original.save(resume_id, file_bytes, f.filename or "", content_type)
+        if original_meta:
+            store.set_resume_original(resume_id, original_meta)
+    except Exception:
+        logger.warning("resume original store failed", exc_info=True)
     return jsonify(
         {
             "message": "Resume uploaded and processed as MD successfully",
             "request_id": rid,
             "resume_id": resume_id,
             "extracted_characters": len(text),
+            "original_saved": bool(original_meta),
         }
     )
 
@@ -1664,6 +1675,7 @@ def _admin_resume_summary(record: dict, name_map: dict = None) -> dict:
         "created_at": record.get("created_at"),
         "residue_lines_removed": residue_removed,
         "content_suspect": _content_suspect(str(record.get("content") or "")),
+        "original_available": resume_original.exists(resume_id or ""),
     }
 
 
@@ -1761,9 +1773,71 @@ def admin_resume_detail(resume_id: str):
                 "archived_count": len(archives),
                 "residue_lines_removed": residue_removed,
                 "content_suspect": _content_suspect(raw_content),
+                "original": resume_original.info(resume_id, record.get("original")),
             },
         }
     )
+
+
+@app.get("/api/v1/admin/resumes/<resume_id>/original")
+def admin_resume_original(resume_id: str):
+    """
+    简历原件元信息（仅超级管理员）。
+
+    原件按设计只留存不导出：这里只返回类型、页数与哈希；页面图片由
+    /original/pages/<n> 逐页返回，响应不带 attachment，不提供下载入口。
+    """
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    record = store.get_resume(resume_id)
+    if not record:
+        return _err(f"resume corresponding to resume_id: {resume_id} not found", 404, "admin")
+    meta = resume_original.info(resume_id, record.get("original"))
+    if meta.get("available"):
+        owner = auth_mod.find_user_by_id(record.get("user_id") or "") or {}
+        auth_mod.record_admin_op(
+            op="resume_original_view",
+            operator_id=me.get("user_id") or "",
+            operator_name=me.get("username") or "",
+            target_username=owner.get("username") or "",
+            detail=(
+                f"resume_id={resume_id} stage=meta ext={meta.get('ext')} "
+                f"pages={meta.get('page_count')}"
+            ),
+            request_id=rid,
+        )
+    return jsonify({"request_id": rid, "data": meta})
+
+
+@app.get("/api/v1/admin/resumes/<resume_id>/original/pages/<int:page>")
+def admin_resume_original_page(resume_id: str, page: int):
+    """逐页返回原件渲染图（仅超级管理员；PNG、inline、no-store，无下载语义）。"""
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    record = store.get_resume(resume_id)
+    if not record:
+        return _err(f"resume corresponding to resume_id: {resume_id} not found", 404, "admin")
+    png, total = resume_original.render_page(resume_id, page)
+    if not png:
+        return _err("该简历未留存可渲染的原始文件（或页不存在）。", 404, "admin")
+    owner = auth_mod.find_user_by_id(record.get("user_id") or "") or {}
+    auth_mod.record_admin_op(
+        op="resume_original_view",
+        operator_id=me.get("user_id") or "",
+        operator_name=me.get("username") or "",
+        target_username=owner.get("username") or "",
+        detail=f"resume_id={resume_id} stage=page page={page}/{total}",
+        request_id=rid,
+    )
+    response = Response(png, mimetype="image/png")
+    response.headers["Content-Disposition"] = "inline"
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Accept-Ranges"] = "none"
+    response.headers["X-Original-Page"] = str(page)
+    response.headers["X-Original-Pages"] = str(total)
+    return response
 
 
 @app.delete("/api/v1/admin/resumes/<resume_id>")

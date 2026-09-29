@@ -21,6 +21,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import config
+import resume_original
 import store
 
 logger = logging.getLogger("retention")
@@ -108,6 +109,8 @@ def scan_expired(days: int | None = None) -> dict:
         "cutoff": _cutoff(window).isoformat(),
         "resumes": _scan(store.RESUMES_DIR, window),
         "jobs": _scan(store.JOBS_DIR, window),
+        # 孤儿原件：简历记录已不存在（账号删除等路径留下的文件）
+        "original_orphans": len(resume_original.orphans()),
     }
 
 
@@ -122,6 +125,8 @@ def purge(days: int | None = None, dry_run: bool = False) -> dict:
         "resumes": len(found["resumes"]),
         "jobs": len(found["jobs"]),
         "archives_marked": 0,
+        "original_orphans": found.get("original_orphans", 0),
+        "originals_swept": 0,
     }
 
     # 归档先标记（必须在删原文之前：标记需要 resume_id 还能对上）
@@ -135,6 +140,9 @@ def purge(days: int | None = None, dry_run: bool = False) -> dict:
         store.delete_resume(resume_id)  # user_id 为空 = 保留期清理路径，不校验归属
     for job_id, _path in found["jobs"]:
         store.delete_job(job_id)
+
+    # 原始文件：随记录删除的那部分由 store.delete_resume 处理，这里只回收孤儿文件
+    report["originals_swept"] = resume_original.sweep()
 
     if report["resumes"] or report["jobs"]:
         logger.info(
