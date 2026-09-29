@@ -10,6 +10,7 @@ import {
   CheckCircle2Icon,
   CopyIcon,
   FileJsonIcon,
+  FileTextIcon,
   HistoryIcon,
   InboxIcon,
   KeyRoundIcon,
@@ -35,6 +36,7 @@ import ConfirmDialog from '@/components/workbench/confirm-dialog';
 import AdminAnnouncements from '@/components/workbench/admin-announcements';
 import AdminEmailBroadcast from '@/components/workbench/admin-email-broadcast';
 import AdminQuota from '@/components/workbench/admin-quota';
+import AdminResumeLibrary from '@/components/workbench/admin-resume-library';
 import {
   adminCreateUser,
   adminDeleteUser,
@@ -68,7 +70,7 @@ import {
   type UserUsageData,
 } from '@/lib/api/auth-admin';
 
-type Tab = 'requests' | 'codes' | 'frozen' | 'users' | 'ops' | 'announcements' | 'emails' | 'quota';
+type Tab = 'requests' | 'codes' | 'frozen' | 'users' | 'resumes' | 'ops' | 'announcements' | 'emails' | 'quota';
 
 const TAB_KEYS: Tab[] = ['requests', 'codes', 'frozen', 'users', 'ops', 'announcements', 'emails'];
 
@@ -780,6 +782,11 @@ export default function AdminPage() {
             <button type="button" onClick={() => setTab('users')} className={tabCls(tab === 'users')}>
               <UserRoundIcon className="size-4" /> 用户管理
             </button>
+            {isSuperAdmin && (
+              <button type="button" onClick={() => setTab('resumes')} className={tabCls(tab === 'resumes')}>
+                <FileTextIcon className="size-4" /> 简历库
+              </button>
+            )}
             <button type="button" onClick={() => setTab('ops')} className={tabCls(tab === 'ops')}>
               <HistoryIcon className="size-4" /> 操作记录
             </button>
@@ -1417,6 +1424,7 @@ export default function AdminPage() {
 
         {tab === 'emails' && <AdminEmailBroadcast />}
         {tab === 'quota' && <AdminQuota />}
+        {tab === 'resumes' && isSuperAdmin && <AdminResumeLibrary />}
 
         {/* 行内「…」菜单浮层 */}
         {rowMenu && (

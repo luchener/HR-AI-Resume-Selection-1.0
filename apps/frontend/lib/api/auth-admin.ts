@@ -495,3 +495,77 @@ export async function fetchUsageRanking(limit: number = 20): Promise<UsageRankin
   const payload = (await response.json()) as { data?: { items?: UsageRankingItem[] } };
   return payload.data?.items || [];
 }
+
+// ── 管理端：用户简历库（只读，禁止下载/导出）──────────────────────────
+export interface AdminResumeItem {
+  resume_id: string;
+  user_id: string;
+  owner_username: string;
+  owner_email: string;
+  candidate_name: string;
+  chars: number;
+  content_type: string;
+  created_at: string;
+}
+
+export interface AdminResumeDetail {
+  resume_id: string;
+  user_id: string;
+  owner_username: string;
+  owner_email: string;
+  candidate_name: string;
+  content: string;
+  content_type: string;
+  created_at: string;
+  chars: number;
+  archived_count: number;
+}
+
+export interface AdminResumeList {
+  items: AdminResumeItem[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export async function fetchAdminResumes(keyword: string = '', userId: string = '', page: number = 1, size: number = 50): Promise<AdminResumeList> {
+  const params = new URLSearchParams();
+  if (keyword.trim()) params.set('keyword', keyword.trim());
+  if (userId.trim()) params.set('user_id', userId.trim());
+  params.set('page', String(page));
+  params.set('size', String(size));
+  const response = await fetch(`${API_URL}/api/v1/admin/resumes?${params.toString()}`, { method: 'GET', headers: authHeaders() });
+  if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '简历列表读取失败。'); }
+  const payload = (await response.json()) as { data?: Partial<AdminResumeList> };
+  return {
+    items: payload.data?.items || [],
+    total: payload.data?.total ?? 0,
+    page: payload.data?.page ?? 1,
+    size: payload.data?.size ?? size,
+  };
+}
+
+export async function fetchAdminResumeDetail(resumeId: string): Promise<AdminResumeDetail> {
+  const response = await fetch(`${API_URL}/api/v1/admin/resumes/${encodeURIComponent(resumeId)}`, { method: 'GET', headers: authHeaders() });
+  if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '简历详情读取失败。'); }
+  const payload = (await response.json()) as { data?: Partial<AdminResumeDetail> };
+  return {
+    resume_id: payload.data?.resume_id || resumeId,
+    user_id: payload.data?.user_id || '',
+    owner_username: payload.data?.owner_username || '',
+    owner_email: payload.data?.owner_email || '',
+    candidate_name: payload.data?.candidate_name || '',
+    content: payload.data?.content || '',
+    content_type: payload.data?.content_type || '',
+    created_at: payload.data?.created_at || '',
+    chars: payload.data?.chars ?? 0,
+    archived_count: payload.data?.archived_count ?? 0,
+  };
+}
+
+export async function deleteAdminResume(resumeId: string): Promise<string> {
+  const response = await fetch(`${API_URL}/api/v1/admin/resumes/${encodeURIComponent(resumeId)}`, { method: 'DELETE', headers: authHeaders() });
+  if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '删除简历失败。'); }
+  const payload = (await response.json()) as { data?: { message?: string; resume_id?: string; archived_to_trash?: boolean } };
+  return payload.data?.message || '简历已删除。';
+}
