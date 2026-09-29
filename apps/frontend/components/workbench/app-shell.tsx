@@ -137,6 +137,14 @@ export default function AppShell({ active, children }: AppShellProps) {
               </div>
             </div>
             <p className="mt-2 truncate text-[11px] leading-5 text-slate-500">luchenstudio@163.com</p>
+            <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] leading-5">
+              <Link href="/privacy" className="text-slate-500 transition-colors hover:text-slate-300">
+                隐私政策
+              </Link>
+              <Link href="/terms" className="text-slate-500 transition-colors hover:text-slate-300">
+                用户协议
+              </Link>
+            </p>
           </div>
           <div className="flex items-center gap-3 rounded-md border border-white/10 bg-white/5 px-3 py-3">
             <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-nav-accent text-xs font-bold text-nav-accent-fg">

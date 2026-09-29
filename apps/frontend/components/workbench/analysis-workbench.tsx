@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
@@ -281,8 +282,12 @@ export default function AnalysisWorkbench() {
 
             <div className="mt-5 space-y-2" aria-live="polite">
               {files.length === 0 ? (
-                <div className="flex items-center gap-3 rounded-md border border-line-soft px-4 py-3 text-sm text-sub">
-                  <ShieldCheckIcon className="size-4 text-good" /> 文件仅用于本次招聘分析
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border border-line-soft px-4 py-3 text-sm text-sub">
+                  <ShieldCheckIcon className="size-4 shrink-0 text-good" />
+                  <span>文件仅用于招聘筛选与系统审计，请确认已取得候选人授权</span>
+                  <Link href="/privacy" className="text-brand hover:underline">
+                    《隐私政策》
+                  </Link>
                 </div>
               ) : files.map((file, index) => (
                 <div key={`${file.name}-${file.size}`} className={`flex items-center gap-3 rounded-md border px-3 py-3 ${file.status === 'failed' ? 'border-bad-border bg-bad-soft' : 'border-line-soft'}`}>
