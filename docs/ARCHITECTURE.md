@@ -113,7 +113,9 @@ AIResumeSmartSelection1.0-CloudDeploymentVersion/
 │       │   ├── report-export.tsx     # 统一导出中心（图片/PDF/Word）
 │       │   ├── resume-review-panel.tsx # 简历重点标记面板
 │       │   └── auth-context.tsx      # 登录态管理
-│       ├── app/(default)/admin/page.tsx  # 账号管理（审批/邀请码/冻结/用户/操作记录 五 Tab）
+│       ├── app/(default)/admin/page.tsx  # 账号管理（审批/邀请码/冻结/用户/操作记录 六 Tab）
+
+> 账号管理页新增「简历库」Tab（**仅超级管理员**）：查看全部账号上传的简历原文（**只读、不可下载**，每次查看写 `resume_view` 审计）与手动删除（与自助删除同语义，写 `resume_delete` 审计）。
 │       ├── lib/api/      # API 封装（带 JWT 头；含 auth-admin.ts 认证/管理接口、archives.ts 归档客户端）
 │       └── public/a4cv/  # 独立简历编辑器
 │       └── Dockerfile
@@ -294,7 +296,7 @@ futures = {
 | `lib/api/auth-admin.ts` | 注册页/解冻页/管理页的专用 API：`register-config`、`invite-code/check`、`invite-code/send-email-code`、`invite-request`、`unfreeze/send-code`、`unfreeze` 与全部 `/admin/*` 管理接口（含冻结、使用统计、使用排行、审计导出 `downloadAdminOpsExport` CSV/JSON） |
 | `lib/api/screening.ts` | 分析工作台 API 调用统一注入 `Authorization: Bearer <token>`；401 统一处理（清 token + 跳登录） |
 | `components/workbench/app-shell.tsx` | 侧边栏显示用户名 + 登出 + 修改密码（弹窗）；「账号管理」导航项仅 `is_admin` 可见；登出时清 sessionStorage 分析结果 |
-| `app/(default)/admin/page.tsx` | 账号管理页（仅 `is_admin`，页面守卫 + 403 兜底）：五 Tab —— 申请审批（同意/拒绝+理由/补发码邮件）、邀请码总览（筛选/手动生成/作废）、冻结账号（列表 + 来源/原因 + 兜底解冻）、用户管理（创建/改邮箱/管理员标记/冻结/解冻/重置密码/删除 + **「…」菜单收纳次要操作** + 使用统计/使用排行）、操作记录（类型/关键字过滤、20 条/页分页、**CSV/JSON 导出**）；**Tab 状态 URL 记忆**（`/admin?tab=users` 刷新不丢）；弹窗统一走 `AdminModal`（Esc 关闭/自动聚焦/锁滚动） |
+| `app/(default)/admin/page.tsx` | 账号管理页（仅 `is_admin`，页面守卫 + 403 兜底）：六 Tab —— 申请审批（同意/拒绝+理由/补发码邮件）、邀请码总览（筛选/手动生成/作废）、冻结账号（列表 + 来源/原因 + 兜底解冻）、用户管理（创建/改邮箱/管理员标记/冻结/解冻/重置密码/删除 + **「…」菜单收纳次要操作** + 使用统计/使用排行）、操作记录（类型/关键字过滤、20 条/页分页、**CSV/JSON 导出**）；**Tab 状态 URL 记忆**（`/admin?tab=users` 刷新不丢）；弹窗统一走 `AdminModal`（Esc 关闭/自动聚焦/锁滚动） |
 | `app/(default)/reset-password/page.tsx` | 忘记密码：两步（邮箱 → 验证码+新密码），「返回登录」为全宽边框按钮置于提交下方 |
 | `app/(default)/privacy/page.tsx` | 隐私政策（免登录公开页）：要点速览 + 目录 + 13 章节，内容源 `apps/frontend/lib/legal-content.ts` |
 | `app/(default)/terms/page.tsx` | 用户协议（免登录公开页）：含"上传数据的合法性保证"条款，把候选人授权责任明确落在上传方 |
@@ -691,8 +693,11 @@ Content-Type: application/json
 | `DELETE` | `/api/v1/admin/users/<username>` | 删除用户（**软删除**，90 天内可恢复）：**仅超级管理员**（.env 白名单邮箱）可操作，且必须提交操作者自己的管理员密码 `{admin_password}`（密码校验失败 → 403）；禁止删除自己与最后一个管理员（白名单邮箱管理员除外）。删除留痕 `user_delete` 审计 |
 | `GET` | `/api/v1/admin/users/deleted` | 软删除账号列表（删除时间在 90 天恢复窗口内，按删除时间倒序）：含 `username`/`email`（脱敏）/`deleted_at`/`deleted_by` |
 | `POST` | `/api/v1/admin/users/<username>/restore` | 恢复软删除账号（仅 90 天内）：`password_version` +1、旧 token 全失效、需重新登录；超过窗口 → 400「已超过可恢复期限」；留痕 `user_restore` 审计 |
-| `GET` | `/api/v1/admin/ops?op=&keyword=&page=&size=` | 管理操作审计（创建/删除/冻结/解冻/授予·取消管理员/改邮箱/重置密码），含操作者、目标用户、时间与标准化详情（详情不含临时密码明文）；`op` 精确过滤 + `keyword` 搜索操作者/目标；前端按 20 条/页分页展示 |
+| `GET` | `/api/v1/admin/ops?op=&keyword=&page=&size=` | 管理操作审计（创建/删除/冻结/解冻/授予·取消管理员/改邮箱/重置密码/查看简历原文 `resume_view`/删除简历 `resume_delete`），含操作者、目标用户、时间与标准化详情（详情不含临时密码明文）；`op` 精确过滤 + `keyword` 搜索操作者/目标；前端按 20 条/页分页展示 |
 | `GET` | `/api/v1/admin/ops/export?op=&keyword=&format=csv\|json` | 审计导出（管理员）：遵循当前过滤导出**全部结果**（不受分页限制）；`csv` 带 utf-8-sig BOM（Excel 直接打开不乱码）+ `Content-Disposition: attachment`，`json` 返回完整字段数组 |
+| `GET` | `/api/v1/admin/resumes?keyword=&user_id=&page=&size=` | **用户简历库列表**（**仅超级管理员**）：全部账号上传的简历，按上传时间倒序；支持候选人姓名/用户名/邮箱关键字与 `user_id` 过滤；**列表不返回原文内容**；已被删除（含 30 天保留期自动清理）的简历不出现 |
+| `GET` | `/api/v1/admin/resumes/<resume_id>` | **简历原文详情**（**仅超级管理员**，**只读**）：返回解析后的 `content` 与归属用户；**无任何下载语义**（不带 `Content-Disposition`，无下载/导出路由）；每次查看写审计 `resume_view`；不存在 → 404 |
+| `DELETE` | `/api/v1/admin/resumes/<resume_id>` | **手动删除简历**（**仅超级管理员**）：与用户自助删除同语义 —— 引用它的归档移入回收站（可恢复）、原文立即物理删除；写审计 `resume_delete` |
 | `GET` | `/api/v1/admin/users/<username>/usage?granularity=day\|month\|year&buckets=N` | 用户使用次数聚合：`granularity=day`（默认 30 天）/`month`（12 月）/`year`（5 年），`labels` 一律字符串，返回 `{labels, series:{login, analysis, total}, summary}`；`summary` = 区间合计（total/login_total/analysis_total）、日均/月均/年均（avg_per_bucket）、峰值（peak_label/peak_total）、活跃期数（active_buckets）、首次/最近使用 |
 | `GET` | `/api/v1/admin/users/usage-ranking?limit=N` | 全用户使用排行：按登录+分析总量降序（含 last_usage），帮助发现异常高消耗账号 |
 

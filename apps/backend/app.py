@@ -207,6 +207,14 @@ def _ensure_super_admin_for_admin_target(rid: str, target_user: dict | None) -> 
     raise ApiError("该账号为管理员账号，仅超级管理员（luchen）可操作。", 403, "admin")
 
 
+def _require_super_admin() -> dict:
+    """仅超级管理员（.env 白名单账号）可调用的接口门禁：否则 403。返回当前用户记录。"""
+    me = g.get("auth_user") or {}
+    if not auth_mod.is_super_admin(me):
+        raise ApiError("仅超级管理员可访问。", 403, "admin")
+    return me
+
+
 def _request_id(service: str = "api") -> str:
     return f"{service}:{uuid.uuid4()}"
 
@@ -1622,6 +1630,154 @@ def delete_resume(resume_id: str):
         user_id,
         trashed,
     )
+    return jsonify(
+        {
+            "request_id": rid,
+            "data": {
+                "message": "简历已删除。",
+                "resume_id": resume_id,
+                "archived_to_trash": trashed,
+            },
+        }
+    )
+
+
+# ── 用户简历库（仅超级管理员：查看全部用户上传的简历原文，只读、不可下载）──
+def _admin_resume_summary(record: dict) -> dict:
+    """列表摘要：**不含 content**（原文只在详情接口按次返回，且每次留审计）。"""
+    owner = auth_mod.find_user_by_id(record.get("user_id") or "") or {}
+    return {
+        "resume_id": record.get("resume_id"),
+        "user_id": record.get("user_id") or "",
+        "owner_username": owner.get("username") or "",
+        "owner_email": owner.get("email") or "",
+        "candidate_name": _candidate_name_from_resume(record, {}) or "未命名",
+        "chars": len(str(record.get("content") or "")),
+        "content_type": record.get("content_type") or "md",
+        "created_at": record.get("created_at"),
+    }
+
+
+@app.get("/api/v1/admin/resumes")
+def admin_resume_library():
+    """
+    用户简历库列表（仅超级管理员）：全部用户上传的简历，按上传时间倒序。
+    支持 ?keyword=（候选人姓名/原文内容/用户名/邮箱）、?user_id=、?page=&size=。
+    列表不返回原文内容。
+    """
+    rid = _request_id("admin")
+    _require_super_admin()
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        size = min(200, max(1, int(request.args.get("size", "20"))))
+    except (TypeError, ValueError):
+        size = 20
+    keyword = (request.args.get("keyword") or "").strip().lower()
+    want_user = (request.args.get("user_id") or "").strip()
+
+    records = store.list_resumes()
+    if want_user:
+        records = [r for r in records if (r.get("user_id") or "") == want_user]
+    summaries = [_admin_resume_summary(r) for r in records]
+    if keyword:
+        summaries = [
+            s
+            for s in summaries
+            if keyword in (s["candidate_name"] or "").lower()
+            or keyword in (s["owner_username"] or "").lower()
+            or keyword in (s["owner_email"] or "").lower()
+        ]
+    summaries.sort(key=lambda s: s.get("created_at") or "", reverse=True)
+    total = len(summaries)
+    start = (page - 1) * size
+    return jsonify(
+        {
+            "request_id": rid,
+            "data": {
+                "items": summaries[start : start + size],
+                "total": total,
+                "page": page,
+                "size": size,
+            },
+        }
+    )
+
+
+@app.get("/api/v1/admin/resumes/<resume_id>")
+def admin_resume_detail(resume_id: str):
+    """
+    简历原文详情（仅超级管理员，只读）。返回解析后的原文文本，不提供文件下载。
+    每次读取都写一条管理操作审计（resume_view），供事后追责。
+    """
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    record = store.get_resume(resume_id)
+    if not record:
+        return _err(f"resume corresponding to resume_id: {resume_id} not found", 404, "admin")
+    owner = auth_mod.find_user_by_id(record.get("user_id") or "") or {}
+    content = str(record.get("content") or "")
+    auth_mod.record_admin_op(
+        op="resume_view",
+        operator_id=me.get("user_id") or "",
+        operator_name=me.get("username") or "",
+        target_username=owner.get("username") or "",
+        detail=f"resume_id={resume_id} chars={len(content)}",
+        request_id=rid,
+    )
+    return jsonify(
+        {
+            "request_id": rid,
+            "data": {
+                "resume_id": resume_id,
+                "user_id": record.get("user_id") or "",
+                "owner_username": owner.get("username") or "",
+                "owner_email": owner.get("email") or "",
+                "candidate_name": _candidate_name_from_resume(record, {}) or "未命名",
+                "content": content,
+                "content_type": record.get("content_type") or "md",
+                "created_at": record.get("created_at"),
+                "chars": len(content),
+                "archived_count": len(
+                    store.archives_referencing(record.get("user_id") or "", resume_id=resume_id)
+                ),
+            },
+        }
+    )
+
+
+@app.delete("/api/v1/admin/resumes/<resume_id>")
+def admin_delete_resume(resume_id: str):
+    """
+    手动删除简历（仅超级管理员）：与用户自助删除同语义 ——
+    引用它的归档移入回收站（可恢复），原文立即物理删除；写管理操作审计。
+    """
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    record = store.get_resume(resume_id)
+    if not record:
+        return _err(f"resume corresponding to resume_id: {resume_id} not found", 404, "admin")
+    owner_id = record.get("user_id") or ""
+    owner = auth_mod.find_user_by_id(owner_id) or {}
+    trashed = 0
+    for archive in store.archives_referencing(owner_id, resume_id=resume_id):
+        if archive.get("status") != "active":
+            continue
+        if store.soft_delete_archive(archive["archive_id"], owner_id):
+            trashed += 1
+    if not store.delete_resume(resume_id):
+        return _err("删除失败，请稍后重试。", 500, "admin")
+    auth_mod.record_admin_op(
+        op="resume_delete",
+        operator_id=me.get("user_id") or "",
+        operator_name=me.get("username") or "",
+        target_username=owner.get("username") or "",
+        detail=f"resume_id={resume_id} trashed_archives={trashed}",
+        request_id=rid,
+    )
+    logger.info("admin resume deleted resume_id=%s by=%s trashed=%s", resume_id, me.get("username"), trashed)
     return jsonify(
         {
             "request_id": rid,

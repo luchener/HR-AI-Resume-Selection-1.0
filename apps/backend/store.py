@@ -124,6 +124,28 @@ def get_resume_view(resume_id: str, user_id: str = "") -> Optional[dict]:
     }
 
 
+def list_resumes() -> list[dict]:
+    """
+    列出全部用户的简历记录（超级管理员的「用户简历库」使用）。
+
+    没有索引文件，直接扫 RESUMES_DIR：当前规模（百级）足够；记录数上万时应改为
+    维护索引，否则每次列表都是 O(n) 次文件读取。
+    返回完整记录（含 content），调用方必须自行裁剪，避免把原文塞进列表响应。
+    """
+    records: list[dict] = []
+    try:
+        names = sorted(os.listdir(RESUMES_DIR))
+    except OSError:
+        return records
+    for name in names:
+        if not name.endswith(".json") or name.startswith("_"):
+            continue
+        record = _read_json(os.path.join(RESUMES_DIR, name))
+        if record:
+            records.append(record)
+    return records
+
+
 # ── 岗位 ──────────────────────────────────────────────────────────────
 
 def delete_resume(resume_id: str, user_id: str = "") -> bool:
