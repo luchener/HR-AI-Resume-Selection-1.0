@@ -15,6 +15,7 @@
 import os
 import shutil
 import unittest
+from datetime import datetime, timedelta, timezone
 
 # ── 目录隔离：很多模块的 *_DIR 是 import 时快照，只改 config.DATA_DIR 不够 ──
 _TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-tmp-admin-library")
@@ -64,6 +65,7 @@ _isolate()
 _SUPER_EMAIL = "super_lib@example.com"
 auth.ADMIN_EMAILS = {_SUPER_EMAIL}
 
+import retention  # noqa: E402
 import app as backend  # noqa: E402
 
 backend.config.CAPTCHA_ENABLED = False
@@ -221,6 +223,25 @@ class AdminResumeLibraryTests(unittest.TestCase):
         self.assertEqual(data["total"], 2)
         self.assertEqual(len(data["items"]), 1)
         self.assertEqual(data["page"], 2)
+
+    def test_user_self_delete_also_removes_from_library(self):
+        """用户自助删除原文后，库里同步消失（同一份数据，不是副本）。"""
+        resp = self._delete(f"/api/v1/resumes/{self.r1}", self.normal_token)
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        data = self._get("/api/v1/admin/resumes", self.sup_token).get_json()["data"]
+        self.assertEqual([i["resume_id"] for i in data["items"]], [self.r2])
+        self.assertIsNone(store.get_resume(self.r1))
+
+    def test_retention_purge_also_removes_from_library(self):
+        """30 天保留期自动清理后，库里同步消失（走同一条 store.delete_resume）。"""
+        path = os.path.join(store.RESUMES_DIR, f"{self.r1}.json")
+        old = store._read_json(path)
+        old["created_at"] = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+        store._write_json(path, old)
+        report = retention.purge()
+        self.assertEqual(report["resumes"], 1)
+        data = self._get("/api/v1/admin/resumes", self.sup_token).get_json()["data"]
+        self.assertEqual([i["resume_id"] for i in data["items"]], [self.r2])
 
 
 if __name__ == "__main__":
