@@ -416,6 +416,17 @@ class UserAdminTests(unittest.TestCase):
         self.assertIn("user_create", ops_by_op)
         self.assertEqual(ops_by_op["user_create"]["target_username"], "fresh_hire")
 
+    def test_temp_password_always_meets_policy(self):
+        """回归：管理员重置口令生成的临时密码必须必然通过强度校验。
+
+        旧实现随机取 12 位且不校验，字符表里数字占 8/31，约 2% 概率不含数字 →
+        接口随机返回 422「密码必须包含至少一个数字」（管理员根本没输入密码）。
+        取 300 次覆盖掉这个 2% 的偶发。
+        """
+        for _ in range(300):
+            temp = auth_module._generate_temp_password()
+            self.assertIsNone(auth_module._validate_password_strength(temp), temp)
+
     def test_audit_recorded_on_admin_toggle_and_pwd_reset(self):
         self._mkuser("audit_target", "audit@example.com")
         r = self._req("patch", "/api/v1/admin/users/audit_target",

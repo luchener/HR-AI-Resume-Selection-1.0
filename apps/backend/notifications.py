@@ -10,6 +10,7 @@
 """
 import base64
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -46,6 +47,23 @@ def _parse_iso(value) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _atomic_replace(tmp: str, path: str) -> None:
+    """
+    os.replace 的 Windows 容错包装。
+
+    Windows 上杀毒软件 / 索引器会瞬间持有刚写出的 .tmp 或目标文件句柄，os.replace 随之抛
+    PermissionError(WinError 5)，在高频写接口上表现为随机 500（真实出现过：
+    /api/v1/archives/<id>/tags 返回 500、登录失败计数写不进去）。短暂退避重试即可绕开。
+    """
+    for _attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (_attempt + 1))
+    os.replace(tmp, path)  # 最后一次仍失败就抛出，让调用方看到真实错误
 
 
 def _write_json(path: str, data: dict) -> None:
@@ -333,7 +351,7 @@ def save_email_image(data: bytes, filename: str) -> dict:
         fh.write(data)
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    _atomic_replace(tmp, path)
     return {"image_id": image_id, "name": filename, "ext": ext, "size": len(data)}
 
 

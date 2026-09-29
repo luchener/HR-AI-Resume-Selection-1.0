@@ -36,6 +36,17 @@ class NotificationApiTest(unittest.TestCase):
         for d in (backend_config.ANNOUNCEMENTS_DIR, backend_config.ANNOUNCEMENT_READS_DIR,
                   backend_config.EMAIL_IMAGES_DIR, backend_config.EMAIL_LOGS_DIR):
             os.makedirs(d, exist_ok=True)
+        # 隔离简历/岗位/归档目录：保留期等后台清理逻辑按 store 的模块属性取路径，
+        # 不隔离会在真实 data/ 下删数据（2026-09-29 真实事故的现场之一）
+        cls._old_store = {
+            "RESUMES_DIR": backend.store.RESUMES_DIR,
+            "JOBS_DIR": backend.store.JOBS_DIR,
+            "ARCHIVES_DIR": backend.store.ARCHIVES_DIR,
+        }
+        for _key, _sub in (("RESUMES_DIR", "resumes"), ("JOBS_DIR", "jobs"), ("ARCHIVES_DIR", "archives")):
+            _path = os.path.join(cls._tmp, "store", _sub)
+            setattr(backend.store, _key, _path)
+            os.makedirs(_path, exist_ok=True)
         cls.client = backend.app.test_client()
         suf = uuid.uuid4().hex[:6]
         cls.admin_name = "notifyadmin" + suf
@@ -56,6 +67,8 @@ class NotificationApiTest(unittest.TestCase):
     def tearDownClass(cls):
         for key, val in cls._old.items():
             setattr(backend_config, key, val)
+        for key, val in cls._old_store.items():
+            setattr(backend.store, key, val)
         shutil.rmtree(cls._tmp, ignore_errors=True)
 
     def _h(self, token):

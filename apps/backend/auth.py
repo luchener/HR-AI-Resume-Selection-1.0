@@ -113,6 +113,23 @@ _INDEX_FILE = os.path.join(USERS_DIR, "_index.json")
 _INDEX_LOCK = os.path.join(USERS_DIR, "_index.lock")
 
 
+def _atomic_replace(tmp: str, path: str) -> None:
+    """
+    os.replace 的 Windows 容错包装。
+
+    Windows 上杀毒软件 / 索引器会瞬间持有刚写出的 .tmp 或目标文件句柄，os.replace 随之抛
+    PermissionError(WinError 5)，在高频写接口上表现为随机 500（真实出现过：
+    /api/v1/archives/<id>/tags 返回 500、登录失败计数写不进去）。短暂退避重试即可绕开。
+    """
+    for _attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (_attempt + 1))
+    os.replace(tmp, path)  # 最后一次仍失败就抛出，让调用方看到真实错误
+
+
 def _write_json(path: str, data: dict) -> None:
     """原子写：临时文件 + fsync + os.replace，避免半写文件。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -121,7 +138,7 @@ def _write_json(path: str, data: dict) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    _atomic_replace(tmp, path)
 
 
 def _read_json(path: str) -> Optional[dict]:
@@ -780,6 +797,24 @@ def admin_update_email(username: str, new_email: str, operator: str = "") -> tup
     return True, None
 
 
+_TEMP_PW_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # 排除 I/L/O/0/1，便于口令抄写
+
+
+def _generate_temp_password(length: int = 12) -> str:
+    """
+    生成临时密码：循环到通过密码强度策略为止。
+
+    旧实现是"随机取 12 位后不校验"，而字符表里数字只占 8/31，约 2% 的概率不含数字，
+    于是 admin_reset_password 会随机返回 422「密码必须包含至少一个数字」——
+    管理员压根没输入密码，报错却怪他（test_user_admin 的偶发失败就来自这里）。
+    """
+    length = max(8, length)
+    while True:
+        candidate = "".join(secrets.choice(_TEMP_PW_ALPHABET) for _ in range(length))
+        if _validate_password_strength(candidate) is None:
+            return candidate
+
+
 def admin_reset_password(username: str, operator: str = "") -> tuple[bool, Optional[str], Optional[str]]:
     """
     管理员重置用户密码。返回 (success, error, temp_password)。
@@ -789,7 +824,7 @@ def admin_reset_password(username: str, operator: str = "") -> tuple[bool, Optio
     if not user:
         return False, "用户不存在", None
 
-    temp = "".join(secrets.choice("ABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(12))
+    temp = _generate_temp_password(12)
     ok, err = update_password(user["user_id"], temp)
     if not ok:
         return False, err, None
