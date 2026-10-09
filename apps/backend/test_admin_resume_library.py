@@ -159,11 +159,51 @@ class AdminResumeLibraryTests(unittest.TestCase):
         self.assertIsNone(resp.headers.get("Content-Disposition"), "详情接口不得带下载语义")
 
     def test_no_download_route_exists(self):
+        """简历相关路由不得包含下载/导出入口。
+
+        只读查看原件是允许的（/original 元信息 + /original/pages/<n> 渲染图），
+        因此这里用白名单方式排除这两条、并禁止任何 download/export 命名，
+        而不是按名字里是否出现 "original" 一刀切。
+        """
+        view_only = {
+            "/api/v1/admin/resumes/<resume_id>/original",
+            "/api/v1/admin/resumes/<resume_id>/original/pages/<int:page>",
+        }
         rules = [r.rule for r in backend.app.url_map.iter_rules() if "resumes" in r.rule]
-        self.assertFalse(
-            [r for r in rules if "download" in r or "original" in r or "export" in r],
-            f"简历相关路由不得包含下载/导出入口：{rules}",
+        offenders = sorted(
+            r
+            for r in rules
+            if "download" in r or "export" in r or ("original" in r and r not in view_only)
         )
+        self.assertFalse(offenders, f"简历相关路由不得包含下载/导出入口：{offenders}")
+
+    def test_original_view_is_read_only(self):
+        """行为校验：原件相关接口只能是只读查看语义，不得带下载语义。
+
+        - /original 只返回元信息（类型/大小/哈希/页数），不含文件字节
+        - /original/pages/<n> 只返回 inline PNG，不进缓存、不支持 Range 续传
+        """
+        resp = self._get(f"/api/v1/admin/resumes/{self.r1}/original", self.sup_token)
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        self.assertIsNone(resp.headers.get("Content-Disposition"), "原件元信息接口不得带下载语义")
+        meta = resp.get_json()["data"]
+        for leak in ("content", "bytes", "base64", "blob", "file", "raw"):
+            self.assertNotIn(leak, meta, f"原件元信息接口不得返回文件内容字段 {leak}")
+        if not meta.get("available"):
+            self.assertEqual(set(meta), {"available"}, "未留存原件时只应回答 available=false")
+
+        page = self._get(f"/api/v1/admin/resumes/{self.r1}/original/pages/1", self.sup_token)
+        self.assertIn(page.status_code, (200, 404), page.get_data(as_text=True))
+        self.assertNotEqual(
+            (page.headers.get("Content-Disposition") or "").lower(),
+            "attachment",
+            "逐页渲染图不得带下载语义",
+        )
+        if page.status_code == 200:
+            self.assertEqual(page.headers.get("Content-Disposition"), "inline")
+            self.assertIn("no-store", page.headers.get("Cache-Control", ""))
+            self.assertEqual(page.mimetype, "image/png")
+            self.assertEqual(page.headers.get("Accept-Ranges"), "none")
 
     def test_detail_404_for_unknown_resume(self):
         resp = self._get("/api/v1/admin/resumes/no-such-resume", self.sup_token)
