@@ -697,9 +697,7 @@ Content-Type: application/json
 | `GET` | `/api/v1/admin/ops/export?op=&keyword=&format=csv\|json` | 审计导出（管理员）：遵循当前过滤导出**全部结果**（不受分页限制）；`csv` 带 utf-8-sig BOM（Excel 直接打开不乱码）+ `Content-Disposition: attachment`，`json` 返回完整字段数组 |
 | `GET` | `/api/v1/admin/resumes?keyword=&user_id=&page=&size=` | **用户简历库列表**（**仅超级管理员**）：全部账号上传的简历，按上传时间倒序；支持候选人姓名/用户名/邮箱关键字与 `user_id` 过滤；**列表不返回原文内容**；已被删除（含 30 天保留期自动清理）的简历不出现 |
 | `GET` | `/api/v1/admin/resumes/<resume_id>` | **简历原文详情**（**仅超级管理员**，**只读**）：返回解析后的 `content` 与归属用户；**无任何下载语义**（不带 `Content-Disposition`，无下载/导出路由）；每次查看写审计 `resume_view`；不存在 → 404 |
-| `DELETE` | `/api/v1/admin/resumes/<resume_id>` | **手动删除简历**（**仅超级管理员**）：与用户自助删除同语义 —— 引用它的归档移入回收站（可恢复）、原文与留存原件立即物理删除；写审计 `resume_delete` |
-| `GET` | `/api/v1/admin/resumes/<resume_id>/original` | **原件元信息**（**仅超级管理员**）：留存原件的类型/文件名/大小/`sha256`/页数；未留存 → `available=false`（历史简历）；有原件时写审计 `resume_original_view` |
-| `GET` | `/api/v1/admin/resumes/<resume_id>/original/pages/<n>` | **原件逐页图片**（**仅超级管理员**）：服务端以 pypdfium2 渲染该页为 PNG，`Content-Disposition: inline` + `no-store` + `Accept-Ranges: none`，**无下载/导出/另存入口**；每页查阅均写审计 |
+| `DELETE` | `/api/v1/admin/resumes/<resume_id>` | **手动删除简历**（**仅超级管理员**）：与用户自助删除同语义 —— 引用它的归档移入回收站（可恢复）、原文立即物理删除；写审计 `resume_delete` |
 | `GET` | `/api/v1/admin/users/<username>/usage?granularity=day\|month\|year&buckets=N` | 用户使用次数聚合：`granularity=day`（默认 30 天）/`month`（12 月）/`year`（5 年），`labels` 一律字符串，返回 `{labels, series:{login, analysis, total}, summary}`；`summary` = 区间合计（total/login_total/analysis_total）、日均/月均/年均（avg_per_bucket）、峰值（peak_label/peak_total）、活跃期数（active_buckets）、首次/最近使用 |
 | `GET` | `/api/v1/admin/users/usage-ranking?limit=N` | 全用户使用排行：按登录+分析总量降序（含 last_usage），帮助发现异常高消耗账号 |
 

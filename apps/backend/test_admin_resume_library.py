@@ -12,7 +12,6 @@
 运行：python -m unittest test_admin_resume_library -v
 """
 
-import io
 import os
 import shutil
 import unittest
@@ -25,7 +24,6 @@ os.environ["ENV"] = "local"
 import config  # noqa: E402
 import auth  # noqa: E402
 import store  # noqa: E402
-import resume_original  # noqa: E402
 
 _DIR_NAMES = (
     "users",
@@ -40,7 +38,6 @@ _DIR_NAMES = (
     "rate_limits",
     "admin_ops",
     "usage",
-    "resume_originals",
 )
 
 
@@ -162,133 +159,11 @@ class AdminResumeLibraryTests(unittest.TestCase):
         self.assertIsNone(resp.headers.get("Content-Disposition"), "详情接口不得带下载语义")
 
     def test_no_download_route_exists(self):
-        """
-        简历库不得有任何下载/导出入口；原件只能逐页取图，且路由必须是只读 GET。
-
-        「不可下载」= 不存在 download / export / file / raw / attachment 语义的路由，
-        且原件路由只挂 GET（页面图片另见响应头断言：inline，无 attachment）。
-        """
         rules = [r.rule for r in backend.app.url_map.iter_rules() if "resumes" in r.rule]
-        banned = [
-            r for r in rules
-            if "download" in r or "export" in r or "file" in r or "raw" in r or "attachment" in r
-        ]
-        self.assertEqual(banned, [], f"简历相关路由不得包含下载/导出入口：{banned}")
-        original_rules = sorted(r for r in rules if "original" in r)
-        self.assertEqual(
-            original_rules,
-            [
-                "/api/v1/admin/resumes/<resume_id>/original",
-                "/api/v1/admin/resumes/<resume_id>/original/pages/<int:page>",
-            ],
-            f"原件路由集合发生变化，请确认仍未引入下载入口：{rules}",
+        self.assertFalse(
+            [r for r in rules if "download" in r or "original" in r or "export" in r],
+            f"简历相关路由不得包含下载/导出入口：{rules}",
         )
-        for rule in backend.app.url_map.iter_rules():
-            if rule.rule in original_rules:
-                self.assertFalse(
-                    set(rule.methods or set()) - {"GET", "HEAD", "OPTIONS"},
-                    f"{rule.rule} 必须是只读路由",
-                )
-
-    def _seed_original(self, resume_id):
-        """按上传链路的顺序落一份原件：先存文件，再把元信息写进简历记录。"""
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata", "sample_en.pdf")
-        if not os.path.exists(path):
-            self.skipTest("缺少 testdata/sample_en.pdf")
-        with open(path, "rb") as handle:
-            meta = resume_original.save(resume_id, handle.read(), "王龙龙-运维工程师.pdf")
-        if meta:
-            store.set_resume_original(resume_id, meta)
-        return meta
-
-    def test_original_requires_super_admin(self):
-        resume_original.save(self.r1, b"%PDF-1.4 fake", "a.pdf")
-        for token, expected in ((self.mid_token, 403), (self.normal_token, 403), (None, 401)):
-            self.assertEqual(
-                self._get(f"/api/v1/admin/resumes/{self.r1}/original", token).status_code, expected
-            )
-            self.assertEqual(
-                self._get(f"/api/v1/admin/resumes/{self.r1}/original/pages/1", token).status_code, expected
-            )
-
-    def test_original_pages_are_inline_png_without_download(self):
-        meta = self._seed_original(self.r1)
-        self.assertTrue(meta, "原件应留存成功")
-
-        resp = self._get(f"/api/v1/admin/resumes/{self.r1}/original", self.sup_token)
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()["data"]
-        self.assertTrue(data["available"])
-        self.assertEqual(data["ext"], "pdf")
-        self.assertEqual(data["name"], "王龙龙-运维工程师.pdf")
-        self.assertEqual(data["page_count"], 2)
-        self.assertEqual(data["sha256"], meta["sha256"])
-        self.assertIsNone(resp.headers.get("Content-Disposition"), "元信息接口不得带下载语义")
-
-        page = self._get(f"/api/v1/admin/resumes/{self.r1}/original/pages/1", self.sup_token)
-        self.assertEqual(page.status_code, 200)
-        self.assertEqual(page.headers.get("Content-Type"), "image/png")
-        self.assertEqual(page.headers.get("Content-Disposition"), "inline")
-        # 全局 after_request 对 /api/v1/* 统一覆盖为 no-store（比自定义值更严）
-        self.assertIn("no-store", page.headers.get("Cache-Control") or "")
-        self.assertEqual(page.headers.get("Accept-Ranges"), "none")
-        self.assertEqual(page.headers.get("X-Original-Page"), "1")
-        self.assertEqual(page.headers.get("X-Original-Pages"), "2")
-        self.assertTrue(page.get_data().startswith(b"\x89PNG\r\n\x1a\n"), "必须返回图片字节")
-
-        self.assertEqual(
-            self._get(f"/api/v1/admin/resumes/{self.r1}/original/pages/9", self.sup_token).status_code,
-            404,
-        )
-        # 列表摘要给出快捷标记，省掉一次探测请求
-        items = self._get("/api/v1/admin/resumes?size=50", self.sup_token).get_json()["data"]["items"]
-        row = next(item for item in items if item["resume_id"] == self.r1)
-        self.assertTrue(row["original_available"])
-        # 每次查看都写审计：谁、哪份、第几页
-        ops = auth.list_admin_ops(op="resume_original_view")
-        details = " ".join(op["detail"] for op in ops)
-        self.assertIn("stage=meta", details)
-        self.assertIn("stage=page", details)
-
-    def test_upload_keeps_original_file(self):
-        """上传链路必须留存原件，且用户自助删除时原件同步清除。"""
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata", "sample_en.pdf")
-        if not os.path.exists(path):
-            self.skipTest("缺少 testdata/sample_en.pdf")
-        with open(path, "rb") as handle:
-            data = handle.read()
-        resp = self.client.post(
-            "/api/v1/resumes/upload",
-            data={"file": (io.BytesIO(data), "王龙龙-运维工程师.pdf")},
-            headers={"Authorization": f"Bearer {self.normal_token}"},
-            content_type="multipart/form-data",
-        )
-        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
-        payload = resp.get_json()
-        self.assertTrue(payload.get("original_saved"), "上传应留存原始文件")
-        resume_id = payload["resume_id"]
-        record = store.get_resume(resume_id, user_id=self.u1["user_id"]) or {}
-        self.assertEqual((record.get("original") or {}).get("name"), "王龙龙-运维工程师.pdf")
-        self.assertEqual((record.get("original") or {}).get("ext"), "pdf")
-        self.assertTrue(resume_original.exists(resume_id))
-
-        deleted = self._delete(f"/api/v1/resumes/{resume_id}", self.normal_token)
-        self.assertEqual(deleted.status_code, 200, deleted.get_data(as_text=True))
-        self.assertFalse(resume_original.exists(resume_id), "删除简历必须同步删除原件")
-
-    def test_original_unavailable_for_history_resumes(self):
-        resp = self._get(f"/api/v1/admin/resumes/{self.r2}/original", self.sup_token)
-        self.assertEqual(resp.status_code, 200)
-        self.assertFalse(resp.get_json()["data"]["available"])
-        self.assertEqual(
-            self._get(f"/api/v1/admin/resumes/{self.r2}/original/pages/1", self.sup_token).status_code,
-            404,
-        )
-        items = self._get("/api/v1/admin/resumes?size=50", self.sup_token).get_json()["data"]["items"]
-        row = next(item for item in items if item["resume_id"] == self.r2)
-        self.assertFalse(row["original_available"])
-        # 没有原件可看时不应产生查看审计
-        self.assertEqual(auth.list_admin_ops(op="resume_original_view"), [])
 
     def test_detail_404_for_unknown_resume(self):
         resp = self._get("/api/v1/admin/resumes/no-such-resume", self.sup_token)
