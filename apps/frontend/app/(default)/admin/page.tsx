@@ -35,6 +35,8 @@ import AdminModal from '@/components/workbench/admin-modal';
 import ConfirmDialog from '@/components/workbench/confirm-dialog';
 import AdminAnnouncements from '@/components/workbench/admin-announcements';
 import AdminEmailBroadcast from '@/components/workbench/admin-email-broadcast';
+import AdminMail from '@/components/workbench/admin-mail';
+import AdminLlm from '@/components/workbench/admin-llm';
 import AdminQuota from '@/components/workbench/admin-quota';
 import AdminResumeLibrary from '@/components/workbench/admin-resume-library';
 import {
@@ -70,9 +72,9 @@ import {
   type UserUsageData,
 } from '@/lib/api/auth-admin';
 
-type Tab = 'requests' | 'codes' | 'frozen' | 'users' | 'resumes' | 'ops' | 'announcements' | 'emails' | 'quota';
+type Tab = 'requests' | 'codes' | 'frozen' | 'users' | 'resumes' | 'ops' | 'announcements' | 'emails' | 'quota' | 'mail' | 'llm';
 
-const TAB_KEYS: Tab[] = ['requests', 'codes', 'frozen', 'users', 'ops', 'announcements', 'emails'];
+const TAB_KEYS: Tab[] = ['requests', 'codes', 'frozen', 'users', 'ops', 'announcements', 'emails', 'mail', 'llm'];
 
 /** 从 URL query 解析 Tab（非法值回落 'requests'）；仅在浏览器端可用 */
 function tabFromQuery(): Tab {
@@ -799,6 +801,16 @@ export default function AdminPage() {
             <button type="button" onClick={() => setTab('emails')} className={tabCls(tab === 'emails')}>
               <MailIcon className="size-4" /> 邮件通知
             </button>
+            {isSuperAdmin && (
+              <button type="button" onClick={() => setTab('mail')} className={tabCls(tab === 'mail')}>
+                <SendIcon className="size-4" /> 邮件服务
+              </button>
+            )}
+            {isSuperAdmin && (
+              <button type="button" onClick={() => setTab('llm')} className={tabCls(tab === 'llm')}>
+                <KeyRoundIcon className="size-4" /> 模型配置
+              </button>
+            )}
           </div>
         </header>
 
@@ -1021,7 +1033,7 @@ export default function AdminPage() {
         {tab === 'frozen' && (
           <div className="mt-6">
             <div className="flex items-center justify-between rounded-md border border-line bg-white p-4">
-              <p className="text-sm text-sub">冻结账号无法通过常规登录，可在管理员侧兜底解冻。</p>
+              <p className="text-sm text-sub">冻结账号无法通过常规登录，需由管理员解冻后才能恢复使用。</p>
               <button type="button" onClick={loadFrozen} className="inline-flex h-9 items-center gap-2 rounded-md border border-line-soft bg-white px-4 text-sm font-medium text-ink hover:bg-mist">
                 <RefreshCwIcon className="size-4" /> 刷新
               </button>
@@ -1425,6 +1437,8 @@ export default function AdminPage() {
         {tab === 'emails' && <AdminEmailBroadcast />}
         {tab === 'quota' && <AdminQuota />}
         {tab === 'resumes' && isSuperAdmin && <AdminResumeLibrary />}
+        {tab === 'mail' && isSuperAdmin && <AdminMail />}
+          {tab === 'llm' && isSuperAdmin && <AdminLlm />}
 
         {/* 行内「…」菜单浮层 */}
         {rowMenu && (

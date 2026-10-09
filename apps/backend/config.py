@@ -263,6 +263,8 @@ ANNOUNCEMENTS_DIR = os.path.join(DATA_DIR, "announcements")
 ANNOUNCEMENT_READS_DIR = os.path.join(DATA_DIR, "announcement_reads")
 EMAIL_IMAGES_DIR = os.path.join(DATA_DIR, "email_images")
 EMAIL_LOGS_DIR = os.path.join(DATA_DIR, "email_logs")              # 邮件群发历史
+# 运行时系统配置（账号管理 → 邮件服务）：界面可改、保存即生效，免重启
+SYSTEM_CONFIG_DIR = os.path.join(DATA_DIR, "system_config")
 QUOTA_DIR = os.path.join(DATA_DIR, "quota")                             # 使用次数配额
 RESUME_ORIGINALS_DIR = os.path.join(DATA_DIR, "resume_originals")        # 上传的简历原始文件（PDF/DOCX）：仅服务端留存 + 超管在线查看
 QUOTA_LIMITS_PATH = os.path.join(QUOTA_DIR, "limits.json")
@@ -317,6 +319,7 @@ for _d in (
     ANNOUNCEMENT_READS_DIR,
     EMAIL_IMAGES_DIR,
     EMAIL_LOGS_DIR,
+    SYSTEM_CONFIG_DIR,
     QUOTA_DIR,
     LOG_DIR,
 ):

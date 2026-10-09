@@ -46,13 +46,13 @@ export default function ConfirmDialog({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="presentation">
+    <div className="dialog-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="presentation">
       <div
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={typeof title === 'string' ? title : '操作确认'}
-        className="w-full max-w-md rounded-md border border-line bg-white p-6 shadow-xl"
+        className="dialog-panel w-full max-w-md rounded-md border border-line bg-white p-6 shadow-xl"
       >
         <div className="flex items-start gap-3">
           {danger ? (

@@ -46,6 +46,7 @@ import resume_original
 import screening_agent
 import resume_review
 import resume_sanitize
+import system_config
 from prompts import (
     PROMPT_HR_JUDGE,
     PROMPT_HR_RECRUITMENT_ANALYSIS,
@@ -1464,6 +1465,269 @@ def admin_list_frozen_users():
     rid = _request_id("admin")
     items = auth_mod.list_frozen_users()
     return jsonify({"request_id": rid, "data": {"items": items, "total": len(items)}})
+
+
+# ── 系统配置：邮件服务（账号管理 → 邮件服务）─────────────────────────────
+@app.get("/api/v1/admin/system/mail")
+def admin_get_mail_config():
+    """读取邮件服务配置。密码永远只回掩码，不回明文。"""
+    rid = _request_id("admin")
+    _require_super_admin()
+    return jsonify({"request_id": rid, "data": system_config.public_mail()})
+
+
+@app.put("/api/v1/admin/system/mail")
+def admin_update_mail_config():
+    """
+    保存邮件服务配置。
+
+    body: {slots: {transactional?: {...}, notification?: {...}}}
+    password 为空串或省略 = 保持不变（前端拿到的是掩码，不能回传覆盖真密码）。
+    保存后所有 gunicorn worker 立即生效（mtime 缓存），无需重启容器。
+    """
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    payload = request.get_json(silent=True) or {}
+
+    try:
+        data = system_config.save_mail(payload, operator=me.get("username") or "")
+    except system_config.ConfigError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 422
+
+    views = data.get("slots") or {}
+    touched = [slot for slot in (payload.get("slots") or {}) if slot in views]
+    summary = "、".join(
+        f"{slot}({views[slot].get('host')}:{views[slot].get('port')}，"
+        f"发件人 {views[slot].get('from_address') or views[slot].get('username') or '未填'})"
+        for slot in touched
+    )
+    auth_mod.record_admin_op(
+        "system_mail_update",
+        _admin_user_id(),
+        me.get("username") or "",
+        "system",
+        detail=f"更新邮件服务配置：{summary or '无槽位'}",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": data})
+
+
+@app.post("/api/v1/admin/system/mail/test")
+def admin_test_mail_config():
+    """
+    测试发件配置：连接 + 登录。body: {slot?, send?}。
+    send=true 时给当前管理员邮箱发一封测试邮件。
+    """
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    data = request.get_json(silent=True) or {}
+
+    slot = str(data.get("slot") or system_config.SLOT_TRANSACTIONAL)
+    if slot not in system_config.SLOTS:
+        return jsonify({"detail": "槽位名称不合法。", "request_id": rid}), 422
+
+    to_email = ""
+    if data.get("send"):
+        to_email = (me.get("email") or "").strip()
+        if not to_email:
+            record_email = auth_mod.find_user_by_username(me.get("username") or "") or {}
+            to_email = (record_email.get("email") or "").strip()
+        if not to_email:
+            return jsonify({"detail": "当前管理员账号没有邮箱，无法发送测试邮件。", "request_id": rid}), 422
+
+    try:
+        result = mailer_mod.test_smtp(slot, to_email=to_email)
+    except Exception as exc:  # noqa: BLE001 —— SMTP 原始报错原样回显，便于管理员排错
+        detail = (str(exc) or exc.__class__.__name__)[:300]
+        auth_mod.record_admin_op(
+            "system_mail_test",
+            _admin_user_id(),
+            me.get("username") or "",
+            "system",
+            detail=f"测试邮件服务失败（{slot}）：{detail[:120]}",
+            request_id=rid,
+        )
+        return jsonify({"detail": f"测试失败：{detail}", "request_id": rid}), 422
+
+    auth_mod.record_admin_op(
+        "system_mail_test",
+        _admin_user_id(),
+        me.get("username") or "",
+        "system",
+        detail=(
+            f"测试邮件服务成功（{slot}，{result.get('host')}:{result.get('port')}"
+            + ("，已发测试邮件" if result.get("test_email_sent") else "")
+            + "）"
+        ),
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": result})
+
+
+@app.delete("/api/v1/admin/system/mail")
+def admin_clear_mail_config():
+    """清空界面配置，发件邮箱改用服务器 .env 里的 SMTP_* 设置。"""
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    try:
+        data = system_config.clear_mail(operator=me.get("username") or "")
+    except system_config.ConfigError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 422
+
+    auth_mod.record_admin_op(
+        "system_mail_clear",
+        _admin_user_id(),
+        me.get("username") or "",
+        "system",
+        detail="清空邮件服务界面配置，发件邮箱改用 .env 的 SMTP_* 设置",
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": data})
+
+
+# ── 系统配置：模型配置（账号管理 → 模型配置）─────────────────────────────
+@app.get("/api/v1/admin/system/llm")
+def admin_get_llm_config():
+    """读取模型配置。API Key 永远只回掩码，不回明文。"""
+    rid = _request_id("admin")
+    _require_super_admin()
+    return jsonify({"request_id": rid, "data": system_config.public_llm()})
+
+
+@app.put("/api/v1/admin/system/llm")
+def admin_update_llm_config():
+    """
+    保存模型配置。
+
+    body: {api_key?, base_url?, model?, timeout?, enabled?}
+    api_key 为空串或省略 = 保持不变（前端拿到的是掩码，不能回传覆盖真密钥）；
+    base_url 走白名单校验（防 SSRF）。保存后所有 gunicorn worker 立即生效，无需重启。
+    """
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    payload = request.get_json(silent=True) or {}
+
+    try:
+        data = system_config.save_llm(payload, operator=me.get("username") or "")
+    except system_config.ConfigError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 422
+
+    auth_mod.record_admin_op(
+        "system_llm_update",
+        _admin_user_id(),
+        me.get("username") or "",
+        "system",
+        detail=(
+            f"更新模型配置：{data.get('base_url')} / {data.get('model')} / "
+            f"启用={data.get('enabled')} / 来源={data.get('source')}"
+        ),
+        request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": data})
+
+
+@app.post("/api/v1/admin/system/llm/test")
+def admin_test_llm_config():
+    """
+    测试 API 连接：真的发一次最小推理请求。
+
+    body: {api_key?, base_url?, model?} —— 传入值优先，支持"先测通再保存"。
+    """
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    payload = request.get_json(silent=True) or {}
+
+    base_url = str(payload.get("base_url") or "").strip()
+    if base_url:
+        try:
+            base_url = system_config.validate_base_url(base_url)
+        except system_config.ConfigError as exc:
+            return jsonify({"detail": str(exc), "request_id": rid}), 422
+
+    try:
+        result = llm.test_connection(
+            api_key=str(payload.get("api_key") or ""),
+            base_url=base_url,
+            model=str(payload.get("model") or ""),
+        )
+    except RuntimeError as exc:
+        auth_mod.record_admin_op(
+            "system_llm_test", _admin_user_id(), me.get("username") or "", "system",
+            detail=f"测试模型连接失败：{str(exc)[:180]}", request_id=rid,
+        )
+        return jsonify({"detail": f"测试失败：{exc}", "request_id": rid}), 422
+
+    auth_mod.record_admin_op(
+        "system_llm_test", _admin_user_id(), me.get("username") or "", "system",
+        detail=f"测试模型连接成功：{result.get('model')}（{result.get('seconds')}s）", request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": result})
+
+
+@app.post("/api/v1/admin/system/llm/models")
+def admin_list_llm_models():
+    """
+    按接口地址拉取可用模型列表（GET /models）。
+
+    body: {api_key?, base_url?} —— 传入值优先；成功后把列表缓存进配置文件，
+    刷新页面下拉框仍然可用。
+    """
+    rid = _request_id("admin")
+    me = _require_super_admin()
+    payload = request.get_json(silent=True) or {}
+
+    base_url = str(payload.get("base_url") or "").strip()
+    if base_url:
+        try:
+            base_url = system_config.validate_base_url(base_url)
+        except system_config.ConfigError as exc:
+            return jsonify({"detail": str(exc), "request_id": rid}), 422
+
+    try:
+        result = llm.list_models(
+            api_key=str(payload.get("api_key") or ""),
+            base_url=base_url,
+        )
+    except RuntimeError as exc:
+        auth_mod.record_admin_op(
+            "system_llm_models", _admin_user_id(), me.get("username") or "", "system",
+            detail=f"获取模型列表失败：{str(exc)[:180]}", request_id=rid,
+        )
+        return jsonify({"detail": f"获取失败：{exc}", "request_id": rid}), 422
+
+    data = system_config.store_models(result.get("models") or [], operator=me.get("username") or "")
+    auth_mod.record_admin_op(
+        "system_llm_models", _admin_user_id(), me.get("username") or "", "system",
+        detail=f"获取模型列表：{result.get('count')} 个（{result.get('seconds')}s）", request_id=rid,
+    )
+    return jsonify({
+        "request_id": rid,
+        "data": {
+            "models": data.get("models"),
+            "count": result.get("count"),
+            "models_fetched_at": data.get("models_fetched_at"),
+            "seconds": result.get("seconds"),
+            "config": data,
+        },
+    })
+
+
+@app.delete("/api/v1/admin/system/llm")
+def admin_clear_llm_config():
+    """清空界面上的模型配置，立即回退到 .env。"""
+    rid = _request_id("admin")
+    me = _require_super_admin()
+
+    try:
+        data = system_config.clear_llm(operator=me.get("username") or "")
+    except system_config.ConfigError as exc:
+        return jsonify({"detail": str(exc), "request_id": rid}), 422
+
+    auth_mod.record_admin_op(
+        "system_llm_clear", _admin_user_id(), me.get("username") or "", "system",
+        detail=f"清空模型界面配置，当前来源={data.get('source')}", request_id=rid,
+    )
+    return jsonify({"request_id": rid, "data": data})
 
 
 @app.post("/api/v1/admin/users/<username>/freeze")

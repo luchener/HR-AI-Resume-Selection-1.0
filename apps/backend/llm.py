@@ -13,7 +13,9 @@ from urllib.parse import urlparse
 
 from openai import OpenAI
 
-from config import LLM_API_KEY, LLM_BASE_URL, LL_MODEL
+import time
+
+import system_config
 
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,9 @@ def normalize_runtime_config(value: dict | None) -> dict:
 def model_config_fingerprint(value: dict | None) -> str:
     """Build a cache discriminator without exposing request credentials."""
     if value is None:
-        material = f"server-default\0{LLM_BASE_URL}\0{LL_MODEL}"
+        # 服务端这一层的指纹必须走同一份解析：配置一改，缓存立刻失效（免重启）
+        server = system_config.resolve_llm()
+        material = "server-default\0%s\0%s" % (server.get("base_url"), server.get("model"))
     else:
         config = normalize_runtime_config(value)
         material = "\0".join(
@@ -90,22 +94,60 @@ def _runtime_client(value: dict) -> tuple[OpenAI, dict]:
     return client, config
 
 
+def _server_settings() -> dict:
+    """
+    服务端这一层的生效配置：界面配置 > .env。
+
+    用户请求里自带的 Key 优先级更高，这里只负责"用户没填"的情况。
+    """
+    return system_config.resolve_llm()
+
+
+def _redact(text: str, *secrets: str) -> str:
+    """把可能出现在异常文本里的密钥抹掉，避免它被写进日志或回显到界面。"""
+    result = str(text or "")
+    for secret in secrets:
+        if secret and len(secret) >= 8:
+            result = result.replace(secret, "***")
+    return result
+
+
 def _get_client() -> OpenAI:
-    if not LLM_API_KEY:
+    server = _server_settings()
+    if not server.get("ready"):
+        # 只有真需要出网建客户端时才报错，这样测试注入的桩客户端仍然可用
         raise RuntimeError(
-            "LLM_API_KEY 未配置，请在 apps/backend/.env 填写后重启后端。"
+            "模型服务未配置：请在「账号管理 → 模型配置」中填写 API Key；"
+            "也可继续用 .env 的 LLM_API_KEY 作为服务器层配置。"
         )
-    return OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=300.0)
+    return OpenAI(
+        api_key=server["api_key"],
+        base_url=server["base_url"],
+        timeout=float(server.get("timeout") or 300),
+    )
 
 
-# 模块级单例客户端，避免每次请求重建
+# 客户端按"生效配置指纹"复用：配置一改立即重建，不必重启进程
 _client: Optional[OpenAI] = None
+_client_fingerprint = ""
 
 
 def _client_singleton() -> OpenAI:
-    global _client
+    global _client, _client_fingerprint
+    server = _server_settings()
+    fingerprint = "%s\0%s\0%s\0%s" % (
+        server.get("base_url"),
+        server.get("model"),
+        server.get("timeout"),
+        hashlib.sha256(str(server.get("api_key") or "").encode("utf-8")).hexdigest()[:16],
+    )
     if _client is None:
         _client = _get_client()
+        _client_fingerprint = fingerprint
+    elif _client_fingerprint and fingerprint != _client_fingerprint:
+        # 指纹未知（外部注入的客户端）时就地尊重它；已知则配置一变立刻重建
+        _client = _get_client()
+        _client_fingerprint = fingerprint
     return _client
 
 
@@ -232,6 +274,85 @@ def _response_debug(response) -> str:
     return f"finish_reason={finish_reason!r}; candidate_lengths={lengths}; preview={preview!r}"
 
 
+def list_models(api_key: str = "", base_url: str = "", timeout: float = 30.0) -> dict:
+    """
+    向兼容 OpenAI 的地址请求可用模型列表（GET /models）。
+
+    传入的值优先（支持"先测通再保存"）；缺省时用服务端生效配置。
+    """
+    server = system_config.resolve_llm()
+    key = (api_key or "").strip() or str(server.get("api_key") or "")
+    url = (base_url or "").strip() or str(server.get("base_url") or "")
+    if not key:
+        raise RuntimeError("请先填写 API Key。")
+    if not url:
+        raise RuntimeError("请先填写接口地址。")
+
+    started = time.monotonic()
+    client = OpenAI(api_key=key, base_url=url, timeout=float(timeout))
+    try:
+        page = client.models.list()
+    except Exception as exc:  # noqa: BLE001 - 原样回传服务商报错，但先抹掉密钥
+        raise RuntimeError(_redact(exc, key)) from None
+
+    models: list[str] = []
+    for item in getattr(page, "data", None) or []:
+        name = str(getattr(item, "id", "") or "").strip()
+        if name and name not in models and len(name) <= 200:
+            models.append(name)
+    return {
+        "models": models[:200],
+        "count": len(models[:200]),
+        "base_url": url,
+        "seconds": round(time.monotonic() - started, 2),
+    }
+
+
+def test_connection(api_key: str = "", base_url: str = "", model: str = "",
+                    timeout: float = 60.0) -> dict:
+    """
+    用一次最小调用验证服务端配置真能出字。
+
+    只列模型不够：有些地址 /models 能通但推理不行，所以这里真的发一次请求。
+    """
+    server = system_config.resolve_llm()
+    key = (api_key or "").strip() or str(server.get("api_key") or "")
+    url = (base_url or "").strip() or str(server.get("base_url") or "")
+    name = (model or "").strip() or str(server.get("model") or "")
+    if not key:
+        raise RuntimeError("请先填写 API Key。")
+    if not url:
+        raise RuntimeError("请先填写接口地址。")
+    if not name:
+        raise RuntimeError("请先填写默认模型。")
+
+    started = time.monotonic()
+    client = OpenAI(api_key=key, base_url=url, timeout=float(timeout))
+    try:
+        response = client.chat.completions.create(
+            model=name,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=8,
+            temperature=0,
+        )
+    except Exception as exc:  # noqa: BLE001 - 原样回传服务商报错，但先抹掉密钥
+        raise RuntimeError(_redact(exc, key)) from None
+
+    reply = ""
+    try:
+        reply = str(response.choices[0].message.content or "").strip()
+    except (AttributeError, IndexError, TypeError):
+        reply = ""
+    seconds = round(time.monotonic() - started, 2)
+    return {
+        "model": name,
+        "base_url": url,
+        "seconds": seconds,
+        "reply_chars": len(reply),
+        "message": f"API 连接正常，模型已返回响应（{seconds}s）",
+    }
+
+
 def call_llm(
     prompt: str,
     expect_json: bool = False,
@@ -242,8 +363,9 @@ def call_llm(
     """Call the configured LLM and parse structured results when requested."""
     if runtime_config is None:
         client = _client_singleton()
-        model = LL_MODEL
-        base_url = LLM_BASE_URL
+        server = _server_settings()
+        model = server.get("model") or ""
+        base_url = server.get("base_url") or ""
     else:
         client, config = _runtime_client(runtime_config)
         model = config["model"]

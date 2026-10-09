@@ -13,6 +13,7 @@ HTML 全部使用内联样式 + table 布局，兼容网易/QQ/Gmail 等主流�
 """
 import logging
 import smtplib
+import time
 from email.header import Header
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
@@ -20,6 +21,7 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 
 import config
+import system_config
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,47 @@ _BLUE_BORDER = "#b9cbf2"
 _FOOTER = "#9aa5b5"
 
 
-def smtp_available() -> bool:
-    """是否已配置可用的 SMTP 服务。"""
-    return config.smtp_configured()
+def smtp_available(slot: str = system_config.SLOT_TRANSACTIONAL) -> bool:
+    """是否已配置可用的发件服务（界面配置优先，其次读 .env）。"""
+    return bool(system_config.resolve_mail(slot).get("ready"))
+
+
+def _mail_config(slot: str = system_config.SLOT_TRANSACTIONAL) -> dict:
+    """取最终生效的发件配置；未就绪时抛出指向界面的明确错误。"""
+    cfg = system_config.resolve_mail(slot)
+    if not cfg.get("ready"):
+        raise RuntimeError(
+            "邮件服务未配置：请在「账号管理 → 邮件服务」中填写发件邮箱；"
+            "服务器 .env 里的 SMTP_HOST/SMTP_USER/SMTP_PASSWORD 仍是默认配置。"
+        )
+    return cfg
+
+
+def _connect(cfg: dict):
+    """按配置建立并登录 SMTP 连接（ssl / starttls / plain）。"""
+    host = cfg.get("host") or ""
+    port = int(cfg.get("port") or 465)
+    mode = (cfg.get("security") or "ssl").lower()
+
+    if mode == "ssl":
+        server = smtplib.SMTP_SSL(host, port, timeout=15)
+    elif mode == "starttls":
+        server = smtplib.SMTP(host, port, timeout=15)
+        server.ehlo()
+        server.starttls()
+        server.ehlo()
+    else:
+        server = smtplib.SMTP(host, port, timeout=15)
+
+    try:
+        server.login(cfg.get("username") or "", cfg.get("password") or "")
+    except Exception:
+        try:
+            server.quit()
+        except Exception:  # noqa: BLE001 - 关闭失败不影响报错
+            pass
+        raise
+    return server
 
 
 def send_password_reset_email(to_email: str, username: str, code: str) -> bool:
@@ -45,8 +85,7 @@ def send_password_reset_email(to_email: str, username: str, code: str) -> bool:
     发送密码重置邮件，正文内含一次性验证码（6 位）。
     成功返回 True，失败抛异常（由调用方决定如何响应）。
     """
-    if not config.smtp_configured():
-        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+    _mail_config()  # 未配置时在此抛出明确错误
 
     ttl_minutes = max(1, config.RESET_TOKEN_TTL_SECONDS // 60)
     subject = "【AI 简历智选】密码重置验证码"
@@ -79,8 +118,7 @@ def send_verification_email(to_email: str, code: str, purpose: str = "注册") -
     发送通用邮箱验证码邮件（注册绑定时用）。
     成功返回 True，失败抛异常（由调用方决定如何响应）。
     """
-    if not config.smtp_configured():
-        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+    _mail_config()  # 未配置时在此抛出明确错误
 
     ttl_minutes = max(1, config.RESET_TOKEN_TTL_SECONDS // 60)
     subject = f"【AI 简历智选】{purpose}邮箱验证码"
@@ -113,8 +151,7 @@ def send_invite_code_email(to_email: str, code: str, expires_hours: int = 24) ->
     发送邀请码邮件（管理员审批通过后，自动发到申请人邮箱）。
     邀请码为短码（默认 4 位），不区分大小写；一次性、限时有效。
     """
-    if not config.smtp_configured():
-        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+    _mail_config()  # 未配置时在此抛出明确错误
 
     subject = "【AI 简历智选】您的注册邀请码"
     plain = f"""您好：
@@ -143,8 +180,7 @@ def send_invite_rejection_email(to_email: str, reason: str) -> bool:
     """
     发送申请被拒通知邮件（管理员填写拒绝理由时触发）。
     """
-    if not config.smtp_configured():
-        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+    _mail_config()  # 未配置时在此抛出明确错误
 
     subject = "【AI 简历智选】账号申请未通过"
     reason_text = str(reason or "").strip() or "暂未说明具体原因，如有疑问可联系管理员。"
@@ -283,26 +319,80 @@ def _build_html_email(subject: str, greeting: str, description: str, code: str, 
 </html>"""
 
 
-def _send(to_email: str, subject: str, plain_body: str, html_body: str) -> None:
+def test_smtp(slot: str = system_config.SLOT_TRANSACTIONAL, to_email: str = "") -> dict:
+    """
+    测试发件配置：连接 + 登录；给了 to_email 则同时发一封测试邮件。
+
+    返回结构化结果供管理界面展示；连接或认证失败直接抛异常（接口层转 422）。
+    """
+    cfg = system_config.resolve_mail(slot)
+    if not cfg.get("ready"):
+        raise RuntimeError("当前没有可用的发件配置：请先填写 SMTP 服务器、用户名与密码/授权码。")
+
+    sender = cfg.get("from_address") or cfg.get("username") or ""
+    started = time.time()
+    server = _connect(cfg)
+    sent = False
+    try:
+        if to_email:
+            plain = (
+                "这是一封来自「AI 简历智选」的发件配置测试邮件。\n\n"
+                f"发件邮箱：{sender}\n"
+                f"服务器：{cfg.get('host')}:{cfg.get('port')}（{cfg.get('security')}）\n\n"
+                "收到本邮件说明邮件服务配置可用，无需回复。"
+            )
+            html = (
+                '<div style="font:14px/1.7 -apple-system,Segoe UI,Microsoft YaHei,sans-serif;color:#253249">'
+                "<p>这是一封来自 <b>AI 简历智选</b> 的发件配置测试邮件。</p>"
+                f"<p>发件邮箱：<b>{sender}</b><br>"
+                f"服务器：{cfg.get('host')}:{cfg.get('port')}（{cfg.get('security')}）</p>"
+                '<p style="color:#6d7b91">收到本邮件说明邮件服务配置可用，无需回复。</p></div>'
+            )
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = Header("【AI 简历智选】发件配置测试", "utf-8")
+            msg["From"] = formataddr((str(Header(cfg.get("from_name") or "AI 简历智选", "utf-8")), sender))
+            msg["To"] = to_email
+            msg.attach(MIMEText(plain, "plain", "utf-8"))
+            msg.attach(MIMEText(html, "html", "utf-8"))
+            server.sendmail(sender, [to_email], msg.as_string())
+            sent = True
+    finally:
+        server.quit()
+
+    return {
+        "slot": slot,
+        "source": cfg.get("source"),
+        "host": cfg.get("host"),
+        "port": cfg.get("port"),
+        "security": cfg.get("security"),
+        "from_address": sender,
+        "test_email_sent": sent,
+        "seconds": round(time.time() - started, 2),
+        "message": "连接与登录成功" + ("，测试邮件已发送" if sent else ""),
+    }
+
+
+def _send(
+    to_email: str,
+    subject: str,
+    plain_body: str,
+    html_body: str,
+    slot: str = system_config.SLOT_TRANSACTIONAL,
+) -> None:
     """发送 multipart/alternative 邮件（纯文本 + HTML）。"""
-    if not config.smtp_configured():
-        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+    cfg = _mail_config(slot)
+    sender = cfg.get("from_address") or cfg.get("username") or ""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = Header(subject, "utf-8")
-    msg["From"] = formataddr((str(Header("AI 简历智选", "utf-8")), config.SMTP_FROM))
+    msg["From"] = formataddr((str(Header(cfg.get("from_name") or "AI 简历智选", "utf-8")), sender))
     msg["To"] = to_email
     msg.attach(MIMEText(plain_body, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
-        if config.SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=15)
-        else:
-            server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=15)
-            server.starttls()
+        server = _connect(cfg)
         try:
-            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
-            server.sendmail(config.SMTP_FROM, [to_email], msg.as_string())
+            server.sendmail(sender, [to_email], msg.as_string())
             logger.info("email sent to %s (subject=%s)", to_email, subject)
         finally:
             server.quit()
@@ -327,12 +417,12 @@ def send_broadcast_email(
     不依赖公网图床，QQ/网易/Outlook 等主流客户端均可显示。
     结构：multipart/related → multipart/alternative(纯文本+HTML) + 内联图片。
     """
-    if not config.smtp_configured():
-        raise RuntimeError("邮件服务未配置：请在 .env 中填写 SMTP_HOST/USER/PASSWORD")
+    cfg = _mail_config(system_config.SLOT_NOTIFICATION)
+    sender = cfg.get("from_address") or cfg.get("username") or ""
 
     outer = MIMEMultipart("related")
     outer["Subject"] = Header(subject, "utf-8")
-    outer["From"] = formataddr((str(Header("AI 简历智选", "utf-8")), config.SMTP_FROM))
+    outer["From"] = formataddr((str(Header(cfg.get("from_name") or "AI 简历智选", "utf-8")), sender))
     outer["To"] = to_email
 
     alt = MIMEMultipart("alternative")
@@ -354,14 +444,9 @@ def send_broadcast_email(
         outer.attach(part)
 
     try:
-        if config.SMTP_PORT == 465:
-            server = smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=15)
-        else:
-            server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=15)
-            server.starttls()
+        server = _connect(cfg)
         try:
-            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
-            server.sendmail(config.SMTP_FROM, [to_email], outer.as_string())
+            server.sendmail(sender, [to_email], outer.as_string())
             logger.info("broadcast email sent to %s (subject=%s)", to_email, subject)
         finally:
             server.quit()

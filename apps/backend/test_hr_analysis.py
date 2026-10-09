@@ -471,10 +471,23 @@ class HrAnalysisTests(unittest.TestCase):
 
         completions = FakeCompletions()
         previous = llm_module._client
-        llm_module._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        previous_fingerprint = llm_module._client_fingerprint
+        llm_module._client = None
+        llm_module._client_fingerprint = ""
         try:
-            with patch.object(llm_module, "LLM_BASE_URL", "https://api.deepseek.com"), patch.object(
-                llm_module, "LL_MODEL", "deepseek-v4-flash"
+            # 服务端配置改成调用时解析后，这里改为桩掉配置解析与客户端构造，
+            # 不再依赖模块级常量（那正是"改配置要重启"的根源）。
+            with patch.object(llm_module.system_config, "resolve_llm", return_value={
+                "api_key": "test-key",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+                "timeout": 300,
+                "ready": True,
+                "source": "ui",
+            }), patch.object(
+                llm_module,
+                "_get_client",
+                return_value=SimpleNamespace(chat=SimpleNamespace(completions=completions)),
             ):
                 result = llm_module.call_llm(
                     "输出 JSON", expect_json=True, max_tokens=100, thinking=True
@@ -483,6 +496,7 @@ class HrAnalysisTests(unittest.TestCase):
             self.assertEqual(completions.request["extra_body"], {"thinking": {"type": "enabled"}})
         finally:
             llm_module._client = previous
+            llm_module._client_fingerprint = previous_fingerprint
 
     def test_llm_parses_reasoning_json_when_content_has_prose(self):
         class FakeCompletions:
