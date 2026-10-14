@@ -23,14 +23,6 @@ const TIER_LABELS: Record<string, string> = {
   C: '生活类要求',
 };
 
-/** 逐条判定状态（与后端 requirements_checklist.status 对应） */
-const EXPORT_STATUS_LABELS: Record<string, string> = {
-  met: '符合',
-  not_met: '不符合',
-  not_mentioned: '未写明',
-  manual_review: '待人工确认',
-};
-
 type ExportFormat = 'png' | 'pdf' | 'doc';
 
 function esc(value: unknown): string {
@@ -136,31 +128,48 @@ ${bullets((a.non_mitigable_blockers || []).map((b) => b.text))}
 
   out.push(`<h2>核心判定</h2><p class="para">${esc(a.summary)}</p>`);
 
-  // 岗位要求逐条判定：导出的报告是 HR 要发给别人的，逐条结论与"待人工确认"必须跟着走。
-  // 导出的文件离开界面后没有"展开"按钮，所以这里全量导出（界面上默认折叠只是为了省版面），
-  // 但按"需要人工判断的优先"排序，别让读者在 28 条里翻找那 2 条卡人的。
+  // 岗位要求逐条判定：导出**只逐条列出「符合」的条目**。
+  // 不符合 / 未写明 / 待人工确认一次能到二三十条，逐条铺开太占版面；而且不符合已经通过
+  // 硬门槛扣分与封顶体现在「评估总览」的分数里，不在这里再重复一遍。
+  // 但"缺哪几条"不能丢：不符合的条目名合并成一行列出（没有判定/依据，只留要求本身），
+  // 报告被转发给用人部门时还看得出缺什么。
+  // 与界面上那份是互补分工：屏幕按"需要处理的优先"（默认只显示不符合 + 待人工确认，可展开全部），
+  // 导出按"够格在哪"（表格只列符合，其余压缩成几行）。
   const checklist = a.requirements_checklist || [];
   const undetermined = a.undetermined_requirements || [];
   if (checklist.length > 0) {
     const countOf = (status: string) => checklist.filter((item) => item.status === status).length;
-    const rankOf = (status: string) => ({ not_met: 0, manual_review: 1, not_mentioned: 2, met: 3 })[status] ?? 2;
-    const rows = [...checklist].sort((x, y) => rankOf(x.status) - rankOf(y.status));
+    const metItems = checklist.filter((item) => item.status === 'met');
+    const notMetItems = checklist.filter((item) => item.status === 'not_met');
+    const restParts = [
+      countOf('not_met') > 0 ? `不符合 ${countOf('not_met')}` : '',
+      countOf('manual_review') > 0 ? `待人工确认 ${countOf('manual_review')}` : '',
+      countOf('not_mentioned') > 0 ? `未写明 ${countOf('not_mentioned')}` : '',
+    ].filter(Boolean);
     out.push(`
 <h2>岗位要求逐条判定</h2>
-<p class="sub">共 ${checklist.length} 条：不符合 ${countOf('not_met')} · 待人工确认 ${countOf('manual_review')} · 未写明 ${countOf('not_mentioned')} · 符合 ${countOf('met')}。下表按“需要人工判断的优先”排序。
-「未写明」指简历没有提到——按“没写不等于没有”，系统不判不符合、不扣分，建议面试时核实。</p>
-<table>
-  <thead><tr><th style="width:96px">档位</th><th>岗位要求</th><th style="width:96px">判定</th><th>依据</th></tr></thead>
+<p class="sub">共 ${checklist.length} 条：符合 ${metItems.length}${restParts.length > 0 ? ` · ${restParts.join(' · ')}` : ''}。
+下表只逐条列出「符合」的条目${restParts.length > 0 ? '；其余条目不在此展开（不符合的已计入硬门槛扣分与封顶，「未写明」按"没写不等于没有"处理）。' : ''}</p>
+${
+  notMetItems.length > 0
+    ? `<p class="sub"><b class="red">不符合（${notMetItems.length} 条）：</b>${notMetItems.map((item) => esc(item.text)).join('、')}</p>`
+    : ''
+}
+${
+  metItems.length > 0
+    ? `<table>
+  <thead><tr><th style="width:96px">档位</th><th>岗位要求</th><th>依据</th></tr></thead>
   <tbody>
-    ${rows.map((item) => `
+    ${metItems.map((item) => `
     <tr>
       <td><span class="tag">${esc(TIER_LABELS[item.gate_tier || ''] || '—')}</span></td>
       <td>${esc(item.text)}</td>
-      <td class="${item.status === 'not_met' ? 'red' : item.status === 'met' ? 'green' : ''}">${esc(EXPORT_STATUS_LABELS[item.status] || item.status)}${item.status === 'manual_review' && item.evidence_state === 'matched' ? '<br><span class="sub">真实性需核实</span>' : ''}</td>
       <td class="sub">${item.resume_basis ? esc(item.resume_basis) : '—'}</td>
     </tr>`).join('')}
   </tbody>
-</table>`);
+</table>`
+    : '<p class="sub">本次没有判定为「符合」的条目。</p>'
+}`);
   }
   if (undetermined.length > 0) {
     out.push(`
@@ -169,36 +178,40 @@ ${bullets(undetermined.map((entry) => `${entry.type}：${entry.text}${entry.note
 <p class="sub">这类要求（学历形式、年龄、出差意愿等）机器无法从简历确认，系统不替 HR 下结论，也不据此扣分。</p>`);
   }
 
-  // 真实性核验（只读）：文件里没有折叠按钮，所以这里全量导出，并保留 notice 的定性说明
+  // 真实性核验（只读）：文件里没有折叠按钮，所以这里全量导出，并保留 notice 的定性说明。
+  // 标题不带"（只读，不参与评分）"——只读这件事由下方口径行说明，标题保持干净。
+  // 0 命中时整段不输出：文件里没有"展开"按钮，「核验规则全部跑完，未发现…」这种空结论
+  // 对读者只有噪音（界面上那行绿字仍然保留，信息不丢）。
   const credibility = a.credibility;
-  if (credibility?.enabled) {
+  const credibilityFindings = credibility?.findings || [];
+  if (credibility?.enabled && credibilityFindings.length > 0) {
     const levelLabels: Record<string, string> = { red_flag: '需优先核实', review: '待核实', info: '提示' };
     const srcLabels: Record<string, string> = { resume: '简历原文', report: '报告表述' };
-    const items = credibility.findings || [];
+    const items = credibilityFindings;
     const counts = credibility.counts || { red_flag: 0, review: 0, info: 0 };
     out.push(`
-<h2>真实性核验（只读，不参与评分）</h2>
+<h2>真实性核验</h2>
 <p class="sub">${esc(credibility.notice || '核验结果只用于提示，不构成对候选人的任何结论。')}
 已跑 ${esc(String(credibility.checks_run))} 条规则：需优先核实 ${counts.red_flag} · 待核实 ${counts.review} · 提示 ${counts.info}。</p>
 ${
-  items.length > 0
-    ? items
-        .map(
-          (item) => `
+  items
+    .map(
+      (item) => `
 <p><span class="tag">${esc(levelLabels[item.level] || item.level)}</span> <b>${esc(item.title)}</b>
 <span class="sub">（${esc(srcLabels[String(item.source || 'report')] || '报告表述')}）</span><br>
 ${esc(item.detail)}<br>
 <span class="sub">证据：${esc(item.evidence)}</span>${
-            item.quote ? `<br><span class="sub">原文引用：${esc(item.quote)}</span>` : ''
-          }<br>
+        item.quote ? `<br><span class="sub">原文引用：${esc(item.quote)}</span>` : ''
+      }<br>
 <span class="sub">面试该问：${esc(item.ask)}</span></p>`,
-        )
-        .join('')
-    : '<p class="sub">核验规则全部跑完，未发现需要人工核实的表述问题。</p>'
+    )
+    .join('')
 }
 <p class="sub">核验口径：${esc(credibility.version)}（只读字段，不参与分数与等级）</p>`);
   }
 
+  // 无问题时不再输出"已核查 N 项要求，全部通过"这种空结论：导出的报告是给 HR 与用人部门看的，
+  // 没有检出问题就不占版面（界面上那行绿字仍然保留）。
   const av = a.agent_validation;
   if (av && av.issues.length > 0) {
     out.push(`
@@ -215,8 +228,6 @@ ${esc(item.detail)}<br>
     </tr>`).join('')}
   </tbody>
 </table>`);
-  } else if (av) {
-    out.push(`<p class="para"><b class="green">Agent 校验：</b>已核查 ${esc(av.checked_rules)} 项要求，全部通过</p>`);
   }
 
   const bs = a.basic_screening;
