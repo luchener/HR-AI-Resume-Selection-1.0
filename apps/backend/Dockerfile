@@ -22,6 +22,11 @@ RUN groupadd -r appgroup -g 1000 && \
 # 复制后端源码（通配符；新增模块自动生效，无需修改 Dockerfile）
 COPY apps/backend/*.py ./
 
+# 运行时数据文件：*.py 通配符带不上，必须单独 COPY。
+# school_tiers.json 是院校分档名单（school_tiers.py 按 __file__ 同级目录读取）；
+# 漏了它不会报错，只会静默退化成"没有任何正证"→ 所有院校判定都进人工复核。
+COPY apps/backend/school_tiers.json ./
+
 # Copy the tools/ package (subdirectory, not matched by the *.py glob above)
 COPY apps/backend/tools/ ./tools/
 
