@@ -111,6 +111,11 @@ dist/
 /deploy.tar
 /.dsh/
 /.npm-cache/
+# 包管理器缓存：只忽略根目录不够。2026-10-14 在服务器上发现 .npm-cache/_cacache
+# 被某次 git add -A 提交进仓库（8 个 blob），本地仓库从来没有这些文件。
+**/.npm-cache/
+**/.pnpm-store/
+**/.pnpm-store
 /.impeccable/
 apps/backend/app/*.txt
 apps/backend/b.md
