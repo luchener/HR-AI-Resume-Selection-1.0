@@ -347,7 +347,9 @@ def save_email_image(data: bytes, filename: str) -> dict:
         raise ValueError("文件内容与扩展名不符，仅接受真实图片。")
     image_id = str(uuid.uuid4())
     path = os.path.join(config.EMAIL_IMAGES_DIR, f"{image_id}.{ext}")
-    tmp = f"{path}.{os.getpid()}.tmp"
+    # 临时文件名每次调用都唯一（只带 pid 会被同进程的并发线程算成同一个路径，
+    # 互相 rename 掉对方的临时文件 → os.replace 抛 FileNotFoundError）。
+    tmp = f"{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
     with open(tmp, "wb") as fh:
         fh.write(data)
         fh.flush()

@@ -135,7 +135,12 @@ def _atomic_replace(tmp: str, path: str) -> None:
 def _write_json(path: str, data: dict) -> None:
     """原子写：临时文件 + fsync + os.replace，避免半写文件。"""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
+    # 临时文件名必须**每次调用都唯一**：只带 pid 的话，同一进程里两个线程
+    # 同时写同一个文件会算出同一个临时文件路径，先完成的那个把它 rename 走，
+    # 另一个 os.replace 就抛 FileNotFoundError（2026-10-14 上线验证时被并发用例抓到：
+    # 同一账号批量分析多份简历 = 一个请求内多线程并行，会踩到）。
+    # 加随机后缀后，原子写的正确性不再依赖"外部锁一定覆盖到每一次写"。
+    tmp = f"{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()

@@ -110,7 +110,9 @@ def save(resume_id: str, data: bytes, filename: str = "", content_type: str = ""
     if not ext or not directory:
         return {}
     path = os.path.join(directory, "%s.%s" % (resume_id, ext))
-    tmp = "%s.%s.tmp" % (path, os.getpid())
+    # 临时文件名每次调用都唯一（只带 pid 会被同进程的并发线程算成同一个路径，
+    # 互相 rename 掉对方的临时文件 → os.replace 抛 FileNotFoundError）。
+    tmp = "%s.%s.%s.tmp" % (path, os.getpid(), os.urandom(4).hex())
     try:
         with open(tmp, "wb") as handle:
             handle.write(data)

@@ -48,7 +48,9 @@ def _write_json(path: str, data: dict) -> None:
     原子写：先写临时文件再 os.replace，掉电 / 多 worker 并发都不会产生半写文件。
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
+    # 临时文件名每次调用都唯一（只带 pid 会被同进程的并发线程算成同一个路径，
+    # 互相 rename 掉对方的临时文件 → os.replace 抛 FileNotFoundError）。
+    tmp = f"{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.flush()
