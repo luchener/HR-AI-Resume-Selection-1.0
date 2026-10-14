@@ -88,9 +88,11 @@ MAX_RESUME_FILE_SIZE = 30 * 1024 * 1024
 # 岗位批量上传硬上限：数量 + 单条长度（防"一条请求写出上千万文件"）
 MAX_JOB_DESCRIPTIONS_PER_REQUEST = 50
 MAX_JOB_DESCRIPTION_CHARS = 20000
-_HR_ANALYSIS_VERSION = "screening-agent-v14-timeline-overlap-rule"
+_HR_ANALYSIS_VERSION = "screening-agent-v15-same-month-handover"
 # 硬门槛判定口径变更时必须改上面的版本号：缓存里存的是**已评分**的最终结果，
 # 不会重新走一遍判定，不换 key 就会继续展示旧口径的分数与 not_met。
+# v15：任职重叠改为严格相交（同月辞职并入职=正常交接，不再报"时间重叠"），
+#      提示词同步加上"月份精度下同月交接不算重叠"，报告侧 risk_points 不会再误报。
 # v2：学历补全校验学员层次维度、年限/证书门槛不再把“优先/可放宽”当硬门槛、
 #     院校层次不达标改为封顶 69（学历层级仍封顶 59）。
 # HR 分析结果缓存：LRU（最近最久未用淘汰）+ TTL（24h），防内存无界增长，
@@ -2608,7 +2610,12 @@ def _find_employment_overlaps(records: list[dict[str, str]]) -> list[dict[str, s
         for other_start, other_end, other in parsed[index + 1:]:
             overlap_start = max(start, other_start)
             overlap_end = min(end, other_end)
-            if overlap_start <= overlap_end:
+            # 日期是**月份精度**：两段区间端点相接（上一段 2026-10 结束、下一段 2026-10 开始，
+            # 即同月离职并入职）是正常交接，不是重叠 —— 只有真正相交才算冲突。
+            # 历史缺陷：这里写成 `<=`，把「2026-10 辞职 + 2026-10 入职」报成"任职时间重叠 1 个月"，
+            # 前端 dashboard 的 EmploymentOverlapWarning 会误报（YG 2026-10-14 发现）。
+            # 核验层 deception_check._overlap_pairs 一直是严格比较（"首尾相接不算重叠"），现已对齐。
+            if overlap_start < overlap_end:
                 overlaps.append({
                     "company_name": record.get("company_name", "未提供"),
                     "other_company_name": other.get("company_name", "未提供"),

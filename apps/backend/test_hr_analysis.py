@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import app as backend
 import llm as llm_module
+import prompts as prompts_module
 import auth as auth_module
 from test_helpers import build_anonymous_resume_docx
 from testsupport import isolated_data_dirs
@@ -1032,6 +1033,46 @@ class HrAnalysisTests(unittest.TestCase):
         overlaps = backend._find_employment_overlaps(records)
 
         self.assertEqual(overlaps, [])
+
+    def test_find_employment_overlaps_ignores_same_month_handover(self):
+        """回归（YG 2026-10-14 发现）：当月辞职、当月入职下一家，不能被判成"任职时间重叠"。
+
+        日期是月份精度，两段区间端点相接（上一段到 2026-10、下一段从 2026-10 开始）
+        就是正常交接。旧实现用 `overlap_start <= overlap_end`，会把这一格算成
+        "重叠 1 个月"并弹到前端 `EmploymentOverlapWarning` 上。
+        """
+        records = [
+            {"company_name": "甲公司", "job_title": "工程师", "start_date": "2020-07", "end_date": "2026-10", "duration": "6 年 4 个月"},
+            {"company_name": "乙公司", "job_title": "工程师", "start_date": "2026-10", "end_date": "至今", "duration": "1 个月"},
+        ]
+
+        overlaps = backend._find_employment_overlaps(records)
+
+        self.assertEqual(overlaps, [], "同月离职并入职属于正常交接，不是时间冲突")
+
+    def test_find_employment_overlaps_still_reports_real_overlap_after_tightening(self):
+        """边界收紧后别收死：真正相交（错开一个月）必须继续报，且月份数要对。"""
+        records = [
+            {"company_name": "甲公司", "job_title": "工程师", "start_date": "2020-07", "end_date": "2026-11", "duration": "6 年 4 个月"},
+            {"company_name": "乙公司", "job_title": "工程师", "start_date": "2026-10", "end_date": "2027-10", "duration": "1 年"},
+        ]
+
+        overlaps = backend._find_employment_overlaps(records)
+
+        self.assertEqual(len(overlaps), 1)
+        self.assertEqual(overlaps[0]["months"], 2, "2026-10 与 2026-11 两个整月相交")
+        self.assertEqual(overlaps[0]["start_date"], "2026-10")
+        self.assertEqual(overlaps[0]["end_date"], "2026-11")
+
+    def test_prompt_states_same_month_handover_is_not_overlap(self):
+        """同一个误报的另一半源头在提示词：模型自己往 risk_points 里写"经历时间重叠"。
+
+        代码里的 `_find_employment_overlaps` 修好了，提示词也得把口径说清，
+        否则模型仍可能把「当月辞职、当月入职」判成矛盾。这条守住那句话不被删掉。
+        """
+        prompt = prompts_module.PROMPT_HR_RECRUITMENT_ANALYSIS
+        self.assertIn("当月辞职、当月入职下一家", prompt)
+        self.assertIn("不算时间重叠", prompt)
 
 
 class HardGateScoreTests(unittest.TestCase):
