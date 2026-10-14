@@ -24,46 +24,33 @@ os.environ["ENV"] = "local"
 import config  # noqa: E402
 import auth  # noqa: E402
 import store  # noqa: E402
+from testsupport import isolated_data_dirs, restore_admin_whitelist  # noqa: E402
 
-_DIR_NAMES = (
-    "users",
-    "password_resets",
-    "resumes",
-    "jobs",
-    "archives",
-    "invite_requests",
-    "invite_codes",
-    "invite_codes_audit",
-    "login_failures",
-    "rate_limits",
-    "admin_ops",
-    "usage",
-)
-
-
-def _isolate():
-    """把 config / auth / store 三层里所有 *_DIR 常量按名字映射到临时目录。"""
-    config.DATA_DIR = _TMP
-    for name in _DIR_NAMES:
-        os.makedirs(os.path.join(_TMP, name), exist_ok=True)
-    for mod in (config, auth, store):
-        for attr in [a for a in dir(mod) if a.endswith("_DIR")]:
-            base = os.path.basename(getattr(mod, attr) or "")
-            if base in _DIR_NAMES:
-                setattr(mod, attr, os.path.join(_TMP, base))
-    auth._INDEX_FILE = os.path.join(auth.USERS_DIR, "_index.json")
-    auth._INDEX_LOCK = os.path.join(auth.USERS_DIR, "_index.lock")
-    store.ARCHIVE_INDEX_PATH = os.path.join(store.ARCHIVES_DIR, "_index.json")
-    config.PRUNE_TOUCH_FILE = os.path.join(_TMP, ".last_prune")
-    config.LOG_DIR = os.path.join(_TMP, "logs")
-    os.makedirs(config.LOG_DIR, exist_ok=True)
-
-
-_isolate()
+# 按名字接管 config/auth/store 的目录常量（root 沿用 _TMP，测试体里的路径引用不用改）
+_DIRS = isolated_data_dirs("admin_library", root=_TMP)
 
 # 超级管理员 = 邮箱命中白名单；固定成测试域名，避免依赖本机 .env
 _SUPER_EMAIL = "super_lib@example.com"
-auth.ADMIN_EMAILS = {_SUPER_EMAIL}
+
+
+def setUpModule():
+    """白名单必须在**用例运行时**替换。
+
+    discover 先把所有测试模块 import 完再跑用例，所以 import 时赋值会被后面 import 的
+    模块覆盖，本模块的超级管理员反而不被承认（曾让 test_user_admin 整套 403）。
+    数据目录同理要重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。
+    """
+    auth.ADMIN_EMAILS = {_SUPER_EMAIL}
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原本模块改过的全局量：白名单 + 目录常量。
+
+    不还回去，后面的模块要么管理员鉴权全部 403，要么继续用本模块已删除的临时目录。
+    """
+    restore_admin_whitelist()
+    _DIRS.restore()
 
 import retention  # noqa: E402
 import app as backend  # noqa: E402

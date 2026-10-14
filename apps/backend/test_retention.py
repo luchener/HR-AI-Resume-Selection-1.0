@@ -22,14 +22,23 @@ os.environ["ENV"] = "local"
 os.makedirs(_TMP, exist_ok=True)
 
 import config as C  # noqa: E402
+from testsupport import isolated_data_dirs  # noqa: E402
 
-C.DATA_DIR = _TMP
-for _name in [n for n in dir(C) if n.endswith("_DIR") and n not in ("BASE_DIR", "DATA_DIR", "LOG_DIR")]:
-    _path = os.path.join(_TMP, _name.lower())
-    os.makedirs(_path, exist_ok=True)
-    setattr(C, _name, _path)
-C.LOG_DIR = os.path.join(_TMP, "logs")
-os.makedirs(C.LOG_DIR, exist_ok=True)
+# 整体接管数据目录（root 沿用 _TMP）。
+# 旧写法只重命名 config 的属性：retention/store 在 import 时已各自快照过自己的常量，
+# 于是 retention._SENTINEL 仍指向真实 data/（哨兵落到了生产数据目录里），扫描目录也对不上。
+_DIRS = isolated_data_dirs("retention", root=_TMP)
+
+
+def setUpModule():
+    """用例运行时重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。"""
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原目录常量，避免把本模块的临时布局留给后续模块。"""
+    _DIRS.restore()
+
 
 import retention  # noqa: E402
 import store as store_mod  # noqa: E402

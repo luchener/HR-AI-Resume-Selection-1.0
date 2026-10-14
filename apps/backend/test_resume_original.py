@@ -24,36 +24,30 @@ import config  # noqa: E402
 import store  # noqa: E402
 import resume_original  # noqa: E402
 
-_DIR_NAMES = (
-    "users",
-    "resumes",
-    "jobs",
-    "archives",
-    "admin_ops",
-    "resume_originals",
-    "usage",
-    "login_failures",
-    "rate_limits",
-)
 _TESTDATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata")
 _SAMPLE_PDF = os.path.join(_TESTDATA, "sample_en.pdf")
 _SAMPLE_COLOR = os.path.join(_TESTDATA, "sample_color.pdf")
 
+from testsupport import isolated_data_dirs  # noqa: E402
+
+# 整体接管数据目录（root 沿用 _TMP）：本模块在 _isolate() 之前就 import 了 store /
+# resume_original，它们的目录常量已按真实 data/ 快照过，只改 config 拦不住。
+_DIRS = isolated_data_dirs("resume_original", root=_TMP)
+
 
 def _isolate():
-    os.makedirs(_TMP, exist_ok=True)
-    config.DATA_DIR = _TMP
-    for name in _DIR_NAMES:
-        os.makedirs(os.path.join(_TMP, name), exist_ok=True)
-    for mod in (config, store):
-        for attr in [a for a in dir(mod) if a.endswith("_DIR")]:
-            base = os.path.basename(getattr(mod, attr) or "")
-            if base in _DIR_NAMES:
-                setattr(mod, attr, os.path.join(_TMP, base))
-    store.ARCHIVE_INDEX_PATH = os.path.join(store.ARCHIVES_DIR, "_index.json")
+    """重置数据目录（用例的 tearDown 里会再调用一次）。"""
+    _DIRS.reapply()
 
 
-_isolate()
+def setUpModule():
+    """用例运行时重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。"""
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原目录常量，避免把本模块的临时布局留给后续模块。"""
+    _DIRS.restore()
 
 
 def _png_size(png: bytes) -> tuple:

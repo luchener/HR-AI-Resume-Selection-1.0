@@ -8,7 +8,9 @@ _MAX_ANNOTATIONS = 24
 _MAX_QUOTE_LENGTH = 260
 
 # 教育相关关键词——命中时归类为 verify（待核实），因为学历无法从简历本身确认
-_EDUCATION_KEYWORDS = ("学历", "学位", "毕业", "院校", "大学", "学院", "硕士", "本科", "博士", "专科", "985", "211", "双非", "证书", "资格证", "学历认证", "学籍")
+_EDUCATION_KEYWORDS = ("学历", "学位", "毕业", "院校", "大学", "学院", "硕士", "本科", "博士", "专科", "985", "211", "双非", "学历认证", "学籍")
+# 证书/资质类单独一套：证书真伪同样只能靠原件核对，不能和学历混在同一句理由里
+_CERTIFICATE_KEYWORDS = ("证书", "资格证", "认证", "资质", "持证", "执业资格")
 
 
 def _terms(text: str) -> list[str]:
@@ -45,7 +47,12 @@ def _add_annotation(items: list[dict], content: str, category: str, label: str, 
         span = _find_quote(content, quote)
         if not span:
             continue
-        if any(item["start"] == span[0] and item["end"] == span[1] for item in items):
+        if any(
+            item["category"] == category and item["start"] < span[1] and span[0] < item["end"]
+            for item in items
+        ):
+            # 同类别内不允许重叠：结构化教育经历会同时给出“复旦大学”和“复旦大学计算机
+            # 科学与技术”，两条标记叠在同一段文字上，前端渲染成重影。保留先到的。
             continue
         items.append({"id": f"ann-{len(items) + 1}", "category": category, "label": label, "quote": content[span[0]:span[1]], "reason": reason, "start": span[0], "end": span[1], "confidence": confidence})
         if len(items) >= _MAX_ANNOTATIONS:
@@ -63,36 +70,64 @@ def build_review_markers(content: str, analysis: dict[str, Any], *, candidate_na
     _add_annotation(annotations, content, "risk", "待核实信息", "需要在面试或材料复核中进一步确认", analysis.get("risk_points") or [], "medium")
     # 学历/证书类风险自动归类为 verify——无法从简历本身确认真伪
     edu_refs = _find_education_refs(content, analysis.get("education_history") or [])
-    _add_annotation(annotations, content, "verify", "学历待核实", "学历与证书无法从简历本身验证，建议在面试或背调阶段确认", edu_refs, "low")
+    _add_annotation(
+        annotations, content, "verify", "学历待核实",
+        "学历真伪无法从简历本身判断，建议在面试或背调阶段用学信网核对", edu_refs, "low",
+    )
+    cert_refs = _find_certificate_refs(content, analysis.get("certificates") or [])
+    _add_annotation(
+        annotations, content, "verify", "证书待核实",
+        "证书真伪无法从简历本身判断，建议要求提供证书原件或官方查询截图", cert_refs, "low",
+    )
     return {"candidate_name": candidate_name or "候选人", "annotations": annotations[:_MAX_ANNOTATIONS], "summary": {"final_score": analysis.get("final_score", 0), "recommendation": analysis.get("recruitment_recommendation", "储备观察"), "highlights": sum(1 for item in annotations if item["category"] in {"strength", "match"}), "risks": sum(1 for item in annotations if item["category"] == "risk"), "verify_count": sum(1 for item in annotations if item["category"] == "verify")}, "notice": "标记仅用于辅助审阅，原简历内容未被修改。"}
 
 
 def _find_education_refs(content: str, education_history: list[dict] | None = None) -> list[str]:
-    """从简历原文和教育分析结果中提取与学历/证书相关的短文本作为 verify 标记候选。"""
+    """从简历原文和教育分析结果中提取与学历相关的短文本作为 verify 标记候选。
+
+    注意：候选必须**能在原文里找到**才会挂上标记，所以度/校/专业要分别作为候选给出去。
+    历史写法把 degree+school+major 直接拼成一个串（“本科复旦大学计算机”），原文里几乎
+    不可能连续出现，于是结构化教育经历一条标记都挂不上——这个功能等于白做。
+    """
     refs: list[str] = []
-    # 优先使用分析结果中的教育经历
-    if education_history:
-        for entry in education_history:
-            if isinstance(entry, dict):
-                degree = str(entry.get("degree") or "")
-                school = str(entry.get("school_name") or "")
-                major = str(entry.get("major") or "")
-                if school and school not in {"未提供", "未知", "无"}:
-                    parts = [degree, school]
-                    if major and major not in {"未提供", "未知", "无"}:
-                        parts.append(major)
-                    refs.append("".join(parts))
-    # 再补充简历原文中的学历相关行
+    for entry in education_history or []:
+        if not isinstance(entry, dict):
+            continue
+        degree = str(entry.get("degree") or "").strip()
+        school = str(entry.get("school_name") or entry.get("school") or "").strip()
+        major = str(entry.get("major") or "").strip()
+        for value in (school, degree, major):
+            if value and value not in {"未提供", "未知", "无", "其他"} and value not in refs:
+                refs.append(value)
+        # 常见的一行式写法也作为候选（“本科 复旦大学 计算机”这类）
+        joined = " ".join(part for part in (degree, school) if part)
+        if joined and joined not in refs:
+            refs.append(joined)
     for line in content.splitlines():
         clean = line.strip()
-        if not clean:
+        if not clean or _is_ascii_garbage(clean):
             continue
-        if _is_ascii_garbage(clean):
+        if any(kw in clean for kw in _EDUCATION_KEYWORDS) and clean not in refs:
+            refs.append(clean[:_MAX_QUOTE_LENGTH])
+    return refs
+
+
+def _find_certificate_refs(content: str, certificates: list | None = None) -> list[str]:
+    """证书类待核实候选：分析结果里的证书名 + 原文中的持证行。"""
+    refs: list[str] = []
+    for item in certificates or []:
+        if isinstance(item, dict):
+            value = str(item.get("name") or item.get("title") or "").strip()
+        else:
+            value = str(item or "").strip()
+        if value and value not in {"未提供", "未知", "无"} and value not in refs:
+            refs.append(value[:_MAX_QUOTE_LENGTH])
+    for line in content.splitlines():
+        clean = line.strip()
+        if not clean or _is_ascii_garbage(clean):
             continue
-        if any(kw in clean for kw in _EDUCATION_KEYWORDS):
-            # 避免重复
-            if clean not in refs:
-                refs.append(clean[:_MAX_QUOTE_LENGTH])
+        if any(kw in clean for kw in _CERTIFICATE_KEYWORDS) and clean not in refs:
+            refs.append(clean[:_MAX_QUOTE_LENGTH])
     return refs
 
 

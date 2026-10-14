@@ -27,20 +27,28 @@ os.environ["ENV"] = "local"
 os.makedirs(_TMP, exist_ok=True)
 
 import config as C  # noqa: E402
+from testsupport import isolated_data_dirs  # noqa: E402
 
-C.DATA_DIR = _TMP
-for _name in [n for n in dir(C) if n.endswith("_DIR") and n not in ("BASE_DIR", "DATA_DIR", "LOG_DIR")]:
-    _path = os.path.join(_TMP, _name.lower())
-    os.makedirs(_path, exist_ok=True)
-    setattr(C, _name, _path)
-C.QUOTA_LIMITS_PATH = os.path.join(C.QUOTA_DIR, "limits.json")
+# 整体接管数据目录（root 沿用 _TMP）：只改 config 自己的属性不够，
+# auth/store/app 在 import 时各自快照过目录常量，整套跑时会指向别处。
+_DIRS = isolated_data_dirs("security_fixes", root=_TMP)
 C.CAPTCHA_ENABLED = False
-C.LOG_DIR = os.path.join(_TMP, "logs")
-os.makedirs(C.LOG_DIR, exist_ok=True)
+
+
+def setUpModule():
+    """用例运行时重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。"""
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原目录常量，避免把本模块的临时布局留给后续模块。"""
+    _DIRS.restore()
+
 
 import app as backend  # noqa: E402
 import auth as auth_mod  # noqa: E402
 import quota as quota_mod  # noqa: E402
+import safe_fs  # noqa: E402
 import store as store_mod  # noqa: E402
 
 
@@ -373,6 +381,74 @@ class SecurityFixTests(unittest.TestCase):
                 os.environ.pop("ADMIN_EMAILS", None)
             else:
                 os.environ["ADMIN_EMAILS"] = saved_env
+
+
+class MissingDataDirectoryTests(unittest.TestCase):
+    """数据目录不存在时，“读用户列表”必须是空结果而不是 500。
+
+    现场：首次部署还没建数据目录、备份恢复时目录被清空、测试隔离指向临时目录……
+    os.listdir 直接抛 FileNotFoundError，管理员用户列表页整页报错。
+    """
+
+    def _missing(self):
+        return os.path.join(_TMP, "no-such-users-dir-" + uuid.uuid4().hex[:8])
+
+    def test_list_user_files_tolerates_missing_directory(self):
+        with mock.patch.object(auth_mod, "USERS_DIR", self._missing()):
+            self.assertEqual(auth_mod._list_user_files(), [])
+
+    def test_user_listing_survives_missing_directory(self):
+        missing = self._missing()
+        with mock.patch.object(auth_mod, "USERS_DIR", missing), \
+                mock.patch.object(auth_mod, "_INDEX_FILE", os.path.join(missing, "_index.json")):
+            self.assertEqual(auth_mod.count_users(), 0)
+            self.assertEqual(auth_mod.list_users(), [])
+
+
+class SafeListdirTests(unittest.TestCase):
+    """目录缺失/无权限时必须返回空结果：读列表的调用点全后端有 20 多处。"""
+
+    def _missing(self):
+        return os.path.join(_TMP, "no-such-dir-" + uuid.uuid4().hex[:8])
+
+    def test_missing_directory_returns_empty(self):
+        missing = self._missing()
+
+        self.assertEqual(safe_fs.listdir(missing), [])
+        self.assertEqual(safe_fs.list_files(missing, suffix=".json"), [])
+        self.assertFalse(safe_fs.isdir(missing))
+
+    def test_existing_directory_still_lists_sorted(self):
+        directory = os.path.join(_TMP, "listing-" + uuid.uuid4().hex[:8])
+        os.makedirs(directory, exist_ok=True)
+        for name in ("b.json", "a.json", "c.txt"):
+            with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+                handle.write("{}")
+
+        self.assertEqual(safe_fs.list_files(directory, suffix=".json"), ["a.json", "b.json"])
+        self.assertEqual(sorted(safe_fs.listdir(directory)), ["a.json", "b.json", "c.txt"])
+
+    def test_file_instead_of_directory_returns_empty(self):
+        """路径指向文件时也不能抛异常。"""
+        target = os.path.join(_TMP, "not-a-dir-" + uuid.uuid4().hex[:8])
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("x")
+
+        self.assertEqual(safe_fs.listdir(target), [])
+
+    def test_no_backend_module_lists_directories_unsafely(self):
+        """回归防线：后世新增代码不许绕过 safe_fs 直接裸用 os.listdir。"""
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        offenders = []
+        for name in sorted(os.listdir(backend_dir)):
+            if not name.endswith(".py") or name.startswith("test_") or name in {"safe_fs.py", "testsupport.py"}:
+                continue
+            with open(os.path.join(backend_dir, name), "r", encoding="utf-8") as handle:
+                for number, line in enumerate(handle, 1):
+                    if "os.listdir(" in line and "return os.listdir" not in line:
+                        offenders.append(f"{name}:{number}")
+
+        self.assertEqual(offenders, [], f"这些地方仍在裸用 os.listdir：{offenders}")
 
 
 if __name__ == "__main__":

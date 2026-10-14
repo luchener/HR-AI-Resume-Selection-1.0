@@ -12,6 +12,21 @@ import app as backend
 import config as backend_config
 import notifications as notify_mod
 import auth as auth_mod
+from testsupport import isolated_data_dirs
+
+# 整体接管数据目录：setUpClass 里只改了 announcements / images / store 相关目录，
+# auth.ADMIN_OPS_DIR 没被覆盖，结果公告增删的审计记录写进了真实 data/admin_ops/。
+_DIRS = isolated_data_dirs("notifications")
+
+
+def setUpModule():
+    """用例运行时重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。"""
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原目录常量，避免把本模块的临时布局留给后续模块。"""
+    _DIRS.restore()
 
 
 class NotificationApiTest(unittest.TestCase):

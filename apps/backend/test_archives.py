@@ -14,19 +14,25 @@ os.environ["DATA_DIR"] = TEST_TMP_DIR
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config  # noqa: E402
+from testsupport import isolated_data_dirs  # noqa: E402
 
-config.DATA_DIR = TEST_TMP_DIR
-config.RESUMES_DIR = os.path.join(TEST_TMP_DIR, "resumes")
-config.JOBS_DIR = os.path.join(TEST_TMP_DIR, "jobs")
-config.ARCHIVES_DIR = os.path.join(TEST_TMP_DIR, "archives")
+# 按名字接管数据目录（含 store 在 import 时绑定的常量）。
+# 以前这里靠 `del sys.modules["store"]` 重新加载 store 来换掉目录常量，副作用是
+# app.backend.store 与其它模块 import 到的 store 变成两个模块对象，各自指向不同目录，
+# 是套件互相污染的另一个源头。按名字改属性就不需要这招了。
+_DIRS = isolated_data_dirs("archives", root=TEST_TMP_DIR)
 
-# 在 import store 之前，把 sys.modules 里已存在的 store 模块替换为
-# 重新加载的副本（unittest 批量运行时，store 可能已被其它测试 import 过，
-# 其目录常量已绑定真实 data/；不替换就会写进真实数据目录）。
-if "store" in sys.modules:
-    import importlib
 
-    del sys.modules["store"]
+def setUpModule():
+    """用例运行时重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。"""
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原目录常量，避免把本模块的临时布局留给后续模块。"""
+    _DIRS.restore()
+
+
 import store  # noqa: E402
 from config import ARCHIVES_DIR  # noqa: E402
 

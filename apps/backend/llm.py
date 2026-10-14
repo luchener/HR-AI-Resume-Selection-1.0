@@ -8,7 +8,7 @@ import json
 import hashlib
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from openai import OpenAI
@@ -52,8 +52,8 @@ def normalize_runtime_config(value: dict | None) -> dict:
     if not model or len(model) > 160 or any(char in model for char in "\r\n\t"):
         raise ValueError("请填写有效的模型名称。")
 
-    # 可选的 Agent 增强配置：web_search 控制外部检索（Step 4）。非法值静默回退默认。
-    web_search = bool(value.get("web_search")) if isinstance(value.get("web_search"), bool) else False
+    # 可选的 Agent 增强配置：web_search 控制外部检索（Step 4）。非法值静默回退默认（关闭）。
+    web_search = normalize_web_search_flag(value)
 
     return {
         "provider": provider,
@@ -82,6 +82,22 @@ def model_config_fingerprint(value: dict | None) -> str:
             )
         )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+
+def normalize_web_search_flag(value: Any) -> bool:
+    """解析 web_search 开关（唯一实现，app / screening_agent 都调这里）。
+
+    非法值（缺失、字符串 "true"、数字、嵌套字典）一律视为**关闭**：
+    外部检索会把简历里的公司名发到第三方，默认必须是关，不能靠猜打开。
+
+    为什么必须只有一处：开关同时参与两件事——执行时是否真的检索，以及缓存指纹
+    （llm.model_config_fingerprint 里的 ws=0/1）。两处默认值一旦不一致，就会出现
+    “按未检索执行、却复用检索过的缓存”这类串味，排查起来极难。
+    """
+    if not isinstance(value, dict):
+        return False
+    flag = value.get("web_search")
+    return bool(flag) if isinstance(flag, bool) else False
 
 
 def _runtime_client(value: dict) -> tuple[OpenAI, dict]:

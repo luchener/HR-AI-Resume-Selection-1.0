@@ -37,6 +37,8 @@ from flask import Flask, g, jsonify, request
 import config
 from config import DATA_DIR
 
+import safe_fs
+
 logger = logging.getLogger(__name__)
 
 # 管理员邮箱白名单（config.ADMIN_EMAILS，默认 luchenstudio@163.com）
@@ -167,12 +169,22 @@ def _write_index(index: dict[str, str]) -> None:
     _write_json(_INDEX_FILE, index)
 
 
+def _list_user_files() -> list[str]:
+    """列出用户目录里的文件名；目录不存在时返回空列表。
+
+    数据目录缺失（首次部署还没建、被手动清空、测试隔离到临时目录）时
+    os.listdir 会抛 FileNotFoundError，一个“读用户列表”的接口就直接 500。
+    “目录不存在”等于“目前没有用户”，不是异常。
+    """
+    return safe_fs.listdir(USERS_DIR)
+
+
 def _rebuild_index() -> dict[str, str]:
     """从用户文件重建索引（首次运行迁移或索引损坏时使用）。"""
     index: dict[str, str] = {}
     if not os.path.isdir(USERS_DIR):
         return index
-    for filename in os.listdir(USERS_DIR):
+    for filename in _list_user_files():
         if not filename.endswith(".json") or filename.startswith("_"):
             continue
         user = _read_json(os.path.join(USERS_DIR, filename))
@@ -368,7 +380,7 @@ def _purge_stale_captchas(force: bool = False) -> None:
     if not force and now - _CAPTCHA_PURGE_LAST < _CAPTCHA_PURGE_INTERVAL:
         return
     _CAPTCHA_PURGE_LAST = now
-    for filename in os.listdir(RATE_LIMITS_DIR):
+    for filename in safe_fs.listdir(RATE_LIMITS_DIR):
         if not filename.startswith("captcha_"):
             continue
         path = os.path.join(RATE_LIMITS_DIR, filename)
@@ -457,7 +469,7 @@ def create_user(
 
         # 邮箱查重（大小写不敏感），扫描用户文件
         if email_clean:
-            for filename in os.listdir(USERS_DIR):
+            for filename in _list_user_files():
                 if not filename.endswith(".json") or filename.startswith("_"):
                     continue
                 existing = _read_json(os.path.join(USERS_DIR, filename))
@@ -501,7 +513,7 @@ def find_user_by_email(email: str) -> Optional[dict]:
         return None
     if not os.path.isdir(USERS_DIR):
         return None
-    for filename in os.listdir(USERS_DIR):
+    for filename in _list_user_files():
         if not filename.endswith(".json") or filename.startswith("_"):
             continue
         user = _read_json(os.path.join(USERS_DIR, filename))
@@ -581,7 +593,7 @@ def list_deleted_users(window_days: int = DELETED_RESTORE_WINDOW_DAYS) -> list[d
     """列出删除时间在恢复窗口内的软删除用户（脱敏），按删除时间倒序。"""
     users = []
     if os.path.isdir(USERS_DIR):
-        for filename in os.listdir(USERS_DIR):
+        for filename in _list_user_files():
             if not filename.endswith(".json") or filename.startswith("_"):
                 continue
             user = _read_json(os.path.join(USERS_DIR, filename))
@@ -680,7 +692,7 @@ def list_users(
     """
     users = []
     if os.path.isdir(USERS_DIR):
-        for filename in os.listdir(USERS_DIR):
+        for filename in _list_user_files():
             if not filename.endswith(".json") or filename.startswith("_"):
                 continue
             user = _read_json(os.path.join(USERS_DIR, filename))
@@ -890,7 +902,7 @@ def list_admin_ops(
     maybe_prune()  # 保留策略：懒清理过期审计
     recs = []
     if os.path.isdir(ADMIN_OPS_DIR):
-        for filename in os.listdir(ADMIN_OPS_DIR):
+        for filename in safe_fs.listdir(ADMIN_OPS_DIR):
             if not filename.endswith(".json"):
                 continue
             rec = _read_json(os.path.join(ADMIN_OPS_DIR, filename))
@@ -941,7 +953,7 @@ def prune_admin_ops(days: int) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     removed = 0
     with _UserLock():
-        for filename in os.listdir(ADMIN_OPS_DIR):
+        for filename in safe_fs.listdir(ADMIN_OPS_DIR):
             if not filename.endswith(".json"):
                 continue
             path = os.path.join(ADMIN_OPS_DIR, filename)
@@ -968,7 +980,7 @@ def prune_user_usage(days: int) -> int:
         return 0
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
     touched = 0
-    for filename in os.listdir(USER_USAGE_DIR):
+    for filename in safe_fs.listdir(USER_USAGE_DIR):
         if not filename.endswith(".json"):
             continue
         path = os.path.join(USER_USAGE_DIR, filename)
@@ -1140,7 +1152,7 @@ def usage_ranking(limit: int = 20) -> list[dict]:
     if not os.path.isdir(USER_USAGE_DIR):
         return []
     rows: list[dict] = []
-    for filename in os.listdir(USER_USAGE_DIR):
+    for filename in safe_fs.listdir(USER_USAGE_DIR):
         if not filename.endswith(".json"):
             continue
         user_id = filename[:-5]
@@ -1170,7 +1182,7 @@ def _username_by_id(user_id: str) -> str:
     """通过用户 ID 反查用户名（尽力而为，找不到返回空串）。"""
     if not user_id:
         return ""
-    for filename in os.listdir(USERS_DIR):
+    for filename in _list_user_files():
         if not filename.endswith(".json") or filename.startswith("_"):
             continue
         try:
@@ -1375,7 +1387,7 @@ def list_frozen_users() -> list[dict]:
     if not os.path.isdir(LOGIN_FAILURES_DIR):
         return []
     out = []
-    for filename in os.listdir(LOGIN_FAILURES_DIR):
+    for filename in safe_fs.listdir(LOGIN_FAILURES_DIR):
         if not filename.endswith(".json"):
             continue
         rec = _read_json(os.path.join(LOGIN_FAILURES_DIR, filename))
@@ -1560,7 +1572,7 @@ def _recent_code_for_email(email: str, purpose: str) -> Optional[dict]:
     now = datetime.now(timezone.utc).timestamp()
     newest: Optional[dict] = None
     newest_created = 0.0
-    for filename in os.listdir(RESETS_DIR):
+    for filename in safe_fs.listdir(RESETS_DIR):
         if not filename.endswith(".json"):
             continue
         try:
@@ -1839,7 +1851,7 @@ def _find_invite_request_by_email_status(email: str, status: str) -> Optional[di
     email_clean = str(email or "").strip().lower()
     if not os.path.isdir(INVITE_REQUESTS_DIR):
         return None
-    for filename in os.listdir(INVITE_REQUESTS_DIR):
+    for filename in safe_fs.listdir(INVITE_REQUESTS_DIR):
         if not filename.endswith(".json"):
             continue
         rec = _read_json(os.path.join(INVITE_REQUESTS_DIR, filename))
@@ -1860,7 +1872,7 @@ def list_invite_requests(status: str = "pending") -> list[dict]:
     if not os.path.isdir(INVITE_REQUESTS_DIR):
         return []
     out = []
-    for filename in os.listdir(INVITE_REQUESTS_DIR):
+    for filename in safe_fs.listdir(INVITE_REQUESTS_DIR):
         if not filename.endswith(".json"):
             continue
         rec = _read_json(os.path.join(INVITE_REQUESTS_DIR, filename))
@@ -1876,7 +1888,7 @@ def count_rejected_requests(email: str) -> int:
     if not os.path.isdir(INVITE_REQUESTS_DIR):
         return 0
     count = 0
-    for filename in os.listdir(INVITE_REQUESTS_DIR):
+    for filename in safe_fs.listdir(INVITE_REQUESTS_DIR):
         if not filename.endswith(".json"):
             continue
         rec = _read_json(os.path.join(INVITE_REQUESTS_DIR, filename))
@@ -1996,7 +2008,7 @@ def list_invite_codes(only_used: bool | None = None) -> list[dict]:
     for directory in (INVITE_CODES_DIR, INVITE_CODES_AUDIT_DIR):
         if not os.path.isdir(directory):
             continue
-        for filename in os.listdir(directory):
+        for filename in safe_fs.listdir(directory):
             if not filename.endswith(".json"):
                 continue
             rec = _read_json(os.path.join(directory, filename))
@@ -2100,7 +2112,7 @@ def _prune_rate_files(max_age_seconds: float = 86400) -> None:
         return
     now = _now_ts()
     try:
-        for filename in os.listdir(RATE_LIMITS_DIR):
+        for filename in safe_fs.listdir(RATE_LIMITS_DIR):
             path = os.path.join(RATE_LIMITS_DIR, filename)
             try:
                 rec = _read_json(path)
@@ -2123,7 +2135,7 @@ def _safe_remove(path: str) -> None:
 def _prune_email_codes() -> None:
     """删除所有过期/已用的验证码记录。"""
     now = datetime.now(timezone.utc).timestamp()
-    for filename in os.listdir(RESETS_DIR):
+    for filename in safe_fs.listdir(RESETS_DIR):
         if not filename.endswith(".json"):
             continue
         try:

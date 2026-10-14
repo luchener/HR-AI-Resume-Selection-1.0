@@ -23,26 +23,21 @@ _TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-tmp-locko
 os.environ["ENV"] = "local"
 
 import config  # noqa: E402
+from testsupport import isolated_data_dirs, restore_globals, snapshot_globals  # noqa: E402
 
-config.DATA_DIR = _TMP
-_SUBDIRS = (
-    "users",
-    "password_resets",
-    "resumes",
-    "jobs",
-    "archives",
-    "invite_requests",
-    "invite_codes",
-    "invite_codes_audit",
-    "login_failures",
-    "rate_limits",
+# 整体接管数据目录（root 沿用 _TMP）：只改 config.DATA_DIR 在整套跑时不够，
+# auth/app 可能已被别的模块先 import，它们的目录常量会指向别处。
+_DIRS = isolated_data_dirs("lockout", root=_TMP)
+
+# 时间注入：失败窗口/冷却语义不变（校验路径），但不做真实等待。
+# 记下原值，跑完还回去——这些阈值是全局量，留着会改变其它模块的防爆破行为。
+_GUARD = snapshot_globals(
+    ("config", "LOGIN_FAIL_LIMIT"),
+    ("config", "LOGIN_LOCK_MINUTES"),
+    ("config", "LOGIN_FREEZE_WINDOW_MINUTES"),
+    ("config", "LOGIN_FREEZE_THRESHOLD"),
+    ("config", "LOGIN_MAX_FAIL_PER_IP_10MIN"),
 )
-for _d in _SUBDIRS:
-    os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
-config.LOG_DIR = os.path.join(_TMP, "logs")
-os.makedirs(config.LOG_DIR, exist_ok=True)
-
-# 时间注入：失败窗口/冷却语义不变（校验路径），但不做真实等待
 config.LOGIN_FAIL_LIMIT = 3
 config.LOGIN_LOCK_MINUTES = 5
 config.LOGIN_FREEZE_WINDOW_MINUTES = 10
@@ -64,11 +59,31 @@ def _fake_smtp_available():
     return True
 
 
-mailer.send_verification_email = _fake_send
-mailer.send_invite_code_email = lambda to, code, **kw: True
-mailer.send_password_reset_email = lambda to, u, c: True
-mailer.send_invite_rejection_email = lambda to, reason: True
-mailer.smtp_available = _fake_smtp_available
+def _patch_mailer():
+    mailer.send_verification_email = _fake_send
+    mailer.send_invite_code_email = lambda to, code, **kw: True
+    mailer.send_password_reset_email = lambda to, u, c: True
+    mailer.send_invite_rejection_email = lambda to, reason: True
+    mailer.smtp_available = _fake_smtp_available
+
+
+_patch_mailer()
+
+
+def setUpModule():
+    """用例运行时重新打桩并重新接管目录。
+
+    import 时的补丁会被后面 import 的模块覆盖；import 时接管的目录会被前面模块的
+    tearDownModule 还原成真实 data/。
+    """
+    _patch_mailer()
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原本模块改过的全局量：目录常量 + 限流阈值。"""
+    _DIRS.restore()
+    restore_globals(_GUARD)
 
 import app as backend  # noqa: E402
 
@@ -93,8 +108,7 @@ class LoginLockoutTests(unittest.TestCase):
     def setUpClass(cls):
         # 彻底重置临时目录，避免上次运行残留
         shutil.rmtree(_TMP, ignore_errors=True)
-        for _d in _SUBDIRS + ("logs",):
-            os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
+        _DIRS.ensure_dirs()
         cls.client = backend.app.test_client()
         # 管理员账号（email 命中白名单）+ 普通账号
         admin_email = (list(config.ADMIN_EMAILS) or ["admin@example.com"])[0]

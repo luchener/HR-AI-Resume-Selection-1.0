@@ -5,27 +5,19 @@ import unittest
 
 import app as backend
 import auth as auth_module
+from testsupport import isolated_data_dirs
 
 
 class ReviewMarkersRouteTests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-data-review")
-        os.makedirs(self.temp_dir, exist_ok=True)
-        backend.store.RESUMES_DIR = os.path.join(self.temp_dir, "resumes")
-        backend.store.JOBS_DIR = os.path.join(self.temp_dir, "jobs")
-        auth_module.USERS_DIR = os.path.join(self.temp_dir, "users")
-        auth_module._INDEX_FILE = os.path.join(auth_module.USERS_DIR, "_index.json")
-        auth_module._INDEX_LOCK = os.path.join(auth_module.USERS_DIR, "_index.lock")
-        auth_module.RESETS_DIR = os.path.join(self.temp_dir, "password_resets")
-        os.makedirs(auth_module.RESETS_DIR, exist_ok=True)
+        # 数据目录整体隔离：临时目录 + 结束后原样恢复所有模块级路径（见 testsupport.py）
+        self.dirs = isolated_data_dirs("review")
+        self.addCleanup(self.dirs.restore)
         user, _err = auth_module.create_user("reviewer", "password123")
         self.user_id = user["user_id"]
         self.token = auth_module.generate_jwt(user["user_id"], user["username"])
         self.headers = {"Authorization": f"Bearer {self.token}"}
         self.client = backend.app.test_client()
-
-    def tearDown(self):
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_review_markers_returns_annotations_linked_to_original_text(self):
         resume_id = backend.store.save_resume(

@@ -15,6 +15,7 @@ Flask 后端应用。极简化重构，替代旧版 FastAPI + SQLAlchemy + Agent
 启动：gunicorn app:app（宝塔/生产）或 python run.py（本地）。
 """
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -44,6 +45,7 @@ import llm
 import parser as doc_parser
 import resume_original
 import screening_agent
+import deception_check
 import resume_review
 import resume_sanitize
 import system_config
@@ -86,7 +88,11 @@ MAX_RESUME_FILE_SIZE = 30 * 1024 * 1024
 # 岗位批量上传硬上限：数量 + 单条长度（防"一条请求写出上千万文件"）
 MAX_JOB_DESCRIPTIONS_PER_REQUEST = 50
 MAX_JOB_DESCRIPTION_CHARS = 20000
-_HR_ANALYSIS_VERSION = "screening-agent-v1-employment-timeline"
+_HR_ANALYSIS_VERSION = "screening-agent-v14-timeline-overlap-rule"
+# 硬门槛判定口径变更时必须改上面的版本号：缓存里存的是**已评分**的最终结果，
+# 不会重新走一遍判定，不换 key 就会继续展示旧口径的分数与 not_met。
+# v2：学历补全校验学员层次维度、年限/证书门槛不再把“优先/可放宽”当硬门槛、
+#     院校层次不达标改为封顶 69（学历层级仍封顶 59）。
 # HR 分析结果缓存：LRU（最近最久未用淘汰）+ TTL（24h），防内存无界增长，
 # 同时保留"同一简历+同一职位+同一模型配置重复分析不调 LLM"的省 token 语义。
 _HR_ANALYSIS_CACHE_MAX = 1000
@@ -255,19 +261,30 @@ def _request_ai_config(data: dict, *, required: bool = False) -> dict | None:
 def _request_agent_config(data: dict) -> dict:
     """请求级 Agent 增强配置（可选）：web_search（Step 4）。
 
-    非法值静默回退默认，不阻断请求。
+    解析规则走 llm.normalize_web_search_flag（与模型配置、缓存指纹同一处），
+    避免两边默认值不一致导致“按未检索执行、却复用检索过的缓存”。非法值静默关闭。
     """
     value = data.get("agent_config")
     if not isinstance(value, dict):
         return {}
-    web_search = bool(value.get("web_search")) if isinstance(value.get("web_search"), bool) else False
-    return {"web_search": web_search}
+    return {"web_search": llm.normalize_web_search_flag(value)}
 
 
 def _agent_config_fingerprint(agent_config: dict | None) -> str:
-    """Agent 增强配置的缓存指纹，防止不同增强等级串缓存。"""
-    config = agent_config if isinstance(agent_config, dict) else {}
-    return "ws=1" if config.get("web_search") else "ws=0"
+    """Agent 增强配置的缓存指纹，防止不同增强等级串缓存。
+
+    联网核验另加一层：**检索端点换了，拿到的外部证据就完全不同**，必须让缓存失效。
+    否则你换了自建检索引擎，看到的还是上一个引擎的信息——而且看上去就是"这家公司"
+    的信息，错得极其隐蔽。指纹里只放端点短哈希，不放 api_key（指纹会进缓存键）。
+    未配置自建端点时（内置 Bing→DDG）保持 "ws=1"，不引入无意义的指纹抖动。
+    """
+    value = agent_config if isinstance(agent_config, dict) else {}
+    if not value.get("web_search"):
+        return "ws=0"
+    endpoint = str(getattr(config, "SEARCH_ENDPOINT_ID", "") or "")
+    if not endpoint:
+        return "ws=1"
+    return "ws=1&se=" + hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:8]
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -2293,6 +2310,66 @@ _AI_RISK_RULES = {
     "high": (30, 30, "重度AI/模板生成", "重度AI生成，内容可信度低"),
 }
 
+# 门槛分档（P1）：(每条扣分, 扣分上限, 封顶分)
+#   A 学历层级不达标      → 淘汰级 59
+#   B 岗位硬门槛（院校层次/年限/专业资格证书）→ 储备观察 69
+#   C 生活类与通用类（驾照/语言等级/职称/届别）→ 79，不该和注会同价
+# 证据缺失（简历未写明）与真实性核验一律不扣分不封顶——"没写"不等于"没有"。
+# JD 明写"优秀者可放宽"的门槛只扣分不封顶（cap_exempt）。
+_GATE_TIER_POLICY = {"A": (10, 30, 59), "B": (8, 24, 69), "C": (5, 15, 79)}
+# 能力分够高、却被门槛压到 60 以下 → 不是"淘汰"，是"请人工看一眼"
+_OVERRIDE_CAPABILITY = 80
+# 「经历/技能」两个核心维度的单项下限（各 25 分制）：破格复核是请 HR 破一次硬门槛的例，
+# 理由必须是"这活他真干过、工具链也对得上"，不能让行业背景+证据加分（占非门槛满分 1/3）
+# 把单维强项抬过线。取值 = 该项满分的 80%。
+_OVERRIDE_CORE_MIN = 20
+
+# 法规执业类证书：JD 把它写成硬门槛时，通常意味着岗位工作本身要求持证（审计签字权、
+# 项目经理资质、执业许可…）。这类门槛**不能由能力弥补**，能力再高也不给"破格复核"——
+# 那等于建议违规上岗。而 PMP/CISSP/ACCA/CISP 这类是能力证明，缺了可以破格。
+# 判定顺序：先放行"名字里带注册/执业但不属于准入类"的（CISP），再拦执业许可类，
+# 最后用"注册/执业/准入类"字样兜底——**宁可少给破格建议，也不建议一次违规上岗**。
+_UNCAPPABLE_CERT_TOKENS = (
+    "注册会计师", "注会", "CPA",
+    "一级建造师", "二级建造师", "建造师", "一建", "二建",
+    "一级造价工程师", "二级造价工程师", "造价工程师", "一造", "二造",
+    "注册消防工程师", "消防工程师", "一消", "二消",
+    "执业医师", "执业药师", "执业护士", "注册护士",
+    "教师资格", "教资", "法律职业资格", "司法考试", "法考", "律师执业",
+    "注册建筑师", "注册结构工程师", "注册岩土", "注册电气工程师", "注册公用设备工程师",
+    "环境影响评价工程师",
+)
+# 名字里带"注册"但属于水平评价类/能力证明的，明确放行
+_MITIGABLE_CERT_EXCEPTIONS = (
+    "CISP", "注册信息安全", "CISSP", "PMP", "ACCA", "CFA", "软考", "计算机等级",
+)
+# 不能由能力弥补的生活类/事实类门槛：
+#   驾照 —— 要么岗位真需要开车（不可破格），要么这条门槛本身该删；两种情况都不该由系统喊"破格"。
+#   应届/届别 —— 事实，不是能力。
+# 语言等级与职称可由能力弥补（岗位是否真需要外语、职称多为资历代理），照旧允许破格。
+# 注意不含"毕业生"这个宽词：`985院校毕业生` 是院校门槛，不能因为带"毕业生"就判成不可弥补。
+_UNCAPPABLE_GATE_KEYWORDS = ("驾照", "驾驶证", "驾驶资格", "应届", "届别")
+
+
+def _gate_is_mitigable(blocker: dict) -> bool:
+    """这道门槛能不能由能力弥补？不能 → 不给"破格复核"（但仍照常显示阻塞项）。"""
+    category = str(blocker.get("category") or "")
+    text = str(blocker.get("text") or "")
+    # 事实类（驾照/届别）最先判：无论模型把它归到哪一类，都不是能力问题
+    if any(word in text for word in _UNCAPPABLE_GATE_KEYWORDS):
+        return False
+    if category == "certificate":
+        if any(token in text for token in _MITIGABLE_CERT_EXCEPTIONS):
+            return True
+        if any(token in text for token in _UNCAPPABLE_CERT_TOKENS):
+            return False
+        # 口语写法兜底：写明"注册/执业/准入类"的证书按执业许可处理
+        if "注册" in text or "执业" in text or "准入类" in text:
+            return False
+        return True
+    # A 档学历层级、B 档院校层次/年限：都是能力的代理指标，代理失效时经验可以说话
+    return True
+
 
 def _as_int(value, default: int = 0) -> int:
     try:
@@ -2714,6 +2791,38 @@ _SCORE_BREAKDOWN_LIMITS = {
     "evidence_bonus": 10,
 }
 
+# 能力分要与"模型对硬门槛的打分"解耦：提示词把学历/证书/年限列为评分首要因素，
+# 所以 hard_requirements 分项已经吸收了门槛信息；服务端再扣分封顶就是同一缺口降分两次
+# （同一份提示词里写着"同一能力缺口只在最相关维度扣一次"）。
+# 剔除该分项后按同一满分归一到 0-100，保证与历史阈值可比。
+_CAPABILITY_EXCLUDED = ("hard_requirements",)
+
+
+def _capability_score(breakdown: dict, complete: bool, base_score: int) -> tuple[int, str]:
+    """能力分 = 剔除硬门槛分项后的质量分，按同一满分归一。
+
+    返回 (分数, 口径)：`ex_gate`（已解耦）/ `total`（无分项可用，退回模型总分）。
+    """
+    if not complete:
+        return base_score, "total"
+    maximum = sum(v for k, v in _SCORE_BREAKDOWN_LIMITS.items() if k not in _CAPABILITY_EXCLUDED)
+    got = sum(int(breakdown.get(k, 0)) for k in _SCORE_BREAKDOWN_LIMITS if k not in _CAPABILITY_EXCLUDED)
+    if maximum <= 0:
+        return base_score, "total"
+    return max(0, min(100, round(100 * got / maximum))), "ex_gate"
+
+
+def _capability_core_ok(breakdown: dict, complete: bool) -> bool:
+    """破格复核的附加条件：岗位职责重合与技能项目**双双**达到各维度的 80%。
+
+    只看总分会让行业背景+证据加分（占非门槛满分 1/3）把单维强项抬过线——
+    那不是"经历很契合"，那是"有一项很强"。
+    """
+    if not complete:
+        return False
+    return all(int(breakdown.get(k, 0)) >= _OVERRIDE_CORE_MIN
+               for k in ("responsibility_overlap", "skills_projects"))
+
 
 def _normalize_education_history(raw) -> list[dict]:
     """Normalize education history entries, sorted by degree (博士 > 硕士 > 本科 > 专科)."""
@@ -2751,7 +2860,158 @@ def _normalize_score_breakdown(value) -> tuple[dict[str, int], bool]:
     return normalized, complete
 
 
-def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str = "") -> dict:
+def _shadow_correlation_key(context: dict | None) -> str:
+    """影子模式日志的关联码：不可逆短哈希，同一份分析可对上，但不泄漏简历 ID。
+
+    DECEPTION_SHADOW_VERBOSE=1 时改写成可读的 resume/job/user，供本地定位用。
+    """
+    if not context:
+        return "-"
+    if config.DECEPTION_SHADOW_VERBOSE:
+        return "resume=%s job=%s user=%s" % (
+            context.get("resume_id") or "-",
+            context.get("job_id") or "-",
+            context.get("user_id") or "-",
+        )
+    seed = "%s|%s|%s" % (
+        context.get("resume_id") or "",
+        context.get("job_id") or "",
+        context.get("user_id") or "",
+    )
+    if not seed.strip("|"):
+        return "-"
+    return hashlib.sha256(seed.encode("utf-8", "ignore")).hexdigest()[:10]
+
+
+def _log_credibility_shadow(credibility: dict, context: dict | None = None) -> None:
+    """影子模式日志：记录规则码、计数与不可逆关联码，不写简历 ID、不写简历正文。
+
+    调阈值只需要两件事：分母（跑了多少次分析）与分子（哪条规则命中了多少次）。
+    要看具体某一例就手工重跑那一份，不要把候选人信息散进日志。
+    关联码用来把日志行和同一份简历的多条记录（或多个规则命中）串起来——
+    没有它，“红标的到底是哪一份”只能靠时间戳瞎猜。需要真 ID 时开
+    DECEPTION_SHADOW_VERBOSE=1（仅限本地排查），默认始终是哈希。
+    注意：缓存命中的分析不会走到这里，所以这里的计数是“新增分析”的次数，不是总调用数。
+
+    字段固定顺序、固定前缀（`credibility(mode=shadow)`），行内 `k=v` 用空格分隔——
+    这样 grep/awk 就能直接算分子分母与命中率，不需要解析自由文本：
+        grep -c 'credibility(mode=shadow)' app.log              # 分母
+        grep -c 'codes=[^ ]*raw_tenure' app.log                 # 某条规则的分子
+    `version` 必须记：规则改过之后命中率会变，不记版本就没法把两个版本的数据混在一起看。
+    `enabled=false` 表示简历原文为空、一条规则都没跑（分母要把它排除掉，否则命中率偏低）。
+    `findings=` 是去重前的规则命中条数，`codes=` 是命中的规则名（逗号分隔，便于 grep）。
+    """
+    counts = credibility.get("counts") or {}
+    by_source = credibility.get("by_source") or {}
+    findings = credibility.get("findings") or []
+    codes = ",".join(sorted({str(item.get("code") or "") for item in findings}))
+    logger.info(
+        "credibility(mode=shadow) version=%s enabled=%s ref=%s checks=%s findings=%s "
+        "red=%s review=%s info=%s resume_side=%s report_side=%s codes=%s",
+        credibility.get("version", ""),
+        "true" if credibility.get("enabled", True) else "false",
+        _shadow_correlation_key(context),
+        credibility.get("checks_run", 0),
+        len(findings),
+        counts.get("red_flag", 0),
+        counts.get("review", 0),
+        counts.get("info", 0),
+        by_source.get("resume", 0),
+        by_source.get("report", 0),
+        codes or "-",
+    )
+
+
+_GATE_CATEGORIES = ("education", "experience", "certificate")
+
+
+def _undetermined_summary(raw_items) -> list[dict]:
+    """规范化"系统不参与判定的要求"清单：类型 + 原文 + 说明，限长限量。"""
+    if not isinstance(raw_items, list):
+        return []
+    summary: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("type") or "").strip()[:20]
+        text = str(item.get("text") or "").strip()[:120]
+        if not label or not text or (label, text) in seen:
+            continue
+        seen.add((label, text))
+        summary.append({
+            "type": label,
+            "text": text,
+            "note": str(item.get("note") or "系统不参与该项判定，请人工确认")[:80],
+        })
+        if len(summary) >= 8:
+            break
+    return summary
+
+
+def _gate_coverage_summary(raw_coverage: dict | None, checklist: list, hard_gate_fails: int) -> dict:
+    """把"门槛到底跑没跑"变成可见数据：补了几条、纠正几条、跑了几条、几条不达标。
+
+    JD 写着硬门槛却一条门槛都没参与判定时给出显式警告——这种情况以前是完全静默的：
+    分数照给、报告照出，只有 HR 手动抽查才可能发现。
+    """
+    source = raw_coverage if isinstance(raw_coverage, dict) else {}
+    gate_items = [
+        item for item in (checklist or [])
+        if isinstance(item, dict) and str(item.get("category") or "") in _GATE_CATEGORIES
+    ]
+    coverage = {
+        "markers_found": int(source.get("markers_found") or 0),
+        "backstop_added": int(source.get("added") or 0),
+        "upgraded": int(source.get("upgraded") or 0),
+        "gate_items": len(gate_items),
+        "gate_failed": int(hard_gate_fails or 0),
+        "warning": "",
+    }
+    if coverage["markers_found"] and not coverage["gate_items"]:
+        coverage["warning"] = (
+            "岗位描述写有硬性门槛，但本次没有任何门槛参与判定，请人工复核岗位要求是否被完整识别"
+        )
+    return coverage
+
+
+_INCOMPLETE_REASON_FALLBACK = "分析未能生成有效报告"
+
+
+def _mark_incomplete_analysis(result: dict, raw: dict) -> None:
+    """分析根本没跑成时，别让 "0 分 / D级 / 淘汰" 冒充一个判定结论。
+
+    现场：图片型 PDF 抽不出文字（`resume_sanitize` 返回空）→ 分析层抛“简历内容不能为空”
+    → 兜底报告 `job_fit_score=0` → 服务端算出 0 分、D级、**淘汰**。
+    候选人什么都没做错，却拿到一份"淘汰"结论，而且失败原因（validation_issues）根本没进 payload。
+    这里做两件事：把原因带出来 + 把结论字段换成语义诚实的"无法评估"。
+    """
+    meta = raw.get("agent_meta") if isinstance(raw.get("agent_meta"), dict) else {}
+    if not isinstance(meta, dict) or meta.get("validation_passed") is not False:
+        return
+    if raw.get("score_breakdown"):
+        # 有分项就是真跑过（可能确实低分），不在此列
+        return
+    issues = [str(item) for item in (meta.get("validation_issues") or []) if str(item).strip()]
+    result["analysis_incomplete"] = True
+    result["analysis_incomplete_reason"] = "；".join(issues[:3]) or _INCOMPLETE_REASON_FALLBACK
+    result["agent_meta"] = {
+        "version": meta.get("version") or "",
+        "validation_passed": False,
+        "validation_issues": issues[:8],
+        "llm_calls": meta.get("llm_calls", 0),
+    }
+    result["fit_grade"] = "无法评估"
+    result["recruitment_recommendation"] = "待补充材料"
+    result["fit_tag"] = "无法评估"
+
+
+def _normalize_hr_analysis(
+    raw: dict,
+    job_content: str = "",
+    resume_content: str = "",
+    log_context: dict | None = None,
+) -> dict:
     """Enforce the scoring formula and all allowed deduction/grade ranges."""
     score_breakdown, has_complete_breakdown = _normalize_score_breakdown(raw.get("score_breakdown"))
     base_score = (
@@ -2765,27 +3025,54 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
 
     minimum, maximum, risk_level, risk_label = _AI_RISK_RULES[risk]
     proposed = _as_int(raw.get("ai_deduction"), minimum)
-    deduction = max(minimum, min(maximum, proposed))
+    suggested = max(minimum, min(maximum, proposed))
+    # 默认 readonly：AI 美化是模型的风格印象，没有可核对的对象，且实测同一份简历三次
+    # 跑出 5/15/5 的摆动、足以跨过 60 分线改变最终动作。这里只把它作为风险提示留在报告里，
+    # 判断权交回 HR；模型建议的分数仍记录在 ai_deduction_suggested。
+    # 恢复旧行为：AI_RISK_DEDUCTION_MODE=enforce（apps/backend/.env）。
+    deduction = suggested if config.AI_RISK_DEDUCTION_MODE == "enforce" else 0
     final_score = max(0, base_score - deduction)
 
-    # 硬门槛确定性扣分（A/B）：requirements_checklist 中的 not_met 为确定性不达标，
-    # 在 AI 美化扣分之后再次扣分并封顶——学历层级不达标封顶 D 级，其余硬门槛封顶 C 级。
+    # 硬门槛确定性扣分（A/B/C 三档）：requirements_checklist 中的 not_met 才是确定性不达标，
+    # 在 AI 美化扣分之后再次扣分，并按最严的一档封顶。
+    # 三态口径：`manual_review`（简历未写明 / 真实性待核实）不在这里——它不扣分、不封顶。
     raw_checklist = raw.get("requirements_checklist") if isinstance(raw.get("requirements_checklist"), list) else []
-    hard_gate_fails = 0
-    education_gate_fail = False
+    tier_counts = {"A": 0, "B": 0, "C": 0}
+    capped_tiers: set[str] = set()
+    gate_blockers: list[dict] = []
     for item in raw_checklist:
-        if isinstance(item, dict) and item.get("status") == "not_met":
-            hard_gate_fails += 1
-            if str(item.get("category")) == "education":
-                education_gate_fail = True
+        if not isinstance(item, dict) or item.get("status") != "not_met":
+            continue
+        tier = str(item.get("gate_tier") or "").strip().upper()
+        if tier not in _GATE_TIER_POLICY:
+            # 兼容没有 gate_tier 的旧数据：学历层级按 A，其余按 B（与分档前的行为一致）
+            is_degree = (str(item.get("category")) == "education"
+                         and str(item.get("gate_dimension") or "") != "tier")
+            tier = "A" if is_degree else "B"
+        tier_counts[tier] += 1
+        exempt = bool(item.get("cap_exempt"))
+        if not exempt:
+            capped_tiers.add(tier)
+        gate_blockers.append({
+            "text": str(item.get("text") or ""),
+            "category": str(item.get("category") or ""),
+            "tier": tier,
+            "evidence_label": str(item.get("evidence_label") or "已写明不符合"),
+            "basis": str(item.get("resume_basis") or ""),
+            "cap_exempt": exempt,
+        })
+    hard_gate_fails = sum(tier_counts.values())
     hard_gate_deduction = 0
-    if hard_gate_fails:
-        hard_gate_deduction = min(30, 10 * hard_gate_fails)  # 每条确定性不达标扣 10 分，上限 30
-        final_score = max(0, final_score - hard_gate_deduction)
-        if education_gate_fail:
-            final_score = min(final_score, 59)   # 学历硬门槛不达标 → 淘汰级封顶
-        else:
-            final_score = min(final_score, 69)   # 年限/证书硬门槛不达标 → 储备观察封顶
+    for tier, count in tier_counts.items():
+        if not count:
+            continue
+        rate, limit, _cap = _GATE_TIER_POLICY[tier]
+        hard_gate_deduction += min(limit, rate * count)
+    final_score = max(0, final_score - hard_gate_deduction)
+    gate_cap_applied = None
+    if capped_tiers:
+        gate_cap_applied = min(_GATE_TIER_POLICY[tier][2] for tier in capped_tiers)
+        final_score = min(final_score, gate_cap_applied)
 
     if final_score >= 90:
         grade = "S级（优质适配）"
@@ -2807,6 +3094,30 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
     recommendation_rank = {"淘汰": 0, "储备观察": 1, "优先面试": 2}
     if recommendation_rank[requested_recommendation] > recommendation_rank[score_recommendation]:
         requested_recommendation = score_recommendation
+
+    # 破格复核：经历/技能确实契合（能力分解耦后 ≥80 且两个核心维度各达 80%），却被打到 60 以下时，
+    # 系统不假装他达标（分数照封顶、适配标签照"不匹配"），但也不把他丢进"淘汰"堆里沉底。
+    # 两个前置条件缺一不可：
+    #   ① 能力分（剔除模型对硬门槛的打分后归一）够高；
+    #   ② 造成封顶的门槛**都能由能力弥补**——缺注册会计师/一建这类法规执业资格、或驾照/届别这类
+    #      事实性门槛时，能力再高也不给"破格复核"：那等于建议 HR 违规上岗。
+    capability_score, capability_basis = _capability_score(
+        score_breakdown, has_complete_breakdown, base_score
+    )
+    non_mitigable_blockers = [
+        {"text": b["text"], "category": b["category"], "tier": b["tier"]}
+        for b in gate_blockers
+        if not _gate_is_mitigable(b)
+    ]
+    override_review = (
+        bool(gate_blockers)
+        and not non_mitigable_blockers
+        and capability_score >= _OVERRIDE_CAPABILITY
+        and _capability_core_ok(score_breakdown, has_complete_breakdown)
+        and final_score < 60
+    )
+    if override_review:
+        requested_recommendation = "破格复核"
 
     score_fit_tag = "高匹配" if final_score >= 80 else "部分匹配" if final_score >= 60 else "不匹配"
     requested_fit_tag = str(raw.get("fit_tag") or score_fit_tag).strip()
@@ -2849,11 +3160,24 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
     agent_trace = raw.get("agent_trace") if isinstance(raw.get("agent_trace"), dict) else None
     agent_validation = raw.get("agent_validation") if isinstance(raw.get("agent_validation"), dict) else None
     requirements_checklist = raw_checklist if isinstance(raw_checklist, list) else []
-    return {
+    result = {
         "candidate_name": _as_text(raw.get("candidate_name")),
         "final_score": final_score,
         "fit_grade": grade,
         "hard_gate_deduction": hard_gate_deduction,
+        # 能力分与门槛后分数分开呈现：否则"经历很契合、只卡学历"的候选人会以 59 分沉底，
+        # HR 永远看不到他的 88。capability_basis 说明这个数是解耦过的还是退回模型总分。
+        "capability_score": capability_score,
+        "capability_basis": capability_basis,
+        "gate_blockers": gate_blockers,
+        "gate_tier_counts": tier_counts,
+        "gate_cap_applied": gate_cap_applied,
+        "override_review": override_review,
+        # 造成封顶、但**不能由能力弥补**的门槛（法规执业资格/驾照/届别）：即使能力分很高也不给
+        # "破格复核"，前端据此说明"为什么不建议破格"，避免 HR 以为系统漏标了。
+        "non_mitigable_blockers": non_mitigable_blockers,
+        "gate_coverage": _gate_coverage_summary(raw.get("gate_coverage"), requirements_checklist, hard_gate_fails),
+        "undetermined_requirements": _undetermined_summary(raw.get("undetermined_requirements")),
         "job_fit_score": base_score,
         "job_fit_percentage": base_score,
         "score_breakdown": score_breakdown,
@@ -2861,6 +3185,12 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         "ai_risk_level": risk_level,
         "ai_risk_label": risk_label,
         "ai_deduction": deduction,
+        "ai_deduction_suggested": suggested,
+        "ai_risk_note": (
+            "疑似 AI 包装，仅作风险提示，未扣分（判断权交给 HR）"
+            if deduction == 0 and suggested > 0
+            else ""
+        ),
         "summary": summary,
         "basic_screening": basic_screening,
         "education_history": education_history,
@@ -2879,6 +3209,28 @@ def _normalize_hr_analysis(raw: dict, job_content: str = "", resume_content: str
         "agent_trace": agent_trace,
         "agent_validation": agent_validation,
     }
+    _mark_incomplete_analysis(result, raw)
+
+    # 简历文案核验（防"文案骗人"）：只读字段，绝不参与评分——
+    # 不写 score_breakdown、不写 requirements_checklist，因此不可能触发硬门槛扣分或封顶。
+    check_mode = config.DECEPTION_CHECK_MODE
+    if check_mode != "off":
+        try:
+            credibility = deception_check.check_resume_deception(
+                resume_content=resume_content,
+                job_content=job_content,
+                analysis=result,
+            )
+            if check_mode == "on":
+                result["credibility"] = credibility
+            else:
+                # 影子模式：只写日志。不挂到 result 上 → 也就不会进缓存，
+                # 将来切到 on 时不会突然冒出影子期那批没人复核过的旧判定。
+                _log_credibility_shadow(credibility, log_context)
+        except Exception:  # 核验失败绝不能影响分析主流程
+            logger.warning("resume deception check failed", exc_info=True)
+
+    return result
 
 
 def _hr_analysis_markdown(result: dict) -> str:
@@ -2898,7 +3250,14 @@ def _hr_analysis_markdown(result: dict) -> str:
             "# HR 招聘分析报告",
             f"1. **简历最终得分 + 适配等级**：{result['final_score']} 分，{result['fit_grade']}",
             f"2. **适配标签**：{result['fit_tag']}；招聘建议：{result['recruitment_recommendation']}",
-            f"3. **AI美化风险等级**：{result['ai_risk_level']}（扣 {result['ai_deduction']} 分，{result['ai_risk_label']}）",
+            f"3. **AI美化风险等级**：{result['ai_risk_level']}"
+            + (
+                f"（扣 {result['ai_deduction']} 分，{result['ai_risk_label']}）"
+                if result["ai_deduction"] > 0
+                else f"（{result['ai_risk_label']}；仅风险提示，未扣分）"
+                if result.get("ai_deduction_suggested")
+                else f"（{result['ai_risk_label']}）"
+            ),
             f"4. **核心判定简要说明**：{result['summary']}",
             "## 基础信息",
             f"- 姓名：{result['candidate_name']}；性别：{basic['gender']}；年龄：{basic['age']}",
@@ -2991,7 +3350,19 @@ def _run_hr_analysis(
 ) -> dict:
     config_fingerprint = llm.model_config_fingerprint(ai_config)
     agent_fingerprint = _agent_config_fingerprint(agent_config)
-    cache_key = (_HR_ANALYSIS_VERSION, user_id, resume_id, job_id, config_fingerprint, agent_fingerprint)
+    # 核验三态必须进缓存键：`on` 的结果里带 credibility、`shadow`/`off` 的不带。
+    # 否则把开关从 on 切回 shadow 后，同一份简历/岗位会命中 `on` 时期缓存，
+    # 继续把核验结果吐给 HR —— 与"影子期不挂载、不进缓存"的设计意图相反。
+    deception_mode = config.DECEPTION_CHECK_MODE
+    cache_key = (
+        _HR_ANALYSIS_VERSION,
+        user_id,
+        resume_id,
+        job_id,
+        config_fingerprint,
+        agent_fingerprint,
+        deception_mode,
+    )
     cached = _hr_cache_get(cache_key)
     if cached is not None:
         return cached
@@ -3025,6 +3396,7 @@ def _run_hr_analysis(
             raw,
             job.get("content", ""),
             resume.get("content", ""),
+            log_context={"resume_id": resume_id, "job_id": job_id, "user_id": user_id},
         )
         _hr_cache_put(cache_key, result)
         logger.info(
@@ -3064,6 +3436,8 @@ def _run_hr_batch_analysis(
             job_id,
             llm.model_config_fingerprint(ai_config),
             agent_fingerprint,
+            # 同 _run_hr_analysis：核验三态不同 → 缓存内容不同，不能互相命中
+            config.DECEPTION_CHECK_MODE,
         )
         cached = _hr_cache_get(cache_key)
         if cached is not None:
@@ -3097,6 +3471,14 @@ def _run_hr_batch_analysis(
             job_id,
             _req_budget["calls"],
         )
+        # 门槛兜底在这里做一次：线程内共享同一份 requirements，
+        # 三个线程同时写会重复补条目（重复扣分、清单重影）。线程内只读复用。
+        coverage = screening_agent._apply_gate_backstop(job.get("content", ""), precomputed_requirements)
+        if coverage.get("added") or coverage.get("upgraded"):
+            logger.info(
+                "Gate backstop for job %s: markers=%s added=%s upgraded=%s",
+                job_id, coverage.get("markers_found"), coverage.get("added"), coverage.get("upgraded"),
+            )
 
     started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=min(3, len(pending)), thread_name_prefix="hr-analysis") as executor:
@@ -3132,11 +3514,15 @@ def _compare_candidates(analysis_results: list[dict], runtime_config: dict | Non
     items = []
     for a in analysis_results:
         if isinstance(a, dict):
+            analysis = a.get("hr_analysis") if isinstance(a.get("hr_analysis"), dict) else {}
+            incomplete = bool(analysis.get("analysis_incomplete") or a.get("analysis_incomplete"))
             items.append({
-                "candidate_name": a.get("candidate_name") or a.get("hr_analysis", {}).get("candidate_name") or "未提供",
-                "final_score": a.get("hr_analysis", {}).get("final_score", a.get("final_score", 0)),
-                "strengths": a.get("hr_analysis", {}).get("strengths", a.get("strengths", [])),
-                "weaknesses": a.get("hr_analysis", {}).get("weaknesses", a.get("weaknesses", [])),
+                "candidate_name": a.get("candidate_name") or analysis.get("candidate_name") or "未提供",
+                "final_score": None if incomplete else analysis.get("final_score", a.get("final_score", 0)),
+                "strengths": analysis.get("strengths", a.get("strengths", [])),
+                "weaknesses": analysis.get("weaknesses", a.get("weaknesses", [])),
+                "incomplete": incomplete,
+                "note": analysis.get("analysis_incomplete_reason") or ("分析未完成" if incomplete else ""),
             })
 
     candidates_json = json.dumps(items, ensure_ascii=False)
@@ -3163,32 +3549,62 @@ def _compare_candidates(analysis_results: list[dict], runtime_config: dict | Non
     if isinstance(result, dict):
         ranking = result.get("ranking")
         if isinstance(ranking, list):
-            # 权威分数以系统计算的 final_score 为准（LLM 不得改分）：按姓名回填
-            score_by_name = {item["candidate_name"]: item["final_score"] for item in items}
-            for item in ranking:
-                if isinstance(item, dict):
-                    item.setdefault("name", "")
-                    matched = score_by_name.get(item.get("name"))
-                    if matched is None:
-                        # 姓名严格不匹配时尝试包含式匹配（去空白），仍找不到则按名字截断兜底
-                        norm_name = (item.get("name") or "").replace(" ", "").strip()
-                        for cand, score in score_by_name.items():
-                            cand_norm = cand.replace(" ", "").strip()
-                            if cand_norm and (cand_norm in norm_name or norm_name in cand_norm):
-                                matched = score
-                                break
-                    item["score"] = matched if matched is not None else 0
-                    item.setdefault("difference", "")
-            # 排序以分数为准（降序），保证排名与报告头/候选人切换条一致
-            ranking.sort(key=lambda r: r.get("score") or 0, reverse=True)
-            for index, item in enumerate(ranking, start=1):
-                item["rank"] = index
             return {
-                "ranking": ranking,
+                "ranking": _build_authoritative_ranking(items, ranking),
                 "pairwise": result.get("pairwise", []),
                 "recommendation": result.get("recommendation", ""),
             }
     return None
+
+
+def _difference_text_for(name: str, pool: dict[str, list[str]]) -> str:
+    """取该候选人的"差异点"描述：先精确匹配再按去空白归一匹配，重名各取一条不重复复用。"""
+    normalized = (name or "").replace(" ", "").strip()
+    for candidate_name in list(pool):
+        texts = pool[candidate_name]
+        if not texts:
+            continue
+        candidate_norm = candidate_name.replace(" ", "").strip()
+        if candidate_name == name or (
+            normalized and candidate_norm and (normalized in candidate_norm or candidate_norm in normalized)
+        ):
+            return texts.pop(0)
+    return ""
+
+
+def _build_authoritative_ranking(items: list[dict], model_ranking: list) -> list[dict]:
+    """名次与分数由系统决定，模型只负责提供"差异点"描述。
+
+    旧实现的三个坑（都会让批量页的顺序与各候选人确定性 final_score 不一致，且无告警）：
+    1. `{name: score}` 字典在重名（都叫"未提供"）时只剩最后一条 → 两行同分；
+    2. 模型漏写某位候选人时不补回 → 那位候选人在对比里消失；
+    3. 姓名对不上时填 0 分 → 90 分的候选人被排到最后。
+    """
+    pool: dict[str, list[str]] = {}
+    for row in model_ranking:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if name:
+            pool.setdefault(name, []).append(str(row.get("difference") or ""))
+
+    rows = []
+    for item in items:
+        name = str(item.get("candidate_name") or "未提供")
+        score = item.get("final_score")
+        rows.append({
+            "name": name,
+            "score": score,
+            "difference": _difference_text_for(name, pool) or (
+                "分析未完成，未能参与横向对比" if item.get("incomplete") else ""
+            ),
+            "incomplete": bool(item.get("incomplete")),
+        })
+    # 完整分析按分数降序；未完成的排最后（不参与排序，但必须出现在名单里）
+    rows.sort(key=lambda row: (row["incomplete"], -(row["score"] or 0)))
+    for index, row in enumerate(rows, start=1):
+        row["rank"] = index
+    return rows
 
 
 _NAME_LABEL_RE = re.compile(r"(?:姓名|名字|Name)\s*[:：]\s*([A-Za-z\u4e00-\u9fff·]{2,20})")
@@ -3725,6 +4141,25 @@ def create_archive():
         "ai_risk_label": str(hr.get("ai_risk_label") or ""),
         "relevant_years": (hr.get("work_history") or {}).get("relevant_years"),
         "analysis_result_md": str(data.get("analysis_result") or ""),
+        # 列表页要能显示"能力分 vs 门槛后分数"和破格复核标记：快照里带上，避免列表接口拉全量分析
+        "capability_score": hr.get("capability_score"),
+        "capability_basis": hr.get("capability_basis"),
+        "override_review": bool(hr.get("override_review")),
+        "gate_cap_applied": hr.get("gate_cap_applied"),
+        "gate_blockers": [
+            {
+                "text": str(item.get("text") or ""),
+                "tier": str(item.get("tier") or ""),
+                "evidence_label": str(item.get("evidence_label") or ""),
+            }
+            for item in (hr.get("gate_blockers") or [])[:3]
+            if isinstance(item, dict)
+        ],
+        "non_mitigable_blockers": [
+            str(item.get("text") or "")
+            for item in (hr.get("non_mitigable_blockers") or [])[:3]
+            if isinstance(item, dict)
+        ],
     }
 
     aid = store.save_archive(

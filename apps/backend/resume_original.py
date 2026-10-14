@@ -20,6 +20,7 @@ import zlib
 from datetime import datetime, timezone
 
 import config
+import safe_fs
 
 try:
     import pypdfium2 as _pdfium
@@ -234,7 +235,7 @@ def orphans() -> list:
     if not directory:
         return []
     try:
-        names = os.listdir(directory)
+        names = safe_fs.listdir(directory)
     except OSError:
         return []
     result = []

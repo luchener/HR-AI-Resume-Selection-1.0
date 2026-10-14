@@ -1,11 +1,11 @@
 """归档 API 冒烟测试（不调 LLM，纯本地文件存储链路）。
 
-复用 test_smoke.py 的临时目录方案：setUp 里把 store 的目录全部
-重定向到 .test-tmp 下的临时目录，测试完 tearDown 清空。
+数据目录隔离交给 testsupport.isolated_data_dirs：setUp 里把 store/auth/config 的
+目录常量整体重定向到临时目录，测试结束**原样恢复**（旧写法只 rmtree 不恢复，
+会让 auth.USERS_DIR 永久指向已删除的目录，是套件互相污染的主因）。
 """
 import io
 import os
-import shutil
 import sys
 import unittest
 import uuid
@@ -13,16 +13,11 @@ import zipfile
 
 from xml.sax.saxutils import escape
 
-TEST_TMP = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    ".test-tmp",
-    f"archives_api_{uuid.uuid4().hex[:8]}",
-)
-os.environ["DATA_DIR"] = TEST_TMP
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import app as backend  # noqa: E402
 import auth as auth_module  # noqa: E402
+from testsupport import isolated_data_dirs  # noqa: E402
 
 
 def _make_docx(text: str) -> bytes:
@@ -46,27 +41,14 @@ RESUME_B = "李四\nPython 后端工程师，5 年经验\n熟悉 FastAPI 与 Doc
 
 class ArchiveApiSmokeTest(unittest.TestCase):
     def setUp(self):
-        os.makedirs(TEST_TMP, exist_ok=True)
-        backend.store.RESUMES_DIR = os.path.join(TEST_TMP, "resumes")
-        backend.store.JOBS_DIR = os.path.join(TEST_TMP, "jobs")
-        backend.store.ARCHIVES_DIR = os.path.join(TEST_TMP, "archives")
-        backend.store.ARCHIVE_INDEX_PATH = os.path.join(backend.store.ARCHIVES_DIR, "_index.json")
-        # app.py 的路由直接读 config.ARCHIVES_DIR，必须一并覆盖
-        backend.config.ARCHIVES_DIR = backend.store.ARCHIVES_DIR
-        auth_module.USERS_DIR = os.path.join(TEST_TMP, "users")
-        auth_module._INDEX_FILE = os.path.join(auth_module.USERS_DIR, "_index.json")
-        auth_module._INDEX_LOCK = os.path.join(auth_module.USERS_DIR, "_index.lock")
-        auth_module.RESETS_DIR = os.path.join(TEST_TMP, "resets")
-        os.makedirs(auth_module.RESETS_DIR, exist_ok=True)
-
+        # store/auth/config 的目录常量一起重定向，tearDown 由 addCleanup 恢复原值
+        self.dirs = isolated_data_dirs("archives_api")
+        self.addCleanup(self.dirs.restore)
         user, _err = auth_module.create_user("archiver", "archiver-pw123")
         self.user_id = user["user_id"]
         self.token = auth_module.generate_jwt(user["user_id"], user["username"])
         self.headers = {"Authorization": f"Bearer {self.token}"}
         self.client = backend.app.test_client()
-
-    def tearDown(self):
-        shutil.rmtree(TEST_TMP, ignore_errors=True)
 
     def _upload_resume(self, text: str) -> str:
         resp = self.client.post(
@@ -95,6 +77,36 @@ class ArchiveApiSmokeTest(unittest.TestCase):
         if category is not None:
             body["category"] = category
         return self.client.post("/api/v1/archives", json=body, headers=self.headers)
+
+    def test_archive_snapshot_carries_gate_summary(self):
+        """归档快照要带上"能力分 / 破格复核 / 阻塞项"，列表页才不用拉全量分析。"""
+        resume_id = self._upload_resume(RESUME_A)
+        job_id = self._upload_job("招聘 AI 产品经理，要求熟悉 LLM 应用", resume_id)
+        analysis = {
+            "candidate_name": "苏明远",
+            "final_score": 59,
+            "capability_score": 88,
+            "override_review": True,
+            "gate_cap_applied": 59,
+            "gate_blockers": [
+                {"text": "本科及以上学历", "category": "education", "tier": "A",
+                 "evidence_label": "已写明不符合", "basis": "简历最高学历为大专"},
+                {"text": "必须持有PMP证书", "tier": "B", "evidence_label": "已写明不符合"},
+            ],
+            "fit_tag": "不匹配",
+            "recruitment_recommendation": "破格复核",
+        }
+
+        resp = self._create_archive(resume_id, job_id, analysis=analysis)
+
+        self.assertEqual(resp.status_code, 201, resp.get_data())
+        snapshot = resp.get_json()["data"]["analysis_snapshot"]
+        self.assertEqual(snapshot["capability_score"], 88)
+        self.assertTrue(snapshot["override_review"])
+        self.assertEqual(snapshot["gate_cap_applied"], 59)
+        self.assertEqual(len(snapshot["gate_blockers"]), 2)
+        self.assertEqual(snapshot["gate_blockers"][0]["tier"], "A")
+        self.assertEqual(snapshot["gate_blockers"][0]["evidence_label"], "已写明不符合")
 
     def test_archive_full_cycle(self):
         """归档 -> 列表/姓名查询 -> 改标签 -> 软删 -> 恢复 -> 软删 -> 彻底删除。"""

@@ -25,26 +25,27 @@ _TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-tmp-captc
 os.environ["ENV"] = "local"
 
 import config  # noqa: E402
+from testsupport import isolated_data_dirs  # noqa: E402
 
-config.DATA_DIR = _TMP
-_SUBDIRS = (
-    "users",
-    "password_resets",
-    "resumes",
-    "jobs",
-    "archives",
-    "invite_requests",
-    "invite_codes",
-    "invite_codes_audit",
-    "login_failures",
-    "rate_limits",
-)
-for _d in _SUBDIRS:
-    os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
-config.LOG_DIR = os.path.join(_TMP, "logs")
-os.makedirs(config.LOG_DIR, exist_ok=True)
-# 本套件专门验证验证码：强制开启
+# 整体接管数据目录（root 沿用 _TMP）：只改 config.DATA_DIR 的话，auth/app 若已被别的
+# 模块先 import，它们的目录常量会指向别处，接口就会 500/404。
+_DIRS = isolated_data_dirs("captcha", root=_TMP)
+# 本套件专门验证验证码：必须在**用例运行时**打开——import 时打开会被后面 import 的
+# 模块（它们统一写 CAPTCHA_ENABLED = False）覆盖，于是接口 404、拿不到 data。
 config.CAPTCHA_ENABLED = True
+
+
+def setUpModule():
+    """用例运行时重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。"""
+    config.CAPTCHA_ENABLED = True
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原全局量：验证码回到套件规范默认（关闭），目录常量交还。"""
+    config.CAPTCHA_ENABLED = False
+    _DIRS.restore()
+
 
 import auth  # noqa: E402
 import mailer  # noqa: E402
@@ -85,8 +86,7 @@ class CaptchaTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         shutil.rmtree(_TMP, ignore_errors=True)
-        for _d in _SUBDIRS + ("logs",):
-            os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
+        _DIRS.ensure_dirs()
         cls.client = backend.app.test_client()
         user, err = auth_module.create_user("cap_user", "password123", "cap_user@example.com")
         assert user, f"create user failed: {err}"

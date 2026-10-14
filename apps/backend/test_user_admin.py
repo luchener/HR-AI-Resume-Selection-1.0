@@ -24,25 +24,21 @@ os.environ["ENV"] = "local"
 
 import config  # noqa: E402
 
-config.DATA_DIR = _TMP
-_SUBDIRS = (
-    "users",
-    "password_resets",
-    "resumes",
-    "jobs",
-    "archives",
-    "invite_requests",
-    "invite_codes",
-    "invite_codes_audit",
-    "login_failures",
-    "rate_limits",
-    "admin_ops",
-    "usage",
-)
-for _d in _SUBDIRS:
-    os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
-config.LOG_DIR = os.path.join(_TMP, "logs")
-os.makedirs(config.LOG_DIR, exist_ok=True)
+# 数据目录整体接管（root 沿用原来的 _TMP，测试体里的路径引用不用改）。
+# 旧写法只改 config.DATA_DIR：在整套跑时 auth/app 可能已被别的模块先 import，
+# 它们的目录常量会与 config.DATA_DIR 指向不同的临时目录 → 管理员鉴权读不到用户文件 → 403。
+from testsupport import isolated_data_dirs  # noqa: E402
+
+_DIRS = isolated_data_dirs("user_admin", root=_TMP)
+
+
+def setUpModule():
+    """用例运行时重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。"""
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    _DIRS.restore()
 
 import auth  # noqa: E402
 import mailer  # noqa: E402
@@ -82,8 +78,7 @@ class UserAdminTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         shutil.rmtree(_TMP, ignore_errors=True)
-        for _d in _SUBDIRS + ("logs",):
-            os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
+        _DIRS.ensure_dirs()
         cls.client = backend.app.test_client()
         # 白名单管理员（email 命中 config.ADMIN_EMAILS，超级管理员）+ 普通用户
         admin_email = (list(config.ADMIN_EMAILS) or ["admin@example.com"])[0]

@@ -20,26 +20,22 @@ _TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-tmp-owner
 os.environ["ENV"] = "local"
 
 import config  # noqa: E402
+from testsupport import isolated_data_dirs  # noqa: E402
 
-config.DATA_DIR = _TMP
-_SUBDIRS = (
-    "users",
-    "password_resets",
-    "resumes",
-    "jobs",
-    "archives",
-    "invite_requests",
-    "invite_codes",
-    "invite_codes_audit",
-    "login_failures",
-    "rate_limits",
-    "admin_ops",
-    "usage",
-)
-for _d in _SUBDIRS:
-    os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
-config.LOG_DIR = os.path.join(_TMP, "logs")
-os.makedirs(config.LOG_DIR, exist_ok=True)
+# 整体接管数据目录（root 沿用 _TMP）：只改 config.DATA_DIR，在整套跑时 auth 的
+# 用户目录常量会指向别的模块留下的位置，admin_owner_cli 就会读错账号。
+_DIRS = isolated_data_dirs("owner_cli", root=_TMP)
+
+
+def setUpModule():
+    """用例运行时重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。"""
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原目录常量，避免把本模块的临时布局留给后续模块。"""
+    _DIRS.restore()
+
 
 import auth  # noqa: E402
 import admin_owner_cli  # noqa: E402
@@ -58,8 +54,7 @@ class OwnerCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         shutil.rmtree(_TMP, ignore_errors=True)
-        for _d in _SUBDIRS + ("logs",):
-            os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
+        _DIRS.ensure_dirs()
 
     def setUp(self):
         # 每个用例重建干净数据：白名单超管 admin + 普通用户 user_plain

@@ -152,14 +152,18 @@ def search_web(query: str, *, max_results: int = _MAX_RESULTS, search_config: di
 
     端点策略：默认 Bing（国内可达）；DDG 作为 Bing 失败后的备选。
     search_config: 可选 {"endpoint": "...", "api_key": "..."}，用于通用搜索端点。
+
+    **配了私有端点就绝不回落公网**：私有端点通常意味着"这批查询不许出公网"
+    （内网检索/合规隔离/公司名不外传）。旧实现失败后静默改用 DDG，等于把简历里的
+    公司名发到了公网，而且证据仍被归因到私有端点 —— 出网边界与归因同时错。
     """
     query = str(query or "").strip()
     if not query or len(query) > 200:
         return None
+    config = search_config if isinstance(search_config, dict) else {}
+    endpoint = str(config.get("endpoint") or "").strip()
+    api_key = str(config.get("api_key") or "").strip() or None
     try:
-        config = search_config if isinstance(search_config, dict) else {}
-        endpoint = str(config.get("endpoint") or "").strip()
-        api_key = str(config.get("api_key") or "").strip() or None
         if endpoint:
             return _custom_search(query, endpoint, api_key, max_results)
         results = _bing_search(query, max_results)
@@ -168,6 +172,9 @@ def search_web(query: str, *, max_results: int = _MAX_RESULTS, search_config: di
         logger.info("bing empty for query=%s…, fallback to ddg", query[:40])
         return _ddg_search(query, max_results)
     except Exception as exc:  # 网络/解析/限流一律静默降级
+        if endpoint:
+            logger.warning("私有检索端点失败，按出网边界约定不做公网回落 (query=%s…): %s", query[:40], exc)
+            return None
         logger.info("web search failed (query=%s…): %s", query[:40], exc)
         try:
             return _ddg_search(query, max_results)

@@ -2,7 +2,6 @@
 """每日使用次数配额 测试（unittest，零 SMTP 依赖，mock 邮件发送）。"""
 import json
 import os
-import shutil
 import uuid
 import unittest
 from unittest import mock
@@ -11,6 +10,20 @@ import app as backend
 import config as backend_config
 import quota as quota_mod
 import auth as auth_mod
+import testsupport
+
+# 数据目录隔离统一走 testsupport：手写覆盖 USERS_DIR 这类做法会漏掉模块自己的派生常量
+# （auth._INDEX_FILE / auth.PRUNE_TOUCH_FILE / retention._SENTINEL），
+# 结果 users/_index.json、.last_prune、.last_retention 照旧写进真实 data/。
+_DIRS = testsupport.isolated_data_dirs(prefix="quota")
+
+
+def setUpModule():
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    _DIRS.restore()
 
 
 class QuotaApiTest(unittest.TestCase):
@@ -18,43 +31,6 @@ class QuotaApiTest(unittest.TestCase):
     def setUpClass(cls):
         backend.app.config["TESTING"] = True
         backend_config.CAPTCHA_ENABLED = False
-        _base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-tmp")
-        os.makedirs(_base, exist_ok=True)
-        cls._tmp = os.path.join(_base, "quota-" + uuid.uuid4().hex[:10])
-        os.makedirs(cls._tmp, exist_ok=True)
-        # 全量隔离：auth/config 里的路径都是 import 期快照，必须两边同时覆盖，
-        # 否则测试会在真实 data/ 下创建 quotaadmin*/quotauser* 账号（历史遗留污染）。
-        cls._old = {"backend_config": {}, "auth_mod": {}}
-        cls._old["backend_config"]["QUOTA_LIMITS_PATH"] = backend_config.QUOTA_LIMITS_PATH
-        backend_config.QUOTA_LIMITS_PATH = os.path.join(cls._tmp, "limits.json")
-        _dirs = {
-            "USER_USAGE_DIR": "usage",
-            "RATE_LIMITS_DIR": "rate_limits",
-            "USERS_DIR": "users",
-            "RESETS_DIR": "resets",
-            "ADMIN_OPS_DIR": "admin_ops",
-        }
-        for _key, _sub in _dirs.items():
-            _path = os.path.join(cls._tmp, _sub)
-            if hasattr(backend_config, _key):
-                cls._old["backend_config"][_key] = getattr(backend_config, _key)
-                setattr(backend_config, _key, _path)
-            if hasattr(auth_mod, _key):
-                cls._old["auth_mod"][_key] = getattr(auth_mod, _key)
-                setattr(auth_mod, _key, _path)
-            os.makedirs(_path, exist_ok=True)
-        os.makedirs(os.path.dirname(backend_config.QUOTA_LIMITS_PATH), exist_ok=True)
-        # 隔离简历/岗位/归档目录：保留期等后台清理逻辑按 store 的模块属性取路径，
-        # 不隔离会在真实 data/ 下删数据（2026-09-29 真实事故的现场之一）
-        cls._old_store = {
-            "RESUMES_DIR": backend.store.RESUMES_DIR,
-            "JOBS_DIR": backend.store.JOBS_DIR,
-            "ARCHIVES_DIR": backend.store.ARCHIVES_DIR,
-        }
-        for _key, _sub in (("RESUMES_DIR", "resumes"), ("JOBS_DIR", "jobs"), ("ARCHIVES_DIR", "archives")):
-            _path = os.path.join(cls._tmp, _sub)
-            setattr(backend.store, _key, _path)
-            os.makedirs(_path, exist_ok=True)
         cls.client = backend.app.test_client()
         suf = uuid.uuid4().hex[:6]
         cls.admin_name = "quotaadmin" + suf
@@ -75,13 +51,7 @@ class QuotaApiTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        for key, val in cls._old["backend_config"].items():
-            setattr(backend_config, key, val)
-        for key, val in cls._old["auth_mod"].items():
-            setattr(auth_mod, key, val)
-        for key, val in cls._old_store.items():
-            setattr(backend.store, key, val)
-        shutil.rmtree(cls._tmp, ignore_errors=True)
+        pass
 
     def setUp(self):
         # 每个测试独立：重置配额文件 + 该用户 usage，避免跨用例污染

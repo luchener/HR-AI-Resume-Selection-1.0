@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import config
 import email_templates
 import mailer
+import safe_fs
 from store import _read_json as _store_read_json, _write_json as _store_write_json
 
 # 文本上限（与 email_templates 一致，路由层复用）
@@ -196,7 +197,7 @@ def _list_all_announcements() -> list[dict]:
     """全部公告（含已删除标记），按 start_at 倒序。内部用。"""
     out = []
     if os.path.isdir(config.ANNOUNCEMENTS_DIR):
-        for name in os.listdir(config.ANNOUNCEMENTS_DIR):
+        for name in safe_fs.listdir(config.ANNOUNCEMENTS_DIR):
             if not name.endswith(".json") or name.startswith("_"):
                 continue
             rec = _read_json(os.path.join(config.ANNOUNCEMENTS_DIR, name))
@@ -326,7 +327,7 @@ def _image_path(image_id: str) -> str:
     if not image_id or not image_id.replace("-", "").isalnum() or "-" not in image_id:
         return ""
     if os.path.isdir(config.EMAIL_IMAGES_DIR):
-        for name in os.listdir(config.EMAIL_IMAGES_DIR):
+        for name in safe_fs.listdir(config.EMAIL_IMAGES_DIR):
             stem, dot, _ext = name.rpartition(".")
             if dot and stem == image_id:
                 return os.path.join(config.EMAIL_IMAGES_DIR, name)
@@ -378,7 +379,7 @@ def list_email_images() -> list[dict]:
     """已上传图片列表（新 → 旧）。"""
     out = []
     if os.path.isdir(config.EMAIL_IMAGES_DIR):
-        for name in os.listdir(config.EMAIL_IMAGES_DIR):
+        for name in safe_fs.listdir(config.EMAIL_IMAGES_DIR):
             if not name.endswith((".png", ".jpg", ".jpeg", ".webp")):
                 continue
             image_id, _ext = name.rsplit(".", 1)
@@ -655,7 +656,7 @@ def list_email_logs(limit: int = 50) -> list[dict]:
     """邮件发送历史（新 → 旧）。"""
     out = []
     if os.path.isdir(config.EMAIL_LOGS_DIR):
-        for name in os.listdir(config.EMAIL_LOGS_DIR):
+        for name in safe_fs.listdir(config.EMAIL_LOGS_DIR):
             if not name.endswith(".json") or name.startswith("_"):
                 continue
             rec = _read_json(os.path.join(config.EMAIL_LOGS_DIR, name))

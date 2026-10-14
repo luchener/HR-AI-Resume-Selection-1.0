@@ -35,6 +35,7 @@ import sys
 
 import auth
 import config  # noqa: F401  确保 config 先加载 .env 与目录
+import safe_fs
 
 
 _USERNAME_RE = re.compile(r"^[a-zA-Z0-9_\-\u4e00-\u9fff]{2,64}$")
@@ -45,7 +46,7 @@ def _all_user_records():
     out = []
     if not os.path.isdir(auth.USERS_DIR):
         return out
-    for filename in sorted(os.listdir(auth.USERS_DIR)):
+    for filename in sorted(safe_fs.listdir(auth.USERS_DIR)):
         if not filename.endswith(".json") or filename in ("_index.json", "_index.lock"):
             continue
         rec = auth._read_json(os.path.join(auth.USERS_DIR, filename))

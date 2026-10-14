@@ -10,34 +10,24 @@ import app as backend
 import llm as llm_module
 import auth as auth_module
 from test_helpers import build_anonymous_resume_docx
+from testsupport import isolated_data_dirs
 
 
 class HrAnalysisTests(unittest.TestCase):
     def setUp(self):
-        # 用工作区内固定目录（沙箱环境不允许写系统临时目录；服务器上无此限制）
-        self.temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-data")
-        os.makedirs(self.temp_dir, exist_ok=True)
+        # 数据目录整体隔离：临时目录 + 结束后原样恢复所有模块级路径。
+        # 旧写法（手写赋值 store/auth 的目录常量，tearDown 只 rmtree 不恢复）会把
+        # auth.USERS_DIR 永久留在已删除的目录上，导致后续模块 create_user 崩掉；见 testsupport.py。
+        self.dirs = isolated_data_dirs("hr_analysis")
+        self.addCleanup(self.dirs.restore)
         backend._HR_ANALYSIS_CACHE.clear()
         backend.config.ALLOW_CUSTOM_AI_CONFIG = True
-        backend.store.RESUMES_DIR = os.path.join(self.temp_dir, "resumes")
-        backend.store.JOBS_DIR = os.path.join(self.temp_dir, "jobs")
-        # 认证：创建测试用户并生成 JWT（auth 模块的 USERS_DIR 指向临时目录）
-        # 注意：新版 auth 的索引/重置目录依赖 USERS_DIR 初始化，需一并重定向
-        auth_module.USERS_DIR = os.path.join(self.temp_dir, "users")
-        auth_module._INDEX_FILE = os.path.join(auth_module.USERS_DIR, "_index.json")
-        auth_module._INDEX_LOCK = os.path.join(auth_module.USERS_DIR, "_index.lock")
-        auth_module.RESETS_DIR = os.path.join(self.temp_dir, "password_resets")
-        os.makedirs(auth_module.RESETS_DIR, exist_ok=True)
+        self.addCleanup(setattr, backend.config, "ALLOW_CUSTOM_AI_CONFIG", False)
         user, _err = auth_module.create_user("tester", "password123")
         self.user_id = user["user_id"]
         self.token = auth_module.generate_jwt(user["user_id"], user["username"])
         self.headers = {"Authorization": f"Bearer {self.token}"}
         self.client = backend.app.test_client()
-
-    def tearDown(self):
-        backend.config.ALLOW_CUSTOM_AI_CONFIG = False
-        import shutil
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_resume_and_job_upload_do_not_call_llm(self):
         file_bytes = build_anonymous_resume_docx()
@@ -124,7 +114,13 @@ class HrAnalysisTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         result = response.get_json()["data"]["hr_analysis"]
-        self.assertEqual(result["final_score"], 81)
+        # AI 美化默认 readonly：只作风险提示，不扣分（88 分不再被减到 81）
+        self.assertEqual(result["final_score"], 88)
+        self.assertEqual(result["ai_deduction"], 0)
+        self.assertEqual(result["ai_deduction_suggested"], 7)
+        self.assertEqual(result["ai_risk"], "light")
+        self.assertEqual(result["ai_risk_level"], "轻微AI美化")
+        self.assertIn("未扣分", result["ai_risk_note"])
         self.assertEqual(result["fit_grade"], "A级（良好适配）")
         self.assertEqual(result["job_fit_percentage"], 88)
         self.assertEqual(result["recruitment_recommendation"], "优先面试")
@@ -145,7 +141,7 @@ class HrAnalysisTests(unittest.TestCase):
         """AI 分析入口必须吃清洗后的文本：PDF 解析残留不得进入模型。"""
         polluted = (
             "Rj\n\nR\n\nQ\n\nG q n P\n\nY 2 9 W\n\n912 cf79 e4 c4712351 H\n\n"
-            "金利源\n\n男 | 年龄：32岁 |\n\n779221546@qq.com\n\n个人优势\n\n"
+            "候选人甲\n\n男 | 年龄：32岁 |\n\ncandidate@example.com\n\n个人优势\n\n"
             "1.熟悉常见通讯协议及网络协议，具备良好的技术理解能力\n\n"
             "2.熟练掌握 Linux 命令及系统安装，具备服务器运维经验\n\n"
             "3.熟悉办公设备操作，能够高效完成日常技术支持工作\n\n"
@@ -154,7 +150,7 @@ class HrAnalysisTests(unittest.TestCase):
         resume_id = backend.store.save_resume(polluted, {}, self.user_id)
         job_id = backend.store.save_job(resume_id, "招聘运维工程师，要求 3 年经验", {}, self.user_id)
 
-        with patch.object(backend.screening_agent, "run_screening_agent", return_value={"candidate_name": "金利源", "final_score": 70}) as call:
+        with patch.object(backend.screening_agent, "run_screening_agent", return_value={"candidate_name": "候选人甲", "final_score": 70}) as call:
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_id": resume_id, "job_id": job_id},
@@ -163,7 +159,7 @@ class HrAnalysisTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
         sent = call.call_args.kwargs.get("resume_content") or ""
-        self.assertIn("金利源", sent, "真中文必须原样进入模型")
+        self.assertIn("候选人甲", sent, "真中文必须原样进入模型")
         self.assertIn("个人优势", sent)
         for junk in ("Rj", "G q n P", "Y 2 9 W", "912 cf79"):
             self.assertNotIn(junk, sent, f"残留不得进入模型：{junk!r}")
@@ -209,9 +205,133 @@ class HrAnalysisTests(unittest.TestCase):
         }
         self.assertTrue(expected_fields.issubset(result.keys()))
         self.assertIsInstance(result["basic_screening"], dict)
+
+    def test_ai_risk_is_hint_only_by_default(self):
+        """默认 readonly：AI 美化只作风险提示，不参与扣分（分数只由能力分与硬门槛决定）。"""
+        raw = {
+            "candidate_name": "张三",
+            "score_breakdown": {
+                "hard_requirements": 20, "responsibility_overlap": 18,
+                "skills_projects": 16, "industry_background": 10, "evidence_bonus": 8,
+            },
+            "ai_risk": "medium",
+            "ai_deduction": 18,
+            "summary": "疑似模板化表达。",
+            "basic_screening": {},
+            "work_history": {"employment_records": []},
+            "skill_match": {},
+            "certificates": [],
+            "bonus_items": [],
+            "strengths": ["有相关经历"],
+            "weaknesses": ["部分信息未提供"],
+            "risk_points": ["无明显风险"],
+            "role_specific_assessment": ["不适用"],
+            "deduction_reasons": ["多处跨段落通用话术"],
+            "recruitment_recommendation": "储备观察",
+            "fit_tag": "部分匹配",
+        }
+
+        result = backend._normalize_hr_analysis(raw, "招聘后端工程师", "张三\n后端工程师")
+
+        self.assertEqual(sum(raw["score_breakdown"].values()), 72)
+        self.assertEqual(result["final_score"], 72)  # 未被扣 18 分
+        self.assertEqual(result["ai_deduction"], 0)
+        self.assertEqual(result["ai_deduction_suggested"], 18)  # 建议值照实记录
+        self.assertEqual(result["ai_risk_level"], "中度AI美化")  # 档位仍然展示
+        self.assertEqual(result["deduction_reasons"], ["多处跨段落通用话术"])
+        self.assertIn("未扣分", result["ai_risk_note"])
+
+    def test_ai_risk_enforce_mode_restores_old_behaviour(self):
+        """开关兜底：AI_RISK_DEDUCTION_MODE=enforce 时恢复按档位区间扣分（并夹取到区间内）。"""
+        raw = {
+            "candidate_name": "张三",
+            "score_breakdown": {
+                "hard_requirements": 20, "responsibility_overlap": 18,
+                "skills_projects": 16, "industry_background": 10, "evidence_bonus": 8,
+            },
+            "ai_risk": "medium",
+            "ai_deduction": 12,  # 低于 medium 下限 15 → 应被抬到 15
+            "summary": "疑似模板化表达。",
+            "basic_screening": {},
+            "work_history": {"employment_records": []},
+            "skill_match": {},
+            "certificates": [],
+            "bonus_items": [],
+            "strengths": [],
+            "weaknesses": [],
+            "risk_points": [],
+            "role_specific_assessment": [],
+            "deduction_reasons": ["多处跨段落通用话术"],
+            "recruitment_recommendation": "储备观察",
+            "fit_tag": "部分匹配",
+        }
+
+        with patch.object(backend.config, "AI_RISK_DEDUCTION_MODE", "enforce"):
+            result = backend._normalize_hr_analysis(raw, "招聘后端工程师", "张三\n后端工程师")
+
+        self.assertEqual(result["ai_deduction"], 15)
+        self.assertEqual(result["final_score"], 57)
+        self.assertEqual(result["ai_deduction_suggested"], 15)
+        self.assertEqual(result["ai_risk_note"], "")
         self.assertIsInstance(result["work_history"], dict)
         self.assertIsInstance(result["skill_match"], dict)
         self.assertIsInstance(result["employment_records"] if "employment_records" in result else result["work_history"].get("employment_records", []), list)
+
+    def test_credibility_is_attached_only_when_mode_on(self):
+        """核验面板的前置契约：`on` 时 payload 挂上 credibility，`shadow` 时不挂（不写、不进缓存）。"""
+        stub = {
+            "candidate_name": "张三",
+            "job_fit_score": 78,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "summary": "核心经历匹配。",
+            "basic_screening": {},
+            "work_history": {"total_years": "8 年", "relevant_years": "6 年", "employment_records": []},
+            "skill_match": {},
+            "certificates": [],
+            "bonus_items": [],
+            "strengths": ["有相关经历"],
+            "weaknesses": ["部分信息未提供"],
+            "risk_points": ["无明显风险"],
+            "role_specific_assessment": ["不适用"],
+            "deduction_reasons": [],
+            "recruitment_recommendation": "储备观察",
+            "fit_tag": "部分匹配",
+        }
+        resume_id = backend.store.save_resume(
+            "张三\n2018.07-至今 某公司 软件实施工程师\n负责现场设备安装调试。", {}, self.user_id
+        )
+        job_id = backend.store.save_job(resume_id, "招聘实施工程师，要求 3 年现场实施经验", {}, self.user_id)
+
+        with patch.object(backend.screening_agent, "run_screening_agent", return_value=stub):
+            with patch.object(backend.config, "DECEPTION_CHECK_MODE", "on"):
+                on_result = self.client.post(
+                    "/api/v1/resumes/hr-analysis",
+                    json={"resume_id": resume_id, "job_id": job_id},
+                    headers=self.headers,
+                ).get_json()["data"]["hr_analysis"]
+            with patch.object(backend.config, "DECEPTION_CHECK_MODE", "shadow"):
+                shadow_result = self.client.post(
+                    "/api/v1/resumes/hr-analysis",
+                    json={"resume_id": resume_id, "job_id": job_id},
+                    headers=self.headers,
+                ).get_json()["data"]["hr_analysis"]
+
+        credibility = on_result.get("credibility")
+        self.assertIsInstance(credibility, dict)
+        self.assertEqual(credibility["version"], "deception-check-v3")
+        self.assertTrue(credibility["enabled"])
+        self.assertEqual(credibility["checks_run"], 13)
+        self.assertEqual(
+            set(credibility.keys()),
+            {"version", "enabled", "checks_run", "findings", "counts", "by_source", "notice"},
+        )
+        # 影子模式：字段根本不出现（HR 看不到，也不会进缓存）
+        self.assertNotIn("credibility", shadow_result)
+        # 核验绝不参与评分：同一份输入，挂不挂核验字段，分数与等级完全一致
+        self.assertEqual(on_result["final_score"], shadow_result["final_score"])
+        self.assertEqual(on_result["fit_grade"], shadow_result["fit_grade"])
+        self.assertEqual(on_result["score_breakdown"], shadow_result["score_breakdown"])
 
     def test_normalizer_uses_ai_score_breakdown_sum(self):
         raw = {
@@ -636,6 +756,53 @@ class HrAnalysisTests(unittest.TestCase):
         self.assertEqual(data["batch_failures"][0]["resume_id"], resume_ids[1])
         self.assertEqual(call.call_count, 2)
 
+    def test_batch_backstops_shared_requirements_exactly_once(self):
+        """批量共享同一份 requirements 并发跑：兜底必须在外层一次性完成，线程内只读。
+
+        否则两个线程同时判断"这条门槛没人覆盖"就会各补一条 → 重复扣分、清单重影。
+        """
+        resume_ids = [
+            backend.store.save_resume("候选人甲，3 年经验", {}, self.user_id),
+            backend.store.save_resume("候选人乙，3 年经验", {}, self.user_id),
+        ]
+        job_id = backend.store.save_job(
+            resume_ids[0],
+            "岗位要求：\n1.硕士及以上学历\n2.5年以上后端开发经验",
+            {},
+            self.user_id,
+        )
+        model_result = {
+            "job_fit_score": 80,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "summary": "岗位经验基本匹配。",
+            "strengths": ["具备后端开发经验"],
+            "weaknesses": ["项目数据未提供"],
+            "risk_points": ["无明显风险"],
+        }
+        snapshots: list[list[str]] = []
+
+        def analyze_candidate(*, precomputed_requirements=None, **_kwargs):
+            snapshots.append([item["text"] for item in precomputed_requirements["requirements"]])
+            return model_result
+
+        with patch.object(backend.screening_agent, "run_screening_agent", side_effect=analyze_candidate), \
+                patch.object(backend.screening_agent, "_extract_requirements",
+                             side_effect=lambda *args, **_kwargs: {"requirements": [], "extraction_failed": False}):
+            response = self.client.post(
+                "/api/v1/resumes/hr-analysis",
+                json={"resume_ids": resume_ids, "job_id": job_id},
+                headers=self.headers,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(snapshots), 2)
+        for snapshot in snapshots:
+            # 兜底补出的两条门槛在**每个**线程看到的都是同一份，没有重影
+            self.assertEqual(len(snapshot), 2)
+            self.assertEqual(len(set(snapshot)), 2)
+            self.assertEqual(snapshot, snapshots[0])
+
     def test_batch_hr_analysis_maps_all_candidates_from_one_model_call(self):
         resume_ids = [
             backend.store.save_resume("候选人甲，Python 5 年", {}, self.user_id),
@@ -913,10 +1080,12 @@ class HardGateScoreTests(unittest.TestCase):
             ],
         }
         result = self._normalize(raw)
-        self.assertEqual(result["final_score"], 67)          # 77 - 10 = 67，未达 69 封顶位
-        self.assertEqual(result["hard_gate_deduction"], 10)
+        self.assertEqual(result["hard_gate_deduction"], 8)   # 年限属 B 档：每条 8 分
+        self.assertEqual(result["final_score"], 69)          # 77 - 8 = 69，正好压在 B 档封顶位
+        self.assertEqual(result["gate_tier_counts"], {"A": 0, "B": 1, "C": 0})
 
-    def test_multiple_hard_fails_deduction_capped_at_30(self):
+    def test_multiple_hard_fails_use_per_tier_caps(self):
+        """多条不达标：按档各自累计——A 每条 10（上限 30）、B 每条 8（上限 24）、C 每条 5（上限 15）。"""
         raw = {
             "candidate_name": "张三",
             "score_breakdown": {
@@ -930,16 +1099,19 @@ class HardGateScoreTests(unittest.TestCase):
             "ai_risk": "none",
             "ai_deduction": 0,
             "requirements_checklist": [
-                {"id": "r1", "text": "必须持有PMP证书", "category": "certificate", "logic": "required", "status": "not_met", "resume_basis": "未找到匹配证书"},
+                {"id": "r1", "text": "必须持有PMP证书", "category": "certificate", "logic": "required", "status": "not_met", "resume_basis": "简历已写明无PMP证书"},
                 {"id": "r2", "text": "5年以上经验", "category": "experience", "logic": "required", "status": "not_met", "resume_basis": "年限3年"},
                 {"id": "r3", "text": "本科及以上学历", "category": "education", "logic": "required", "status": "not_met", "resume_basis": "最高学历专科"},
-                {"id": "r4", "text": "必须持有CISP证书", "category": "certificate", "logic": "required", "status": "not_met", "resume_basis": "未找到匹配证书"},
+                {"id": "r4", "text": "必须持有CISP证书", "category": "certificate", "logic": "required", "status": "not_met", "resume_basis": "简历已写明无CISP证书"},
                 {"id": "r5", "text": "8年以上经验", "category": "experience", "logic": "required", "status": "not_met", "resume_basis": "年限3年"},
             ],
         }
         result = self._normalize(raw)
-        self.assertEqual(result["hard_gate_deduction"], 30)  # 上限 30
-        self.assertEqual(result["final_score"], 50)          # 80 - 30 = 50
+
+        # A 档 1 条 = 10；B 档 4 条 = 8×4 = 32 → 受 B 档上限 24 约束
+        self.assertEqual(result["gate_tier_counts"], {"A": 1, "B": 4, "C": 0})
+        self.assertEqual(result["hard_gate_deduction"], 34)
+        self.assertEqual(result["final_score"], 46)          # 80 - 34 = 46
 
     def test_checklist_not_met_inside_full_analysis_flow(self):
         """整条链路：screening_agent 生成 checklist → normalize 扣分。用单测函数直接验证判定逻辑。"""
@@ -985,6 +1157,7 @@ class HardGateScoreTests(unittest.TestCase):
         self.assertIn("3", checklist[0]["resume_basis"])
 
     def test_certificate_missing_inside_checklist(self):
+        """三态：简历没提到 PMP → 未写明，交人工（不扣分、不封顶）。"""
         import screening_agent
 
         requirements = {"requirements": [{"id": "r1", "text": "必须持有PMP证书", "category": "certificate", "hard": True, "logic": "required"}]}
@@ -994,8 +1167,27 @@ class HardGateScoreTests(unittest.TestCase):
             "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 20, "industry_background": 10, "evidence_bonus": 5},
         }
         checklist = screening_agent._build_requirements_checklist(requirements, report, "张三\n英语六级")
+
+        self.assertEqual(checklist[0]["status"], "manual_review")
+        self.assertEqual(checklist[0]["evidence_state"], "missing")
+        self.assertEqual(checklist[0]["evidence_label"], "未写明或无法核对，需人工确认")
+        self.assertIn("未写明", checklist[0]["resume_basis"])
+
+    def test_certificate_explicitly_absent_inside_checklist(self):
+        """三态：简历自己写明"无PMP证书" → 明确不符合，才判 not_met。"""
+        import screening_agent
+
+        requirements = {"requirements": [{"id": "r1", "text": "必须持有PMP证书", "category": "certificate", "hard": True, "logic": "required"}]}
+        report = {
+            "candidate_name": "张三",
+            "certificates": ["英语六级", "无PMP证书"],
+            "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 20, "industry_background": 10, "evidence_bonus": 5},
+        }
+        checklist = screening_agent._build_requirements_checklist(requirements, report, "张三\n英语六级")
+
         self.assertEqual(checklist[0]["status"], "not_met")
-        self.assertIn("证书", checklist[0]["resume_basis"])
+        self.assertEqual(checklist[0]["evidence_state"], "conflict")
+        self.assertEqual(checklist[0]["evidence_label"], "已写明不符合")
 
     def test_certificate_present_is_met(self):
         import screening_agent
@@ -1080,6 +1272,170 @@ class AgentValidationRuleSixTests(unittest.TestCase):
             budget={"calls": 0},
         )
         self.assertEqual(result[1]["checked_rules"], 6)
+
+
+class GateCoverageTests(unittest.TestCase):
+    """“门槛到底跑没跑”必须是可见数据，而不是只能靠人抽查。
+
+    旧行为：JD 写着硬门槛、模型却一条都没标成门槛时，清单是空的，
+    分数照给、报告照出，输出里没有任何地方说"这次一条门槛都没跑"。
+    """
+
+    RAW = {
+        "candidate_name": "张三",
+        "summary": "s",
+        "job_fit_score": 90,
+        "score_breakdown": {
+            "basic_info_score": 20, "skill_match_score": 30, "experience_score": 20,
+            "education_score": 12, "potential_score": 8,
+        },
+        "ai_risk_level": "low",
+    }
+
+    def test_warning_when_markers_exist_but_no_gate_ran(self):
+        checklist = [{"id": "r1", "text": "沟通能力", "category": "skill", "status": "met"}]
+
+        summary = backend._gate_coverage_summary({"markers_found": 3, "added": 0, "upgraded": 0}, checklist, 0)
+
+        self.assertEqual(summary["gate_items"], 0)
+        self.assertIn("没有任何门槛参与判定", summary["warning"])
+
+    def test_no_warning_when_gates_ran(self):
+        checklist = [{"id": "r1", "text": "硕士及以上学历", "category": "education", "status": "not_met"}]
+
+        summary = backend._gate_coverage_summary({"markers_found": 3, "added": 2, "upgraded": 1}, checklist, 1)
+
+        self.assertEqual(summary["warning"], "")
+        self.assertEqual(summary["gate_items"], 1)
+        self.assertEqual(summary["gate_failed"], 1)
+        self.assertEqual(summary["backstop_added"], 2)
+        self.assertEqual(summary["upgraded"], 1)
+
+    def test_missing_coverage_data_degrades_to_zero(self):
+        empty = {
+            "markers_found": 0, "backstop_added": 0, "upgraded": 0,
+            "gate_items": 0, "gate_failed": 0, "warning": "",
+        }
+
+        self.assertEqual(backend._gate_coverage_summary(None, [], 0), empty)
+        self.assertEqual(backend._gate_coverage_summary("bad", [], 0), empty)
+
+    def test_payload_carries_gate_coverage(self):
+        raw = dict(self.RAW)
+        raw["gate_coverage"] = {"markers_found": 4, "added": 1, "upgraded": 2}
+        raw["requirements_checklist"] = [
+            {"id": "gate-backstop-1", "text": "本科及以上学历", "category": "education",
+             "logic": "required", "status": "not_met", "resume_basis": "学历不够",
+             "gate_dimension": "degree", "source": "gate_backstop"},
+        ]
+
+        result = backend._normalize_hr_analysis(raw, "招聘后端工程师", "某公司简历正文")
+
+        self.assertEqual(result["gate_coverage"]["markers_found"], 4)
+        self.assertEqual(result["gate_coverage"]["backstop_added"], 1)
+        self.assertEqual(result["gate_coverage"]["upgraded"], 2)
+        self.assertEqual(result["gate_coverage"]["gate_items"], 1)
+        self.assertEqual(result["gate_coverage"]["gate_failed"], 1)
+        self.assertEqual(result["gate_coverage"]["warning"], "")
+        # 兜底补出来的门槛留痕，HR 能看到这条不是模型抽的
+        self.assertEqual(result["requirements_checklist"][0]["source"], "gate_backstop")
+
+
+class IncompleteAnalysisTests(unittest.TestCase):
+    """分析根本没跑成时，结论字段不能冒充一个判定结论。
+
+    现场：图片型 PDF 抽不出文字 → 分析层抛"简历内容不能为空" → 兜底报告 0 分 →
+    服务端算出 "0 分 / D级 / 淘汰 / 不匹配" 当作正常分析返回，失败原因还不在 payload 里。
+    """
+
+    def _failed_raw(self):
+        return {
+            "candidate_name": "未提供",
+            "job_fit_score": 0,
+            "ai_risk": "none",
+            "ai_deduction": 0,
+            "summary": "AI 分析未能生成有效报告。",
+            "agent_meta": {
+                "version": "screening-agent-v1",
+                "validation_passed": False,
+                "validation_issues": ["简历内容不能为空"],
+                "llm_calls": 0,
+            },
+        }
+
+    def test_failed_analysis_is_not_reported_as_eliminated(self):
+        result = backend._normalize_hr_analysis(self._failed_raw(), "招聘后端工程师", "")
+
+        self.assertTrue(result["analysis_incomplete"])
+        self.assertEqual(result["analysis_incomplete_reason"], "简历内容不能为空")
+        self.assertEqual(result["fit_grade"], "无法评估")
+        self.assertEqual(result["recruitment_recommendation"], "待补充材料")
+        self.assertEqual(result["fit_tag"], "无法评估")
+
+    def test_reason_is_visible_in_the_payload(self):
+        result = backend._normalize_hr_analysis(self._failed_raw(), "招聘后端工程师", "")
+
+        self.assertEqual(result["agent_meta"]["validation_issues"], ["简历内容不能为空"])
+        self.assertFalse(result["agent_meta"]["validation_passed"])
+
+    def test_a_real_low_score_is_not_marked_incomplete(self):
+        """真跑过并给出低分（有分项）不能被当成"没跑成"。"""
+        raw = self._failed_raw()
+        raw["score_breakdown"] = {
+            "basic_info_score": 5, "skill_match_score": 3, "experience_score": 2,
+            "education_score": 0, "potential_score": 0,
+        }
+
+        result = backend._normalize_hr_analysis(raw, "招聘后端工程师", "某公司简历正文")
+
+        self.assertNotIn("analysis_incomplete", result)
+        self.assertNotEqual(result["recruitment_recommendation"], "待补充材料")
+
+
+class AuthoritativeRankingTests(unittest.TestCase):
+    """批量对比的名次与分数由系统决定，模型只提供"差异点"描述。
+
+    旧实现按姓名回填分数有三个坑：重名互相覆盖（只剩最后一条）、
+    模型漏写某位候选人时不补回、姓名对不上时填 0 分（90 分的候选人被排到最后）。
+    """
+
+    def test_every_candidate_appears_even_with_duplicate_names(self):
+        items = [
+            {"candidate_name": "未提供", "final_score": 88, "incomplete": False},
+            {"candidate_name": "未提供", "final_score": 42, "incomplete": False},
+        ]
+
+        rows = backend._build_authoritative_ranking(items, [{"name": "未提供", "difference": "甲的差异"}])
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["score"] for row in rows], [88, 42])
+        self.assertEqual([row["rank"] for row in rows], [1, 2])
+
+    def test_missing_or_renamed_candidates_keep_their_real_scores(self):
+        items = [
+            {"candidate_name": "甲", "final_score": 90, "incomplete": False},
+            {"candidate_name": "乙", "final_score": 70, "incomplete": False},
+        ]
+
+        # 模型把名字写错、还漏了乙
+        rows = backend._build_authoritative_ranking(items, [{"name": "甲甲", "difference": "x"}])
+
+        self.assertEqual([row["name"] for row in rows], ["甲", "乙"])
+        self.assertEqual([row["score"] for row in rows], [90, 70])
+        self.assertNotIn(0, [row["score"] for row in rows])
+
+    def test_incomplete_analyses_rank_last_without_a_fake_score(self):
+        items = [
+            {"candidate_name": "甲", "final_score": 60, "incomplete": False},
+            {"candidate_name": "乙", "final_score": None, "incomplete": True},
+        ]
+
+        rows = backend._build_authoritative_ranking(items, [])
+
+        self.assertEqual(rows[0]["name"], "甲")
+        self.assertEqual(rows[1]["name"], "乙")
+        self.assertIsNone(rows[1]["score"])
+        self.assertTrue(rows[1]["incomplete"])
 
 
 if __name__ == "__main__":

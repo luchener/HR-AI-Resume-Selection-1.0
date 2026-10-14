@@ -19,6 +19,8 @@ from typing import Optional
 
 from config import RESUMES_DIR, JOBS_DIR, ARCHIVES_DIR
 
+import safe_fs
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -148,7 +150,7 @@ def list_resumes() -> list[dict]:
     """
     records: list[dict] = []
     try:
-        names = sorted(os.listdir(RESUMES_DIR))
+        names = sorted(safe_fs.listdir(RESUMES_DIR))
     except OSError:
         return records
     for name in names:

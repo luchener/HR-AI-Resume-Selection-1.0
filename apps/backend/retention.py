@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 import config
 import resume_original
+import safe_fs
 import store
 
 logger = logging.getLogger("retention")
@@ -88,7 +89,7 @@ def _scan(directory: str, days: int) -> list[tuple[str, str]]:
     hits: list[tuple[str, str]] = []
     if not os.path.isdir(directory):
         return hits
-    for filename in sorted(os.listdir(directory)):
+    for filename in sorted(safe_fs.listdir(directory)):
         if not filename.endswith(".json") or filename.startswith("_"):
             continue
         path = os.path.join(directory, filename)

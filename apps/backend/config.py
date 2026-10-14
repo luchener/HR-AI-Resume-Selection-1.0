@@ -2,9 +2,13 @@
 极简配置。用 os.getenv + python-dotenv，不要 pydantic-settings。
 所有默认值都保证：没有 .env 也能跑（零配置）。
 """
+import logging
 import os
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # .env is stored beside this module. Resolve it explicitly so running from the
 # repository root does not silently ignore apps/backend/.env.
@@ -324,6 +328,77 @@ for _d in (
     LOG_DIR,
 ):
     os.makedirs(_d, exist_ok=True)
+
+
+# ── 简历文案核验（防“文案骗人”）────────────────────────────────────
+# 确定性对账：零 LLM、零网络、零额外成本。产出为只读字段，不参与评分。
+# 三态开关（apps/backend/.env）：
+#   off    = 完全不计算
+#   shadow = 计算 + 只写日志（不返回给前端、不进缓存）—— 默认，用于先跑真实简历调阈值
+#   on     = 计算 + 返回给前端展示 + 进缓存
+# 阈值全部是经验值，未用真实简历校准前不要切 on：误报没有兜底，而 HR 的信任是一次性的。
+_deception_mode = _strip_quotes(os.getenv("DECEPTION_CHECK_MODE", "")).lower()
+if not _deception_mode:
+    # 兼容本次改动引入过的布尔开关（未上线，保留以防已写入 .env）
+    _deception_legacy = _strip_quotes(os.getenv("DECEPTION_CHECK_ENABLED", "")).lower()
+    if _deception_legacy in {"0", "false", "no", "off"}:
+        _deception_mode = "off"
+    elif _deception_legacy in {"1", "true", "yes", "on"}:
+        _deception_mode = "on"
+    else:
+        _deception_mode = "shadow"
+DECEPTION_CHECK_MODE = _deception_mode if _deception_mode in {"off", "shadow", "on"} else "shadow"
+
+# 影子模式日志默认**不写简历 ID**（候选人信息不该散进日志），只写规则码与计数。
+# 但调阈值时必须能把日志和具体某一份分析对上，否则“哪一例命中”根本无从下手。
+# 所以：默认写一个不可逆的短关联码（同一简历多次分析可对上），需要定位时再开这个开关。
+DECEPTION_SHADOW_VERBOSE = _strip_quotes(os.getenv("DECEPTION_SHADOW_VERBOSE", "")).lower() in {"1", "true", "yes", "on"}
+
+# ── AI 美化风险的处置方式 ────────────────────────────────────────────
+# 模型的 ai_risk 四档对应固定扣分区间（none 0 / light 5-10 / medium 15-20 / high 30）。
+# 这一项和门槛扣分、核验扣分不一样：它对着的是模型的**风格印象**，原文里没有"美化"这个
+# 可检索物，也就没有可核对的对象。实测同一份简历连跑三次：档位 light→medium→light，
+# 扣分 5/15/5，最终分 67/56/65，跨过 60 分线（既是 C/D 等级线，也是"淘汰/储备观察"线）
+# —— 同一份简历得到两种动作，这是 HR 最无法解释的失败模式。
+#   readonly = 不扣分，只把"疑似 AI 包装"作为风险提示留在报告里，判断权交回 HR（默认）
+#   enforce  = 按档位区间扣分（旧行为）
+# 模型建议的扣分仍会记录在 ai_deduction_suggested，恢复旧行为只需改这一个开关。
+_ai_risk_mode = _strip_quotes(os.getenv("AI_RISK_DEDUCTION_MODE", "")).lower()
+AI_RISK_DEDUCTION_MODE = _ai_risk_mode if _ai_risk_mode in {"readonly", "enforce"} else "readonly"
+
+# 外部检索端点（可选）：留空则走内置 Bing → DDG 兜底。
+# 这里只接受**服务端**配置，不接受请求体传入——否则等于开了一个用户可控的外部请求地址（SSRF）。
+#
+# 端点必须校验：非法值不能"静默变成一次都搜不到"。运维把地址写错（漏 http://、
+# 带查询串、复制粘贴带了账号密码）时，检索会永远失败并被静默降级——现象是
+# "联网核验开了但从来没有任何参考信息"，没人能看出是配置问题。所以：非法即视为
+# 未配置，并在启动时打一条 warning。
+_SEARCH_ENDPOINT_MAX = 500
+
+
+def _valid_search_endpoint(value):
+    """校验检索端点，返回可用地址；非法返回空串（视为未配置）。"""
+    endpoint = (value or "").strip()
+    if not endpoint:
+        return ""
+    if len(endpoint) > _SEARCH_ENDPOINT_MAX:
+        logger.warning("SEARCH_ENDPOINT 过长（>%s），已忽略，检索回退内置端点", _SEARCH_ENDPOINT_MAX)
+        return ""
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        logger.warning("SEARCH_ENDPOINT 必须是带主机名的 http/https 地址，已忽略，检索回退内置端点")
+        return ""
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        logger.warning("SEARCH_ENDPOINT 不能包含账号、密码、查询参数或锚点，已忽略，检索回退内置端点")
+        return ""
+    return endpoint
+
+
+SEARCH_ENDPOINT = _valid_search_endpoint(_strip_quotes(os.getenv("SEARCH_ENDPOINT", "")))
+SEARCH_API_KEY = _strip_quotes(os.getenv("SEARCH_API_KEY", "")).strip()
+SEARCH_CONFIG = {"endpoint": SEARCH_ENDPOINT, "api_key": SEARCH_API_KEY} if SEARCH_ENDPOINT else {}
+# 端点标识（无密钥）：只用于缓存指纹，端点一换缓存立即失效。
+SEARCH_ENDPOINT_ID = SEARCH_ENDPOINT
 
 
 def check_production():

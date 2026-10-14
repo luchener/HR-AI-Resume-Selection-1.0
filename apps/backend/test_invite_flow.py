@@ -35,12 +35,10 @@ _SUBDIRS = (
 os.environ["ENV"] = "local"
 
 import config  # noqa: E402
+from testsupport import isolated_data_dirs  # noqa: E402
 
-config.DATA_DIR = _TMP
-for _d in _SUBDIRS:
-    os.makedirs(os.path.join(_TMP, _d), exist_ok=True)
-config.LOG_DIR = os.path.join(_TMP, "logs")
-os.makedirs(config.LOG_DIR, exist_ok=True)
+# 整体接管数据目录（root 沿用 _TMP）：只改 config.DATA_DIR 在整套跑时不够。
+_DIRS = isolated_data_dirs("invite", root=_TMP)
 
 import auth  # noqa: E402
 import mailer  # noqa: E402
@@ -63,11 +61,31 @@ def _fake_smtp_available():
     return True
 
 
-mailer.send_invite_code_email = _fake_invite_email
-mailer.send_invite_rejection_email = _fake_reject_email
-mailer.send_verification_email = lambda to, code, **kw: True
-mailer.send_password_reset_email = lambda to, u, c: True
-mailer.smtp_available = _fake_smtp_available
+def _patch_mailer():
+    mailer.send_invite_code_email = _fake_invite_email
+    mailer.send_invite_rejection_email = _fake_reject_email
+    mailer.send_verification_email = lambda to, code, **kw: True
+    mailer.send_password_reset_email = lambda to, u, c: True
+    mailer.smtp_available = _fake_smtp_available
+
+
+_patch_mailer()
+
+
+def setUpModule():
+    """用例运行时重新打桩并重新接管目录。
+
+    import 时打的补丁会被后面 import 的模块用它们自己的假实现覆盖（都是 import 时赋值），
+    于是本模块的“记录已发送邮件”桩失效，拒信用例就会查不到记录；import 时接管的目录
+    也会被前面模块的 tearDownModule 还原成真实 data/。
+    """
+    _patch_mailer()
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原目录常量，避免把本模块的临时布局留给后续模块。"""
+    _DIRS.restore()
 
 import app as backend  # noqa: E402
 

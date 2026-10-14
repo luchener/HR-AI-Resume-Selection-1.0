@@ -11,6 +11,7 @@
 运行：python -m unittest test_system_config -v
 """
 import json
+import importlib
 import os
 import sys
 import unittest
@@ -27,30 +28,32 @@ import auth  # noqa: E402
 
 os.makedirs(_TMP, exist_ok=True)
 
-_DIR_NAMES = ("users", "admin_ops", "rate_limits", "login_failures", "capacity")
+from testsupport import (  # noqa: E402
+    isolated_data_dirs,
+    restore_admin_whitelist,
+    restore_globals,
+    snapshot_globals,
+)
 
-
-def _isolate():
-    """所有 *_DIR 常量按名字映射到临时目录，绝不动真实 data/。"""
-    config.DATA_DIR = _TMP
-    config.SYSTEM_CONFIG_DIR = os.path.join(_TMP, "system_config")
-    for name in _DIR_NAMES:
-        os.makedirs(os.path.join(_TMP, name), exist_ok=True)
-    for mod in (config, auth):
-        for attr in [a for a in dir(mod) if a.endswith("_DIR")]:
-            base = os.path.basename(getattr(mod, attr) or "")
-            if base in _DIR_NAMES:
-                setattr(mod, attr, os.path.join(_TMP, base))
-    auth._INDEX_FILE = os.path.join(auth.USERS_DIR, "_index.json")
-    auth._INDEX_LOCK = os.path.join(auth.USERS_DIR, "_index.lock")
-    config.LOG_DIR = os.path.join(_TMP, "logs")
-    os.makedirs(config.LOG_DIR, exist_ok=True)
-
-
-_isolate()
+# 按名字接管 config/auth 的目录常量（root 沿用 _TMP，测试体里的路径引用不用改）
+_DIRS = isolated_data_dirs("system_config", root=_TMP)
 
 _SUPER_EMAIL = "super_mail@example.com"
-auth.ADMIN_EMAILS = {_SUPER_EMAIL}
+
+
+def setUpModule():
+    """白名单必须在**用例运行时**替换：import 时赋值会被后面 import 的模块覆盖。
+
+    数据目录同样要重新接管：前面模块的 tearDownModule 会把路径还原成真实 data/。
+    """
+    auth.ADMIN_EMAILS = {_SUPER_EMAIL}
+    _DIRS.reapply()
+
+
+def tearDownModule():
+    """还原本模块改过的全局量：白名单 + 目录常量（否则后续模块 403 / 指向已删目录）。"""
+    restore_admin_whitelist()
+    _DIRS.restore()
 
 import mailer  # noqa: E402
 import system_config  # noqa: E402
@@ -341,14 +344,29 @@ class SystemConfigUnitTests(unittest.TestCase):
 class MailSendPathTests(unittest.TestCase):
     """真实发信路径：断言用到的确实是解析后的配置（零网络，假 SMTP）。"""
 
+    _MAIL_FUNCS = (
+        "send_verification_email",
+        "send_invite_code_email",
+        "send_password_reset_email",
+        "send_invite_rejection_email",
+        "smtp_available",
+    )
+
     @classmethod
     def setUpClass(cls):
         cls._env_backup = {key: getattr(config, key) for key in _ENV_KEYS}
+        # 别的测试模块在 import 时把 mailer.send_* 换成了“直接返回 True”的桩（它们自己要
+        # 避免真发信），整套跑时这些桩会留在这里，本类就测不到真实发信路径了——单跑却正常。
+        # 先记下这些桩，重载 mailer 拿回真函数，跑完再把桩放回去，不影响后面的用例。
+        cls._mailer_stubs = snapshot_globals(*[(mailer, name) for name in cls._MAIL_FUNCS])
+        importlib.reload(mailer)
 
     @classmethod
     def tearDownClass(cls):
         for key, value in cls._env_backup.items():
             setattr(config, key, value)
+        restore_globals(cls._mailer_stubs)
+        system_config._CACHE.clear()
 
     def setUp(self):
         system_config.clear_mail()
