@@ -44,6 +44,10 @@ apps/backend/data/
 # 部署备份目录（历史快照，无谓入库）
 .deploy-backup-*/
 .deploy-backup-*
+# 一次性部署目录（服务器上临时放预构建产物 / 一次性 Dockerfile）。
+# 2026-10-14 踩过：该目录没被忽略，被 scripts/git-snapshot.sh 的 git add -A 一起提交进快照，
+# 事后删文件又多出 158 条删除记录。用完请删除，且务必在 git-snapshot.sh 之前删。
+.tmp-deploy-*/
 
 # 服务器上的历史残留目录
 apps/frontend.before-restore/
