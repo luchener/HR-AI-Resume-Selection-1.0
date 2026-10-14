@@ -10,6 +10,7 @@ import {
   FileX2Icon,
   LoaderCircleIcon,
   SearchIcon,
+  ShieldAlertIcon,
   Trash2Icon,
   XIcon,
 } from 'lucide-react';
@@ -24,6 +25,7 @@ import {
   fetchTrash,
   moveToTrash,
   permanentDeleteArchive,
+  readGateSummary,
   restoreArchive,
   updateArchiveCategory,
   updateArchiveTags,
@@ -42,6 +44,14 @@ const REC_STYLE: Record<string, string> = {
   '优先面试': 'bg-good-soft text-good',
   '储备观察': 'bg-warn-soft text-warn',
   '淘汰': 'bg-bad-soft text-bad',
+  // 能力分很高、只被硬门槛卡住 → 不是淘汰，需要人工看一眼
+  '破格复核': 'bg-warn-soft text-warn ring-1 ring-warn/40',
+};
+
+const TIER_LABEL: Record<string, string> = {
+  A: '学历层级',
+  B: '岗位硬门槛',
+  C: '生活类要求',
 };
 
 function ScoreBadge({ score }: { score: number }) {
@@ -69,6 +79,8 @@ export default function ArchivesPage() {
   const [categoryFilter, setCategoryFilter] = useState('');
   const [tagFilter, setTagFilter] = useState('');
   const [sort, setSort] = useState<'score' | 'created'>('score');
+  /** 只看"能力分够高、却被硬门槛卡住"的候选人——这批人最容易被分数排序埋掉 */
+  const [overrideOnly, setOverrideOnly] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ArchiveRecord | null>(null);
@@ -134,16 +146,24 @@ export default function ArchivesPage() {
 
   const ranked = useMemo(() => {
     // 动态排名：对当前筛选结果按 final_score 降序，同分并列取相同名次
+    // 门槛阻塞信息一并读出来：能力分高的候选人即使被封顶，也要能被看见
+    const withGate = archives.map((a) => ({ ...a, gate: readGateSummary(a) }));
+    const visible = overrideOnly ? withGate.filter((a) => a.gate.overrideReview) : withGate;
     let prevScore = Number.POSITIVE_INFINITY;
     let prevRank = 0;
-    return archives.map((a, index) => {
+    return visible.map((a, index) => {
       const score = a.final_score || 0;
       const rank = score === prevScore ? prevRank : index + 1;
       prevScore = score;
       prevRank = rank;
       return { ...a, rank };
     });
-  }, [archives]);
+  }, [archives, overrideOnly]);
+
+  const overrideCount = useMemo(
+    () => archives.filter((a) => readGateSummary(a).overrideReview).length,
+    [archives],
+  );
 
   const availableTags = useMemo(() => {
     const set = new Set<string>();
@@ -367,6 +387,22 @@ export default function ArchivesPage() {
                 <option value="score">按得分排名</option>
                 <option value="created">按归档时间</option>
               </select>
+              {overrideCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setOverrideOnly((v) => !v)}
+                  title="工作经历/技能匹配度 ≥80，只是被硬门槛（学历层级、院校层次、证书等）封顶到 60 以下。系统不假装他们达标，但值得人工看一眼。"
+                  className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium transition-colors ${
+                    overrideOnly
+                      ? 'border-warn/50 bg-warn-soft text-warn'
+                      : 'border-line-soft bg-white text-body hover:bg-mist'
+                  }`}
+                >
+                  <ShieldAlertIcon className="size-4" />
+                  建议破格复核
+                  <span className="rounded bg-black/10 px-1.5 text-xs">{overrideCount}</span>
+                </button>
+              )}
             </div>
 
             {/* 列表 */}
@@ -413,9 +449,31 @@ export default function ArchivesPage() {
                         )}
                       </td>
                       <td className="px-4 py-3 text-body">{a.category || a.job_title || '--'}</td>
-                      <td className="px-4 py-3"><ScoreBadge score={a.final_score} /></td>
+                      <td className="px-4 py-3">
+                        <ScoreBadge score={a.final_score} />
+                        {a.gate.capabilityScore !== null && a.gate.capabilityScore !== a.final_score && (
+                          <span
+                            className="mt-0.5 block text-[11px] text-sub"
+                            title={`能力匹配 ${a.gate.capabilityScore} 分（模型原始匹配度，不受门槛封顶影响）${
+                              a.gate.capApplied ? `；因硬门槛封顶至 ${a.gate.capApplied}` : ''
+                            }`}
+                          >
+                            能力 {a.gate.capabilityScore}
+                            {a.gate.capApplied ? ` · 封顶 ${a.gate.capApplied}` : ''}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-3"><span className={`rounded px-2 py-0.5 text-xs font-medium ${FIT_TAG_STYLE[a.fit_tag] || 'bg-mist text-sub'}`}>{a.fit_tag || '--'}</span></td>
-                      <td className="px-4 py-3"><span className={`rounded px-2 py-0.5 text-xs font-medium ${REC_STYLE[a.recruitment_recommendation] || 'bg-mist text-sub'}`}>{a.recruitment_recommendation || '--'}</span></td>
+                      <td className="px-4 py-3">
+                        <span className={`rounded px-2 py-0.5 text-xs font-medium ${REC_STYLE[a.recruitment_recommendation] || 'bg-mist text-sub'}`}>
+                          {a.recruitment_recommendation || '--'}
+                        </span>
+                        {a.gate.blockers.length > 0 && (
+                          <span className="mt-1 block max-w-44 text-[11px] leading-4 text-sub" title={a.gate.blockers.map((b) => `${TIER_LABEL[b.tier] || b.tier}：${b.text}（${b.evidence_label}）`).join('\n')}>
+                            阻塞：{[...new Set(a.gate.blockers.map((b) => TIER_LABEL[b.tier] || b.tier))].join('、')}
+                          </span>
+                        )}
+                      </td>
                       <td className="px-4 py-3">
                         <div className="flex max-w-44 flex-wrap gap-1">
                           {(a.custom_tags || []).map((t) => <span key={t} className="rounded bg-brand-soft px-1.5 py-0.5 text-[11px] text-brand-deep">{t}</span>)}
@@ -567,6 +625,52 @@ export default function ArchivesPage() {
                   <p className={`mt-2 text-sm font-semibold ${REC_STYLE[detail.recruitment_recommendation] || 'text-ink'}`}>{detail.recruitment_recommendation || '--'}</p>
                 </div>
               </div>
+
+              {/* 门槛阻塞：能力分与封顶分开说清，避免"经历很契合却被压成 59"看不出来 */}
+              {(() => {
+                const gate = readGateSummary(detail);
+                if (gate.capabilityScore === null && gate.blockers.length === 0) return null;
+                return (
+                  <div className={`rounded-md border p-4 ${gate.overrideReview ? 'border-warn/40 bg-warn-soft/50' : 'border-line-soft bg-mist/40'}`}>
+                    <div className="flex items-center gap-2">
+                      <ShieldAlertIcon className={`size-4 ${gate.overrideReview ? 'text-warn' : 'text-sub'}`} />
+                      <p className="text-sm font-semibold text-ink">
+                        能力匹配 {gate.capabilityScore ?? detail.final_score} 分
+                        {gate.capApplied ? ` · 因硬门槛封顶至 ${gate.capApplied}` : ''}
+                      </p>
+                    </div>
+                    {gate.overrideReview && (
+                      <p className="mt-2 text-xs leading-5 text-warn">
+                        工作经历与技能匹配度较高，只是没跨过硬门槛。系统不据此放宽分数，也不把他归入淘汰——建议人工破格复核。
+                      </p>
+                    )}
+                    {gate.blockers.length > 0 && (
+                      <ul className="mt-2 space-y-1">
+                        {gate.blockers.map((b, i) => (
+                          <li key={i} className="text-xs leading-5 text-body">
+                            <span className="mr-1 rounded bg-white px-1.5 py-0.5 text-[11px] font-medium text-sub">
+                              {TIER_LABEL[b.tier] || b.tier || '硬门槛'}
+                            </span>
+                            {b.text}
+                            {b.evidence_label && <span className="ml-1 text-sub">（{b.evidence_label}）</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="mt-2 text-[11px] text-sub">
+                      「能力匹配」是模型对经历/技能的原始匹配度
+                      {gate.capabilityBasis === 'total' ? '（该次分析模型未给分项，退回模型总分）' : '（已剔除模型对硬门槛的打分）'}
+                      ，不受门槛封顶影响；「最终得分」已按硬门槛扣分并封顶。
+                    </p>
+                    {gate.nonMitigableBlockers.length > 0 && (
+                      <p className="mt-2 text-xs leading-5 text-bad">
+                        不支持破格复核：{gate.nonMitigableBlockers.join('、')}
+                        ——法规执业资格或事实类要求，能力再高也不能由经历弥补。
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* 岗位分类 */}
               <div>

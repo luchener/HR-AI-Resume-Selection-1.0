@@ -58,6 +58,60 @@ export interface ArchiveListData {
   meta: { job_titles: string[]; categories: string[] };
 }
 
+/** 门槛阻塞项（后端 gate_blockers 的裁剪版，随归档快照存储）。 */
+export interface ArchiveGateBlocker {
+  text: string;
+  /** A 学历层级 / B 岗位硬门槛 / C 生活类与通用类 */
+  tier: string;
+  evidence_label: string;
+}
+
+export interface ArchiveGateSummary {
+  /** 模型原始匹配度中剔除硬门槛分项后归一（不受门槛封顶影响）；老归档没有这个字段时为 null */
+  capabilityScore: number | null;
+  /** `ex_gate` = 已剔除硬门槛分项；`total` = 无分项，退回模型总分 */
+  capabilityBasis: string | null;
+  /** 能力分够高、却被门槛压到 60 以下 → 建议人工破格复核 */
+  overrideReview: boolean;
+  /** 实际生效的封顶分（59/69/79），没封顶为 null */
+  capApplied: number | null;
+  blockers: ArchiveGateBlocker[];
+  /** 不能由能力弥补的门槛（法规执业资格/驾照/届别）：即使能力分高也不建议破格 */
+  nonMitigableBlockers: string[];
+}
+
+/** 从归档快照里读出"能力分 / 破格复核 / 阻塞项"，兼容没有这些字段的历史归档。 */
+export function readGateSummary(record: ArchiveRecord): ArchiveGateSummary {
+  const snapshot = (record.analysis_snapshot || {}) as Record<string, unknown>;
+  const rawCapability = snapshot.capability_score;
+  const capabilityScore = typeof rawCapability === 'number' ? rawCapability : null;
+  const rawCap = snapshot.gate_cap_applied;
+  const capApplied = typeof rawCap === 'number' ? rawCap : null;
+  const rawBlockers = snapshot.gate_blockers;
+  const blockers: ArchiveGateBlocker[] = Array.isArray(rawBlockers)
+    ? rawBlockers
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .map((item) => ({
+          text: String(item.text ?? ''),
+          tier: String(item.tier ?? ''),
+          evidence_label: String(item.evidence_label ?? ''),
+        }))
+    : [];
+  const rawNonMitigable = snapshot.non_mitigable_blockers;
+  const nonMitigableBlockers: string[] = Array.isArray(rawNonMitigable)
+    ? rawNonMitigable.map((item) => String(item ?? '')).filter(Boolean)
+    : [];
+  const rawBasis = snapshot.capability_basis;
+  return {
+    capabilityScore,
+    capabilityBasis: typeof rawBasis === 'string' && rawBasis ? rawBasis : null,
+    overrideReview: Boolean(snapshot.override_review),
+    capApplied,
+    blockers,
+    nonMitigableBlockers,
+  };
+}
+
 /** 创建归档（幂等：同一 resume_id + job_id 重复归档返回已有记录）。 */
 export async function createArchive(
   resumeId: string,

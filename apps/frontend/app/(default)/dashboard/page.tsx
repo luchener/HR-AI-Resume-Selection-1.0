@@ -9,6 +9,7 @@ import {
   BriefcaseBusinessIcon,
   CalendarDaysIcon,
   CheckCircle2Icon,
+  ClipboardCheckIcon,
   Clock3Icon,
   CompassIcon,
   FileSearch2Icon,
@@ -18,6 +19,7 @@ import {
   PencilIcon,
   RefreshCwIcon,
   ShieldAlertIcon,
+  ShieldCheckIcon,
   SparklesIcon,
   TargetIcon,
   TrophyIcon,
@@ -30,6 +32,8 @@ import AppShell from '@/components/workbench/app-shell';
 import { useDialogBehavior } from '@/components/workbench/dialog-behavior';
 import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analysis-context';
 import ResumeReviewPanel from '@/components/workbench/resume-review-panel';
+import { RequirementsChecklist } from '@/components/workbench/requirements-checklist';
+import { CredibilityPanel } from '@/components/workbench/credibility-panel';
 import ReportExportCenter, { AGENT_RULE_LABELS } from '@/components/workbench/report-export';
 import { analyzeResumes, fetchImprovedMarkdown, improveResumeStream } from '@/lib/api/screening';
 import { createArchive, ARCHIVE_PRESET_CATEGORIES } from '@/lib/api/archives';
@@ -160,6 +164,8 @@ const NAV_SECTION_ICONS: Record<string, typeof FileSearch2Icon> = {
   'sec-overview': BarChart3Icon,
   'sec-ranking': TrophyIcon,
   'sec-validation': ShieldAlertIcon,
+  'sec-requirements': ClipboardCheckIcon,
+  'sec-credibility': ShieldCheckIcon,
   'sec-highlights': CheckCircle2Icon,
   'sec-details': FileSearch2Icon,
   'resume-review-panel': HighlighterIcon,
@@ -270,6 +276,12 @@ export default function DashboardPage() {
       { id: 'sec-overview', label: '评估总览' },
       ...(current.comparison ? [{ id: 'sec-ranking', label: '候选人排名' }] : []),
       ...(current.hr_analysis.agent_validation ? [{ id: 'sec-validation', label: 'Agent 校验' }] : []),
+      ...(current.hr_analysis.requirements_checklist?.length || current.hr_analysis.undetermined_requirements?.length
+        ? [{ id: 'sec-requirements', label: '要求逐条核对' }]
+        : []),
+      ...(current.hr_analysis.credibility?.enabled
+        ? [{ id: 'sec-credibility', label: '真实性核验' }]
+        : []),
       { id: 'sec-highlights', label: '亮点与风险' },
       { id: 'sec-details', label: '深入分析' },
       { id: 'resume-review-panel', label: '简历原文标记' },
@@ -433,7 +445,9 @@ export default function DashboardPage() {
     ? 'bg-good-soft text-good'
     : analysis?.recruitment_recommendation === '储备观察'
       ? 'bg-warn-soft text-warn'
-      : 'bg-bad-soft text-bad';
+      : analysis?.recruitment_recommendation === '破格复核'
+        ? 'bg-warn-soft text-warn ring-1 ring-warn/40'
+        : 'bg-bad-soft text-bad';
 
   return (
     <AppShell active="report">
@@ -515,13 +529,27 @@ export default function DashboardPage() {
                   label: '岗位契合度',
                   value: `${analysis.final_score} / 100`,
                   note: [
-                    `${analysis.job_fit_percentage}% 基础契合度`,
+                    analysis.capability_score != null && analysis.capability_score !== analysis.final_score
+                      ? `能力匹配 ${analysis.capability_score}`
+                      : `${analysis.job_fit_percentage}% 基础契合度`,
                     analysis.ai_deduction > 0 ? `AI 美化扣 ${analysis.ai_deduction}` : null,
                     analysis.hard_gate_deduction ? `硬门槛扣 ${analysis.hard_gate_deduction}` : null,
+                    analysis.gate_cap_applied ? `封顶 ${analysis.gate_cap_applied}` : null,
                   ].filter(Boolean).join(' · '),
                   color: 'text-brand',
                 },
-                { label: '简历美化程度', value: analysis.ai_risk_level, note: `${analysis.ai_risk_label} · 扣 ${analysis.ai_deduction} 分`, color: 'text-violet' },
+                {
+                  label: '简历美化程度',
+                  value: analysis.ai_risk_level,
+                  // 默认 readonly：这一项不扣分，只作为风险提示（模型建议扣分仍照实显示）
+                  note:
+                    analysis.ai_deduction > 0
+                      ? `${analysis.ai_risk_label} · 扣 ${analysis.ai_deduction} 分`
+                      : analysis.ai_deduction_suggested
+                        ? `${analysis.ai_risk_label} · 仅提示，未扣分`
+                        : analysis.ai_risk_label,
+                  color: 'text-violet',
+                },
                 { label: '相关经验年限', value: analysis.work_history.relevant_years, note: `职责重合 ${analysis.work_history.responsibility_match}`, color: 'text-ink' },
                 { label: '跳槽稳定性', value: analysis.work_history.stability, note: `公司背景 ${analysis.work_history.company_background}`, color: 'text-ink' },
               ].map((metric) => (
@@ -532,6 +560,53 @@ export default function DashboardPage() {
                 </div>
               ))}
             </div>
+
+            {/* 破格复核提示：能力分高、只被硬门槛卡住 */}
+            {analysis.override_review && (
+              <div className="mt-4 rounded-md border border-warn-border bg-warn-soft px-4 py-3 text-sm text-warn">
+                <div className="flex items-center gap-2 font-medium">
+                  <AlertTriangleIcon className="size-4 shrink-0" />
+                  建议破格复核：能力匹配 {analysis.capability_score} 分，因硬门槛封顶至 {analysis.final_score} 分
+                </div>
+                {analysis.gate_blockers && analysis.gate_blockers.length > 0 && (
+                  <ul className="mt-2 space-y-1 text-xs leading-5">
+                    {analysis.gate_blockers.map((blocker, index) => (
+                      <li key={index}>
+                        · {blocker.text}
+                        {blocker.evidence_label ? `（${blocker.evidence_label}）` : ''}
+                        {blocker.basis ? ` ${blocker.basis}` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p className="mt-2 text-xs leading-5">
+                  系统不会因为经历契合就放宽分数，也不把这条简历归入淘汰——请人工确认是否值得破格进入面试。
+                  {analysis.capability_basis === 'ex_gate'
+                    ? '（能力分已剔除模型对硬门槛的打分，避免同一缺口被扣两次）'
+                    : '（模型未给出分项，能力分退回模型总分）'}
+                </p>
+              </div>
+            )}
+
+            {/* 被"不能由能力弥补"的门槛卡住：说清为什么不建议破格，避免 HR 以为系统漏标 */}
+            {!analysis.override_review
+              && (analysis.non_mitigable_blockers?.length ?? 0) > 0
+              && analysis.final_score < 60 && (
+              <div className="mt-4 rounded-md border border-line bg-mist/50 px-4 py-3 text-sm text-body">
+                <div className="flex items-center gap-2 font-medium text-ink">
+                  <AlertTriangleIcon className="size-4 shrink-0 text-sub" />
+                  未达硬门槛：能力匹配 {analysis.capability_score ?? analysis.final_score} 分，但不支持破格复核
+                </div>
+                <ul className="mt-2 space-y-1 text-xs leading-5">
+                  {analysis.non_mitigable_blockers?.map((blocker, index) => (
+                    <li key={index}>· {blocker.text}（法规执业资格或事实类要求，能力再高也不能由经历弥补）</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-xs leading-5">
+                  这类门槛通常意味着岗位工作本身要求持证或满足事实条件，破格等于违规上岗——请按制度处理。
+                </p>
+              </div>
+            )}
 
             {/* 统一导出中心：整份报告 × 图片/PDF/Word */}
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-white px-4 py-2.5">
@@ -699,6 +774,21 @@ export default function DashboardPage() {
                   </section>
                 )}
 
+                {/* 岗位要求逐条判定：让 HR 看到"分是怎么来的"，以及哪些要人工确认 */}
+                {((analysis.requirements_checklist?.length ?? 0) > 0
+                  || (analysis.undetermined_requirements?.length ?? 0) > 0) && (
+                  <Section id="sec-requirements" eyebrow="逐条核对" title="岗位要求逐条判定" icon={ClipboardCheckIcon}>
+                    <RequirementsChecklist analysis={analysis} />
+                  </Section>
+                )}
+
+                {/* 真实性核验：只读提示（不进分数），只在后端切 on 时出现 */}
+                {analysis.credibility?.enabled && (
+                  <Section id="sec-credibility" eyebrow="真实性核验" title="表述核验与待核实项" icon={ShieldCheckIcon}>
+                    <CredibilityPanel analysis={analysis} />
+                  </Section>
+                )}
+
                 {/* 亮点与风险：决策证据链核心，默认展开（P1-1 distill：与次级区块分离） */}
                 <div id="sec-highlights" className="grid scroll-mt-6 gap-6 lg:grid-cols-2">
                   <Section eyebrow="优势证据" title="匹配亮点" icon={CheckCircle2Icon}>
@@ -794,6 +884,12 @@ export default function DashboardPage() {
                     <InsightList items={analysis.role_specific_assessment} />
                   </Section>
                   <Section eyebrow="美化核查" title="美化程度判断依据" icon={ShieldAlertIcon}>
+                    {analysis.ai_deduction === 0 && (analysis.ai_deduction_suggested ?? 0) > 0 && (
+                      <p className="mb-2 rounded-md border border-warn-border-soft bg-warn-soft px-3 py-2 text-xs leading-5 text-warn-ink-deep">
+                        以下是模型给出的「疑似 AI 包装」语言特征。该项当前<strong className="font-semibold">不参与扣分</strong>
+                        ——风格印象没有可核对的对象，是否采信请 HR 自行判断（模型建议扣 {analysis.ai_deduction_suggested} 分，未采用）。
+                      </p>
+                    )}
                     <InsightList items={analysis.deduction_reasons} empty="未发现明显美化痕迹" />
                   </Section>
                 </div>

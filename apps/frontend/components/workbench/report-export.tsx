@@ -16,6 +16,21 @@ const MARKER_LABELS: Record<string, string> = {
   verify: '学历待核实',
 };
 
+/** 硬门槛档位（与后端 _GATE_TIER_POLICY 对应）：A 学历层级 / B 岗位硬门槛 / C 生活类 */
+const TIER_LABELS: Record<string, string> = {
+  A: '学历层级',
+  B: '岗位硬门槛',
+  C: '生活类要求',
+};
+
+/** 逐条判定状态（与后端 requirements_checklist.status 对应） */
+const EXPORT_STATUS_LABELS: Record<string, string> = {
+  met: '符合',
+  not_met: '不符合',
+  not_mentioned: '未写明',
+  manual_review: '待人工确认',
+};
+
 type ExportFormat = 'png' | 'pdf' | 'doc';
 
 function esc(value: unknown): string {
@@ -79,17 +94,110 @@ function buildReportInner(opts: {
 <h2>评估总览</h2>
 <table>
   <tr>
-    <td class="lab">综合得分</td><td class="lab">岗位契合度</td><td class="lab">简历美化程度</td><td class="lab">招聘建议</td>
+    <td class="lab">综合得分</td><td class="lab">能力匹配度</td><td class="lab">简历美化程度</td><td class="lab">招聘建议</td>
   </tr>
   <tr>
     <td class="val"><b class="green">${esc(a.final_score)}</b><br><span class="sub">${esc(a.fit_grade)}</span></td>
-    <td class="val"><b class="blue">${esc(a.final_score)} / 100</b><br><span class="sub">${esc(a.job_fit_percentage)}% 基础契合度${a.ai_deduction > 0 ? ` · AI 美化扣 ${esc(a.ai_deduction)}` : ''}${a.hard_gate_deduction ? ` · 硬门槛扣 ${esc(a.hard_gate_deduction)}` : ''}</span></td>
-    <td class="val"><b class="purple">${esc(a.ai_risk_level)}</b><br><span class="sub">${esc(a.ai_risk_label)} · 扣 ${esc(a.ai_deduction)} 分</span></td>
+    <td class="val"><b class="blue">${esc(a.capability_score ?? a.final_score)} / 100</b><br><span class="sub">${esc(a.job_fit_percentage)}% 基础契合度${a.ai_deduction > 0 ? ` · AI 美化扣 ${esc(a.ai_deduction)}` : ''}${a.hard_gate_deduction ? ` · 硬门槛扣 ${esc(a.hard_gate_deduction)}` : ''}${a.gate_cap_applied ? ` · 封顶 ${esc(a.gate_cap_applied)}` : ''}</span></td>
+    <td class="val"><b class="purple">${esc(a.ai_risk_level)}</b><br><span class="sub">${esc(a.ai_risk_label)}${
+      a.ai_deduction > 0
+        ? ` · 扣 ${esc(a.ai_deduction)} 分`
+        : a.ai_deduction_suggested
+          ? ' · 仅风险提示，未扣分'
+          : ''
+    }</span></td>
     <td class="val"><b>${esc(a.recruitment_recommendation)}</b><br><span class="sub">${esc(a.fit_tag)}</span></td>
   </tr>
 </table>`);
 
+  if (a.override_review) {
+    out.push(`
+<h2>建议破格复核</h2>
+<p class="para">能力匹配 <b>${esc(a.capability_score)}</b> 分，只被硬门槛卡住，最终得分封顶至 <b>${esc(a.final_score)}</b> 分。系统不据此放宽分数，也不将其归入淘汰——请人工确认是否值得破格进入面试。</p>
+<p class="sub">能力分口径：${a.capability_basis === 'total' ? '模型未给出分项，退回模型总分' : '已剔除模型对硬门槛的打分，避免同一缺口被扣两次'}</p>
+${(a.gate_blockers || []).length > 0 ? `<table>
+  <thead><tr><th style="width:140px">门槛档位</th><th>岗位要求</th><th>简历证据</th></tr></thead>
+  <tbody>
+    ${(a.gate_blockers || []).map((b) => `
+    <tr>
+      <td><span class="tag">${esc(TIER_LABELS[b.tier] || b.tier || '硬门槛')}</span></td>
+      <td>${esc(b.text)}</td>
+      <td class="red">${esc(b.evidence_label)}${b.basis ? `<br><span class="sub">${esc(b.basis)}</span>` : ''}</td>
+    </tr>`).join('')}
+  </tbody>
+</table>` : ''}`);
+  } else if ((a.non_mitigable_blockers || []).length > 0 && a.final_score < 60) {
+    out.push(`
+<h2>不支持破格复核</h2>
+<p class="para">能力匹配 <b>${esc(a.capability_score ?? a.final_score)}</b> 分，但被<b>不能由能力弥补</b>的门槛卡住，因此不给"破格复核"结论：</p>
+${bullets((a.non_mitigable_blockers || []).map((b) => b.text))}
+<p class="sub">这类门槛通常意味着岗位工作本身要求持证或满足事实条件（法规执业资格、驾照、届别等），破格等于违规上岗——请按制度处理。</p>`);
+  }
+
   out.push(`<h2>核心判定</h2><p class="para">${esc(a.summary)}</p>`);
+
+  // 岗位要求逐条判定：导出的报告是 HR 要发给别人的，逐条结论与"待人工确认"必须跟着走。
+  // 导出的文件离开界面后没有"展开"按钮，所以这里全量导出（界面上默认折叠只是为了省版面），
+  // 但按"需要人工判断的优先"排序，别让读者在 28 条里翻找那 2 条卡人的。
+  const checklist = a.requirements_checklist || [];
+  const undetermined = a.undetermined_requirements || [];
+  if (checklist.length > 0) {
+    const countOf = (status: string) => checklist.filter((item) => item.status === status).length;
+    const rankOf = (status: string) => ({ not_met: 0, manual_review: 1, not_mentioned: 2, met: 3 })[status] ?? 2;
+    const rows = [...checklist].sort((x, y) => rankOf(x.status) - rankOf(y.status));
+    out.push(`
+<h2>岗位要求逐条判定</h2>
+<p class="sub">共 ${checklist.length} 条：不符合 ${countOf('not_met')} · 待人工确认 ${countOf('manual_review')} · 未写明 ${countOf('not_mentioned')} · 符合 ${countOf('met')}。下表按“需要人工判断的优先”排序。
+「未写明」指简历没有提到——按“没写不等于没有”，系统不判不符合、不扣分，建议面试时核实。</p>
+<table>
+  <thead><tr><th style="width:96px">档位</th><th>岗位要求</th><th style="width:96px">判定</th><th>依据</th></tr></thead>
+  <tbody>
+    ${rows.map((item) => `
+    <tr>
+      <td><span class="tag">${esc(TIER_LABELS[item.gate_tier || ''] || '—')}</span></td>
+      <td>${esc(item.text)}</td>
+      <td class="${item.status === 'not_met' ? 'red' : item.status === 'met' ? 'green' : ''}">${esc(EXPORT_STATUS_LABELS[item.status] || item.status)}${item.status === 'manual_review' && item.evidence_state === 'matched' ? '<br><span class="sub">真实性需核实</span>' : ''}</td>
+      <td class="sub">${item.resume_basis ? esc(item.resume_basis) : '—'}</td>
+    </tr>`).join('')}
+  </tbody>
+</table>`);
+  }
+  if (undetermined.length > 0) {
+    out.push(`
+<h2>系统不判定，请人工确认</h2>
+${bullets(undetermined.map((entry) => `${entry.type}：${entry.text}${entry.note ? `（${entry.note}）` : ''}`))}
+<p class="sub">这类要求（学历形式、年龄、出差意愿等）机器无法从简历确认，系统不替 HR 下结论，也不据此扣分。</p>`);
+  }
+
+  // 真实性核验（只读）：文件里没有折叠按钮，所以这里全量导出，并保留 notice 的定性说明
+  const credibility = a.credibility;
+  if (credibility?.enabled) {
+    const levelLabels: Record<string, string> = { red_flag: '需优先核实', review: '待核实', info: '提示' };
+    const srcLabels: Record<string, string> = { resume: '简历原文', report: '报告表述' };
+    const items = credibility.findings || [];
+    const counts = credibility.counts || { red_flag: 0, review: 0, info: 0 };
+    out.push(`
+<h2>真实性核验（只读，不参与评分）</h2>
+<p class="sub">${esc(credibility.notice || '核验结果只用于提示，不构成对候选人的任何结论。')}
+已跑 ${esc(String(credibility.checks_run))} 条规则：需优先核实 ${counts.red_flag} · 待核实 ${counts.review} · 提示 ${counts.info}。</p>
+${
+  items.length > 0
+    ? items
+        .map(
+          (item) => `
+<p><span class="tag">${esc(levelLabels[item.level] || item.level)}</span> <b>${esc(item.title)}</b>
+<span class="sub">（${esc(srcLabels[String(item.source || 'report')] || '报告表述')}）</span><br>
+${esc(item.detail)}<br>
+<span class="sub">证据：${esc(item.evidence)}</span>${
+            item.quote ? `<br><span class="sub">原文引用：${esc(item.quote)}</span>` : ''
+          }<br>
+<span class="sub">面试该问：${esc(item.ask)}</span></p>`,
+        )
+        .join('')
+    : '<p class="sub">核验规则全部跑完，未发现需要人工核实的表述问题。</p>'
+}
+<p class="sub">核验口径：${esc(credibility.version)}（只读字段，不参与分数与等级）</p>`);
+  }
 
   const av = a.agent_validation;
   if (av && av.issues.length > 0) {
@@ -165,7 +273,13 @@ function buildReportInner(opts: {
     out.push(`<h2>岗位定制判断</h2>${bullets(a.role_specific_assessment)}`);
   }
   if (a.deduction_reasons?.length > 0) {
-    out.push(`<h2>美化程度判断依据</h2>${bullets(a.deduction_reasons)}`);
+    out.push(
+      `<h2>美化程度判断依据</h2>` +
+        (a.ai_deduction > 0
+          ? ''
+          : `<p class="sub">以下是模型给出的“疑似 AI 包装”语言特征。该项当前<strong>不参与扣分</strong>——风格印象没有可核对的对象，是否采信请 HR 自行判断。</p>`) +
+        bullets(a.deduction_reasons),
+    );
   }
 
   if (markers && markers.annotations?.length > 0) {
