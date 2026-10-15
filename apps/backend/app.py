@@ -3864,10 +3864,39 @@ def _hr_analysis_stream(resume_ids, job_id, rid, user_id, ai_config, agent_confi
             result = result_holder["result"]
             payload = _hr_analysis_payload(resume_ids[0], job_id, result, user_id)
         else:
-            # 批量：逐步推送每份候选人的进度与阶段
+            # 批量：先推送候选人进度，再在线程中等待 DeepSeek；主生成器定期发保活，
+            # 避免长模型请求期间 Nginx proxy_read_timeout 把连接误判为断开。
             for index, resume_id in enumerate(resume_ids, 1):
                 yield sse({"status": "candidate", "index": index, "total": len(resume_ids), "message": f"正在分析候选人 {index}/{len(resume_ids)}"})
-            batch_results, failures = _run_hr_batch_analysis(resume_ids, job_id, user_id, ai_config, agent_config)
+            batch_queue: "queue.Queue[tuple[str, object] | None]" = queue.Queue()
+
+            def _batch_worker() -> None:
+                try:
+                    batch_queue.put(("result", _run_hr_batch_analysis(
+                        resume_ids, job_id, user_id, ai_config, agent_config,
+                    )))
+                except Exception as exc:  # 传递给主生成器统一处理
+                    batch_queue.put(("error", exc))
+                finally:
+                    batch_queue.put(None)
+
+            threading.Thread(target=_batch_worker, daemon=True).start()
+            batch_payload = None
+            while True:
+                try:
+                    event = batch_queue.get(timeout=10)
+                except queue.Empty:
+                    yield sse({"status": "processing", "message": "正在等待批量简历分析结果，请稍候"})
+                    continue
+                if event is None:
+                    break
+                kind, value = event
+                if kind == "error":
+                    raise value
+                batch_payload = value
+            if batch_payload is None:
+                raise RuntimeError("批量分析线程未返回结果")
+            batch_results, failures = batch_payload
             analyses = [
                 _hr_analysis_payload(resume_id, job_id, batch_results[resume_id], user_id)
                 for resume_id in resume_ids
