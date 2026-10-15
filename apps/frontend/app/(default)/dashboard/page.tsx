@@ -448,7 +448,7 @@ export default function DashboardPage() {
   const provisionalScore = analysis ? evidenceScoreProvisional(analysis) : false;
   const evidenceMatch = analysis ? isResumeJdEvidenceMatch(analysis) : false;
   const evidenceComparison = evidenceMatch || batchAnalyses.some((item) => item.hr_analysis && isResumeJdEvidenceMatch(item.hr_analysis));
-  const recommendationClass = recommendation === '待补充材料'
+  const recommendationClass = (recommendation === '待补充材料' || recommendation === '证据不足，待核实')
     ? 'bg-warn-soft text-warn-ink-deep'
     : recommendation === '优先面试'
     ? 'bg-good-soft text-good'
@@ -718,7 +718,7 @@ export default function DashboardPage() {
                     </div>
                   </div>
                   <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-line-soft pt-3 text-sm">
-                    <div className="flex items-center gap-2"><span className="text-xs text-sub">适配标签</span><span className="font-medium text-ink">{pendingEvidence ? '待确认' : analysis.fit_tag}</span></div>
+                    <div className="flex items-center gap-2"><span className="text-xs text-sub">HR结论</span><span className="font-medium text-ink">{pendingEvidence ? '证据不足，待核实' : analysis.fit_tag}</span></div>
                     <div className="flex items-center gap-2"><span className="text-xs text-sub">候选人</span><span className="max-w-48 truncate font-medium text-ink">{candidateName}</span></div>
                     <button
                       type="button"

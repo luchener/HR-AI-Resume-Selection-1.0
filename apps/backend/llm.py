@@ -397,12 +397,23 @@ def call_llm(
         client, config = _runtime_client(runtime_config)
         model = config["model"]
         base_url = config["base_url"]
+    configured_timeout = 300
+    if runtime_config is not None:
+        try:
+            configured_timeout = max(30, min(300, int(config.get("timeout") or 300)))
+        except (TypeError, ValueError):
+            configured_timeout = 300
+    else:
+        try:
+            configured_timeout = max(30, min(300, int(server.get("timeout") or 300)))
+        except (TypeError, ValueError):
+            configured_timeout = 300
     request_args = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "top_p": 0.9,
-        "timeout": 300,
+        "timeout": configured_timeout,
     }
     if max_tokens is not None:
         request_args["max_tokens"] = max_tokens
