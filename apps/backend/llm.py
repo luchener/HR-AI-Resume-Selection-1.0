@@ -204,6 +204,17 @@ def _message_text(message) -> str:
     return candidates[0] if candidates else ""
 
 
+def _response_message(response):
+    """Return the first usable message or raise a readable provider error."""
+    choices = getattr(response, "choices", None)
+    if not isinstance(choices, (list, tuple)) or not choices:
+        raise ValueError("模型返回为空：响应中没有 choices；请检查 API 地址、模型名称和上游响应格式")
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        raise ValueError("模型返回为空：响应 choice 没有 message")
+    return message
+
+
 def _create_completion(client: OpenAI, request_args: dict):
     """Call compatible gateways that may not support optional JSON controls."""
     try:
@@ -403,11 +414,12 @@ def call_llm(
         }
 
     response = _create_completion(client, request_args)
+    message = _response_message(response)
     if not expect_json:
-        return _message_text(response.choices[0].message)
+        return _message_text(message)
 
     try:
-        return _parse_message_json(response.choices[0].message)
+        return _parse_message_json(message)
     except ValueError as first_error:
         logger.warning("LLM JSON parse failed; %s; error=%s", _response_debug(response), first_error)
         retry_args = dict(request_args)
@@ -420,7 +432,7 @@ def call_llm(
         ]
         try:
             retry_response = _create_completion(client, retry_args)
-            return _parse_message_json(retry_response.choices[0].message)
+            return _parse_message_json(_response_message(retry_response))
         except ValueError as retry_error:
             logger.warning("LLM JSON retry failed; %s; error=%s", _response_debug(retry_response), retry_error)
             repair_args = dict(retry_args)
@@ -432,7 +444,7 @@ def call_llm(
             ]
             repair_response = _create_completion(client, repair_args)
             try:
-                return _parse_message_json(repair_response.choices[0].message)
+                return _parse_message_json(_response_message(repair_response))
             except ValueError as repair_error:
                 logger.warning(
                     "LLM JSON repair failed; %s; error=%s",
