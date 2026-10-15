@@ -789,7 +789,10 @@ class HrAnalysisTests(unittest.TestCase):
 
         with patch.object(backend.screening_agent, "run_screening_agent", side_effect=analyze_candidate), \
                 patch.object(backend.screening_agent, "_extract_requirements",
-                             side_effect=lambda *args, **_kwargs: {"requirements": [], "extraction_failed": False}):
+                             side_effect=lambda *args, **_kwargs: {"requirements": [], "extraction_failed": False}), \
+                patch.object(backend.llm, "call_llm", return_value={}):
+            # 两位候选人会在收尾触发跨候选人对比（同样走模型）；本用例只验证兜底次数，
+            # 不打桩就会在带真实 .env 的环境里发出真实请求，套件表现成长期不返回。
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis",
                 json={"resume_ids": resume_ids, "job_id": job_id},
@@ -916,6 +919,9 @@ class HrAnalysisTests(unittest.TestCase):
         job_id = backend.store.save_job(resume_id, "招聘 Python 工程师", {}, self.user_id)
         model_result = {
             "job_fit_score": 76,
+            "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 20, "industry_background": 10, "evidence_bonus": 6},
+            "agent_meta": {"validation_passed": True},
+            "agent_validation": {"passed": True},
             "ai_risk": "none",
             "summary": "岗位经验匹配。",
         }
@@ -1292,7 +1298,7 @@ class AgentValidationRuleSixTests(unittest.TestCase):
         rules = {item["rule"] for item in findings}
         self.assertNotIn(6, rules)
 
-    def test_reflect_checks_six_rules(self):
+    def test_precheck_reports_four_rules_without_deep_review(self):
         import screening_agent
 
         report = {
@@ -1312,7 +1318,8 @@ class AgentValidationRuleSixTests(unittest.TestCase):
             runtime_config=None,
             budget={"calls": 0},
         )
-        self.assertEqual(result[1]["checked_rules"], 6)
+        self.assertEqual(result[1]["checked_rules"], 4)
+        self.assertEqual(result[1]["mode"], "预检")
 
 
 class GateCoverageTests(unittest.TestCase):

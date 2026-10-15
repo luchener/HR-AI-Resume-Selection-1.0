@@ -151,9 +151,13 @@ class HrAnalysisStreamTests(unittest.TestCase):
         ]
         job_id = backend.store.save_job(resume_ids[0], "招聘后端工程师", {}, self.user_id)
 
+        # 多人批量会在收尾调用候选人对比；那条路径同样走模型，必须一起打桩，
+        # 否则本机存在真实 .env 时这里会发出真实请求，套件表现为长时间不返回。
         with patch.object(backend.screening_agent, "run_screening_agent", return_value=self._model_result()), patch.object(
             backend.screening_agent, "_extract_requirements",
             return_value={"requirements": [{"id": "req-1", "text": "后端开发经验", "category": "experience", "hard": True, "logic": "required"}], "extraction_failed": False},
+        ), patch.object(
+            backend.llm, "call_llm", return_value={},
         ):
             response = self.client.post(
                 "/api/v1/resumes/hr-analysis?stream=true",

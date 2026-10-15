@@ -34,6 +34,8 @@ import { useAnalysis, type EmploymentRecord } from '@/components/workbench/analy
 import ResumeReviewPanel from '@/components/workbench/resume-review-panel';
 import { RequirementsChecklist } from '@/components/workbench/requirements-checklist';
 import { CredibilityPanel } from '@/components/workbench/credibility-panel';
+import { agentValidationNeedsReview, agentValidationStatus } from '@/components/workbench/agent-validation-status';
+import { evidenceDecisionPending, evidenceRecommendation, evidenceScoreLabel, evidenceScoreNotice, evidenceScoreProvisional, evidenceScoreSummary, isResumeJdEvidenceMatch } from '@/components/workbench/evidence-score-status';
 import ReportExportCenter, { AGENT_RULE_LABELS } from '@/components/workbench/report-export';
 import { analyzeResumes, fetchImprovedMarkdown, improveResumeStream } from '@/lib/api/screening';
 import { createArchive, ARCHIVE_PRESET_CATEGORIES } from '@/lib/api/archives';
@@ -274,7 +276,7 @@ export default function DashboardPage() {
     if (!current?.hr_analysis) return [];
     return [
       { id: 'sec-overview', label: '评估总览' },
-      ...(current.comparison ? [{ id: 'sec-ranking', label: '候选人排名' }] : []),
+      ...(current.comparison ? [{ id: 'sec-ranking', label: isResumeJdEvidenceMatch(current.hr_analysis) ? '匹配证据对比' : '候选人排名' }] : []),
       ...(current.hr_analysis.agent_validation ? [{ id: 'sec-validation', label: 'Agent 校验' }] : []),
       ...(current.hr_analysis.requirements_checklist?.length || current.hr_analysis.undetermined_requirements?.length
         ? [{ id: 'sec-requirements', label: '要求逐条核对' }]
@@ -441,7 +443,14 @@ export default function DashboardPage() {
     }
   };
 
-  const recommendationClass = analysis?.recruitment_recommendation === '优先面试'
+  const recommendation = analysis ? evidenceRecommendation(analysis) : undefined;
+  const pendingEvidence = analysis ? evidenceDecisionPending(analysis) : false;
+  const provisionalScore = analysis ? evidenceScoreProvisional(analysis) : false;
+  const evidenceMatch = analysis ? isResumeJdEvidenceMatch(analysis) : false;
+  const evidenceComparison = evidenceMatch || batchAnalyses.some((item) => item.hr_analysis && isResumeJdEvidenceMatch(item.hr_analysis));
+  const recommendationClass = recommendation === '待补充材料'
+    ? 'bg-warn-soft text-warn-ink-deep'
+    : recommendation === '优先面试'
     ? 'bg-good-soft text-good'
     : analysis?.recruitment_recommendation === '储备观察'
       ? 'bg-warn-soft text-warn'
@@ -507,7 +516,7 @@ export default function DashboardPage() {
                 return (
                   <button type="button" key={item.resume_id} onClick={() => selectCandidate(item.resume_id)} className={`flex min-w-40 items-center justify-between gap-4 rounded-md px-4 py-3 text-left ${active ? 'bg-brand-deep text-white' : 'text-body hover:bg-soft'}`}>
                     <span><span className="block text-xs opacity-60">0{index + 1}</span><span className="mt-0.5 block text-sm font-medium">{name}</span></span>
-                    <span className="text-lg font-semibold">{item.hr_analysis?.final_score ?? '--'}</span>
+                    <span className="text-right"><span className="block text-lg font-semibold">{item.hr_analysis?.final_score ?? '--'}</span>{item.hr_analysis && evidenceScoreProvisional(item.hr_analysis) && <span className="block text-xs">暂估</span>}</span>
                   </button>
                 );
               })}
@@ -526,9 +535,9 @@ export default function DashboardPage() {
             <div id="sec-overview" className="mt-6 grid scroll-mt-6 overflow-hidden rounded-md border border-line bg-white sm:grid-cols-2 xl:grid-cols-4">
               {[
                 {
-                  label: '岗位契合度',
+                  label: evidenceScoreLabel(analysis, '岗位契合度'),
                   value: `${analysis.final_score} / 100`,
-                  note: [
+                  note: analysis.scoring_meta ? evidenceScoreSummary(analysis) : [
                     analysis.capability_score != null && analysis.capability_score !== analysis.final_score
                       ? `能力匹配 ${analysis.capability_score}`
                       : `${analysis.job_fit_percentage}% 基础契合度`,
@@ -561,8 +570,14 @@ export default function DashboardPage() {
               ))}
             </div>
 
+            {analysis.scoring_meta && (
+              <p className={`mt-4 rounded-md border px-4 py-3 text-xs leading-5 ${provisionalScore ? 'border-warn-border bg-warn-soft text-warn-ink-deep' : 'border-line bg-mist text-body'}`}>
+                {evidenceScoreNotice(analysis)}
+              </p>
+            )}
+
             {/* 破格复核提示：能力分高、只被硬门槛卡住 */}
-            {analysis.override_review && (
+            {!evidenceMatch && !pendingEvidence && analysis.override_review && (
               <div className="mt-4 rounded-md border border-warn-border bg-warn-soft px-4 py-3 text-sm text-warn">
                 <div className="flex items-center gap-2 font-medium">
                   <AlertTriangleIcon className="size-4 shrink-0" />
@@ -589,7 +604,7 @@ export default function DashboardPage() {
             )}
 
             {/* 被"不能由能力弥补"的门槛卡住：说清为什么不建议破格，避免 HR 以为系统漏标 */}
-            {!analysis.override_review
+            {!evidenceMatch && !pendingEvidence && !analysis.override_review
               && (analysis.non_mitigable_blockers?.length ?? 0) > 0
               && analysis.final_score < 60 && (
               <div className="mt-4 rounded-md border border-line bg-mist/50 px-4 py-3 text-sm text-body">
@@ -623,13 +638,19 @@ export default function DashboardPage() {
 
             {/* 候选人排名 */}
             {data.comparison && (
-              <Section id="sec-ranking" eyebrow="全局对比" title="候选人排名" icon={TrophyIcon}>
+              <Section id="sec-ranking" eyebrow="全局对比" title={evidenceComparison ? '匹配证据对比' : '候选人排名'} icon={TrophyIcon}>
                 <div className="mt-4">
+                  {evidenceComparison && (
+                    <p className="mb-3 text-xs leading-5 text-sub">仅比较简历与JD的匹配证据，不代表能力排名；未体现不代表不具备，真实性仍需核验。</p>
+                  )}
+                  {!evidenceComparison && batchAnalyses.some((item) => item.hr_analysis && evidenceScoreProvisional(item.hr_analysis)) && (
+                    <p className="mb-3 text-xs leading-5 text-warn-ink-deep">含暂估分的候选人对比仅供参考，请先补充证据，勿据此确定排名或淘汰。</p>
+                  )}
                   <div className="overflow-x-auto rounded-md border border-line-soft">
                     <table className="w-full border-collapse text-sm">
                       <thead>
                         <tr className="bg-mist">
-                          <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">排名</th>
+                          <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">{evidenceComparison ? '顺序' : '排名'}</th>
                           <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">得分</th>
                           <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">候选人</th>
                           <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">核心差异点</th>
@@ -658,7 +679,7 @@ export default function DashboardPage() {
                               title={target ? `点击切换到 ${item.name}` : undefined}
                             >
                               <td className="px-4 py-3 font-semibold text-ink">{rankLabel}</td>
-                              <td className="px-4 py-3 font-semibold text-brand">{target?.hr_analysis?.final_score ?? item.score}</td>
+                              <td className="px-4 py-3 font-semibold text-brand">{target?.hr_analysis?.final_score ?? item.score}{target?.hr_analysis && evidenceScoreProvisional(target.hr_analysis) ? ' · 暂估' : ''}</td>
                               <td className="px-4 py-3 text-ink">{item.name}</td>
                               <td className="px-4 py-3 text-sub">{item.difference}</td>
                             </tr>
@@ -687,14 +708,17 @@ export default function DashboardPage() {
                 {/* 招聘决策带（决策主轴：首屏即结论） */}
                 <section className="rounded-md border border-line bg-white p-5">
                   <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                    <div className={`inline-flex rounded-full px-3 py-1.5 text-sm font-semibold ${recommendationClass}`}>{analysis.recruitment_recommendation}</div>
-                    <p className="text-3xl font-semibold text-ink">{analysis.final_score}<span className="ml-1 text-sm font-normal text-sub">/ 100</span></p>
+                    <div className={`inline-flex rounded-full px-3 py-1.5 text-sm font-semibold ${recommendationClass}`}>{recommendation}</div>
+                    <div>
+                      <p className="text-3xl font-semibold text-ink">{analysis.final_score}<span className="ml-1 text-sm font-normal text-sub">/ 100{provisionalScore ? ' · 暂估' : ''}</span></p>
+                      {analysis.scoring_meta && <p className="mt-1 text-xs leading-5 text-sub">{evidenceScoreSummary(analysis)}</p>}
+                    </div>
                     <div className="min-w-0 flex-1 text-sm text-sub">
                       <p className="break-words leading-6">{analysis.summary}</p>
                     </div>
                   </div>
                   <div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-line-soft pt-3 text-sm">
-                    <div className="flex items-center gap-2"><span className="text-xs text-sub">适配标签</span><span className="font-medium text-ink">{analysis.fit_tag}</span></div>
+                    <div className="flex items-center gap-2"><span className="text-xs text-sub">适配标签</span><span className="font-medium text-ink">{pendingEvidence ? '待确认' : analysis.fit_tag}</span></div>
                     <div className="flex items-center gap-2"><span className="text-xs text-sub">候选人</span><span className="max-w-48 truncate font-medium text-ink">{candidateName}</span></div>
                     <button
                       type="button"
@@ -709,25 +733,23 @@ export default function DashboardPage() {
 
                 {/* Agent 校验：折叠徽章，始终显示；展开查看五步检测过程与问题详情 */}
                 {analysis.agent_validation && analysis.agent_validation.checked_rules > 0 && (
-                  <section id="sec-validation" className={`scroll-mt-6 rounded-md border ${analysis.agent_validation.issues.length > 0 ? 'border-warn-border-soft bg-warn-soft' : 'border-good-border-soft bg-good-soft'}`}>
+                  <section id="sec-validation" className={`scroll-mt-6 rounded-md border ${agentValidationNeedsReview(analysis.agent_validation) ? 'border-warn-border-soft bg-warn-soft' : 'border-good-border-soft bg-good-soft'}`}>
                     <button
                       type="button"
                       onClick={() => setShowAgentValidation((visible) => !visible)}
-                      className={`flex w-full items-center gap-2 px-4 py-3 text-left text-xs font-medium ${analysis.agent_validation.issues.length > 0 ? 'text-warn' : 'text-good'}`}
+                      className={`flex w-full items-center gap-2 px-4 py-3 text-left text-xs font-medium ${agentValidationNeedsReview(analysis.agent_validation) ? 'text-warn' : 'text-good'}`}
                     >
-                      {analysis.agent_validation.issues.length > 0 ? <ShieldAlertIcon className="size-3.5 shrink-0" /> : <CheckCircle2Icon className="size-3.5 shrink-0" />}
+                      {agentValidationNeedsReview(analysis.agent_validation) ? <ShieldAlertIcon className="size-3.5 shrink-0" /> : <CheckCircle2Icon className="size-3.5 shrink-0" />}
                       <span>
-                        Agent 校验：已核查 {analysis.agent_validation.checked_rules} 项要求
-                        {analysis.agent_validation.issues.length > 0 ? `，检出 ${analysis.agent_validation.issues.length} 个问题` : '，全部通过'}
-                        {analysis.agent_validation.revised ? '并已修正' : ''}
+                        Agent 校验：{agentValidationStatus(analysis.agent_validation)}
                       </span>
-                      <span className={`ml-auto flex shrink-0 items-center gap-1 ${analysis.agent_validation.issues.length > 0 ? 'text-warn' : 'text-good'}`}>
+                      <span className={`ml-auto flex shrink-0 items-center gap-1 ${agentValidationNeedsReview(analysis.agent_validation) ? 'text-warn' : 'text-good'}`}>
                         {showAgentValidation ? '收起' : '查看过程'}
                         {showAgentValidation ? <ChevronUpIcon className="size-3.5" /> : <ChevronDownIcon className="size-3.5" />}
                       </span>
                     </button>
                     {showAgentValidation && (
-                      <div className={`border-t px-4 pb-4 pt-3 ${analysis.agent_validation.issues.length > 0 ? 'border-warn-border-faint' : 'border-good-border-soft'}`}>
+                      <div className={`border-t px-4 pb-4 pt-3 ${agentValidationNeedsReview(analysis.agent_validation) ? 'border-warn-border-faint' : 'border-good-border-soft'}`}>
                         {analysis.agent_trace?.steps?.length ? (
                           <div>
                             <p className="text-xs font-semibold text-ink">检测过程（共 {analysis.agent_trace.steps.length} 步）</p>

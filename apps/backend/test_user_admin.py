@@ -705,44 +705,38 @@ class UserAdminTests(unittest.TestCase):
         r = self._req("get", "/api/v1/admin/users/usage-ranking", token=self.normal_token)
         self.assertEqual(r.status_code, 403)
 
-    # ── HR 分析缓存 LRU+TTL（省 token 机制保护 + 容量上限）─────────────
+    # ── HR 持久缓存容量 + TTL（只有结构有效且已复核的结果可以保存）──────
 
     def test_hr_cache_basic_and_lru_eviction(self):
-        from collections import OrderedDict
-        # 命中 → 返回；未命中 → None
-        backend._hr_cache_put(("k", "1"), {"final_score": 90})
-        self.assertEqual(backend._hr_cache_get(("k", "1")), {"final_score": 90})
-        self.assertIsNone(backend._hr_cache_get(("k", "missing")))
-        # LRU 淘汰：临时调低容量，塞满后最旧条目被淘汰
-        old_max = backend._HR_ANALYSIS_CACHE_MAX
-        backend._HR_ANALYSIS_CACHE_MAX = 3
-        try:
+        from unittest.mock import patch
+        value = {
+            "final_score": 90,
+            "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 20, "industry_background": 10, "evidence_bonus": 6},
+            "agent_meta": {"validation_passed": True},
+            "agent_validation": {"passed": True},
+        }
+        with patch.object(backend.analysis_cache, "MAX_ENTRIES", 3):
             for i in range(5):
-                backend._hr_cache_put(("k", str(i)), {"i": i})
-            # 0,1 被淘汰，2,3,4 保留
-            self.assertIsNone(backend._hr_cache_get(("k", "0")))
-            self.assertIsNone(backend._hr_cache_get(("k", "1")))
-            self.assertEqual(backend._hr_cache_get(("k", "4")), {"i": 4})
-            # 访问 2 提升其 LRU 位置后再写入 5 → 淘汰 3（2 刚被访问）
-            backend._hr_cache_get(("k", "2"))
-            backend._hr_cache_put(("k", "5"), {"i": 5})
-            self.assertIsNone(backend._hr_cache_get(("k", "3")))
-            self.assertEqual(backend._hr_cache_get(("k", "2")), {"i": 2})
-        finally:
-            backend._HR_ANALYSIS_CACHE_MAX = old_max
-            with backend._HR_ANALYSIS_CACHE_LOCK:
-                backend._HR_ANALYSIS_CACHE.clear()
+                with patch.object(backend.analysis_cache.time, "time", return_value=1000 + i):
+                    backend._hr_cache_put(("k", str(i)), {**value, "i": i})
+            with patch.object(backend.analysis_cache.time, "time", return_value=1005):
+                self.assertIsNone(backend._hr_cache_get(("k", "0")))
+                self.assertIsNone(backend._hr_cache_get(("k", "1")))
+                self.assertEqual(backend._hr_cache_get(("k", "4"))["i"], 4)
+                self.assertIsNone(backend._hr_cache_get(("k", "missing")))
 
     def test_hr_cache_ttl_expiry(self):
-        # 写入一条后把时间戳改旧 → get 返回 None（TTL 惰性过期）
-        backend._hr_cache_put(("k", "ttl"), {"v": 1})
-        with backend._HR_ANALYSIS_CACHE_LOCK:
-            backend._HR_ANALYSIS_CACHE[("k", "ttl")]["_ts"] -= (
-                backend._HR_ANALYSIS_CACHE_TTL_SECONDS + 10
-            )
-        self.assertIsNone(backend._hr_cache_get(("k", "ttl")))
-        with backend._HR_ANALYSIS_CACHE_LOCK:
-            backend._HR_ANALYSIS_CACHE.clear()
+        from unittest.mock import patch
+        value = {
+            "score_breakdown": {"hard_requirements": 20, "responsibility_overlap": 20, "skills_projects": 20, "industry_background": 10, "evidence_bonus": 6},
+            "agent_meta": {"validation_passed": True},
+            "agent_validation": {"passed": True},
+        }
+        with patch.object(backend.analysis_cache.time, "time", return_value=1000):
+            backend._hr_cache_put(("k", "ttl"), value)
+            self.assertEqual(backend._hr_cache_get(("k", "ttl")), value)
+        with patch.object(backend.analysis_cache.time, "time", return_value=1000 + backend.analysis_cache.TTL_SECONDS):
+            self.assertIsNone(backend._hr_cache_get(("k", "ttl")))
 
     # ── 保留策略：懒清理 ────────────────────────────────────────────
 

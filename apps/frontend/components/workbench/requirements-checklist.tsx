@@ -53,7 +53,10 @@ function StatusPill({ item }: { item: RequirementChecklistItem }) {
 
 export function RequirementsChecklist({ analysis }: { analysis: HrAnalysis }) {
   const [showAll, setShowAll] = useState(false);
-  const items = analysis.requirements_checklist ?? [];
+  const items = (analysis.requirements_checklist ?? []).map((item) => ({
+    ...item,
+    status: item.effective_status || item.status,
+  }));
   const undetermined = analysis.undetermined_requirements ?? [];
 
   if (items.length === 0 && undetermined.length === 0) return null;
@@ -88,6 +91,10 @@ export function RequirementsChecklist({ analysis }: { analysis: HrAnalysis }) {
           </button>
         )}
       </div>
+
+      <p className="mt-2 text-xs leading-5 text-sub">
+        四态口径：符合＝有对应证据；不符合＝有明确冲突；未写明＝简历未体现，不等于不符合；待人工确认＝证据不足或需核实。相关技术线索只说明有关联，不能直接认定熟练。
+      </p>
 
       {visible.length > 0 ? (
         <div className="mt-3 overflow-x-auto rounded-md border border-line-soft">
@@ -129,7 +136,7 @@ export function RequirementsChecklist({ analysis }: { analysis: HrAnalysis }) {
         </div>
       ) : (
         <p className="mt-3 rounded-md border border-good-border-soft bg-good-soft px-3 py-2 text-xs text-good-deep">
-          逐条核对未发现需要人工判断的条目。
+          当前筛选下没有「不符合」或「待人工确认」条目；请结合「未写明」计数查看尚未体现的要求。
         </p>
       )}
 

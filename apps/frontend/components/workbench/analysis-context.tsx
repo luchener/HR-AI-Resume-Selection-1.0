@@ -17,6 +17,7 @@ export interface RequirementChecklistItem {
   category: string;
   logic: string;
   status: 'met' | 'not_met' | 'not_mentioned' | 'manual_review';
+  effective_status?: 'met' | 'not_met' | 'not_mentioned' | 'manual_review';
   resume_basis: string;
   /** 硬门槛档位：A 学历层级 / B 岗位硬门槛 / C 生活类与通用类 */
   gate_tier?: string;
@@ -30,6 +31,62 @@ export interface RequirementChecklistItem {
   cap_exempt?: boolean;
   /** 服务端按原文兜底补的条目（gate_backstop）/ 被纠正过档位（gate_backstop_upgrade） */
   source?: string;
+}
+
+export interface EvidenceScoreRange {
+  min: number;
+  max: number;
+}
+
+export interface EvidenceScoreDimension {
+  maximum: number;
+  score: number;
+  supported_score: number;
+  confirmable_max: number;
+  score_range: EvidenceScoreRange;
+  applicable?: boolean;
+  unknown_ratio?: number;
+  unassessed_lanes?: string[];
+  [key: string]: unknown;
+}
+
+export interface EvidenceScoreItem {
+  id: string;
+  status?: RequirementChecklistItem['status'];
+  effective_status?: RequirementChecklistItem['status'];
+  dimension?: string;
+  dimensions?: string[];
+  score?: number;
+  confirmable_max?: number;
+  [key: string]: unknown;
+}
+
+/** 服务端以证据四态计算；覆盖率与未知占比均为 0–1，比率不代表熟练程度。 */
+export interface ScoringMeta {
+  score_source: 'server_deterministic_evidence';
+  /** 适用维度的原始预算上限；旧结果可能未提供。 */
+  applicable_max?: number;
+  /** 适用维度的原始分合计，五维分项仍保持原预算。 */
+  raw_points?: number;
+  /** 归一后的各维贡献，仅用于解释总分，不用于原预算分项 meter。 */
+  normalized_breakdown?: Partial<NonNullable<HrAnalysis['score_breakdown']>>;
+  /** 新语义仅计已支持匹配点；旧语义可能含暂估部分。 */
+  score_semantics?: string;
+  analysis_incomplete?: boolean;
+  base_score?: number;
+  supported_score?: number;
+  provisional_points?: number;
+  score_range?: EvidenceScoreRange;
+  provisional?: boolean;
+  incomplete?: boolean;
+  decision_ready?: boolean;
+  evidence_coverage?: number;
+  unknown_ratio?: number;
+  dimensions?: Record<string, EvidenceScoreDimension>;
+  items?: EvidenceScoreItem[];
+  version?: string;
+  decision_note?: string;
+  [key: string]: unknown;
 }
 
 /** 系统不做确定性判定的要求（学历形式/年龄/出差意愿…）：只展示，请人工确认。 */
@@ -99,6 +156,9 @@ export interface GateBlocker {
 export interface HrAnalysis {
   candidate_name: string;
   final_score: number;
+  scoring_meta?: ScoringMeta;
+  analysis_incomplete?: boolean;
+  analysis_incomplete_reason?: string;
   fit_grade: string;
   job_fit_score: number;
   job_fit_percentage: number;
@@ -176,14 +236,21 @@ export interface HrAnalysis {
   role_specific_assessment: string[];
   deduction_reasons: string[];
   /** 「破格复核」由服务端在"能力分≥80 但被硬门槛封顶"时给出，模型不能自己选 */
-  recruitment_recommendation: '优先面试' | '储备观察' | '淘汰' | '破格复核';
-  fit_tag: '高匹配' | '部分匹配' | '不匹配';
+  recruitment_recommendation: '优先面试' | '储备观察' | '淘汰' | '破格复核' | '待补充材料';
+  fit_tag: '高匹配' | '部分匹配' | '不匹配' | '待确认';
   agent_validation?: {
     checked_rules: number;
     issues: Array<{ rule: number; problem: string; fix: string }>;
     passed: boolean;
     mode?: string;
     revised?: boolean;
+    recheck_required?: boolean;
+    original_issues?: Array<{ rule: number; problem: string; fix: string }>;
+  };
+  agent_meta?: {
+    validation_passed?: boolean;
+    validation_issues?: string[];
+    llm_calls?: number;
   };
   agent_trace?: AgentTrace;
   credibility?: Credibility;
@@ -247,7 +314,11 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       const saved = sessionStorage.getItem(STORAGE_KEY);
       if (saved) setAnalysisResultState(JSON.parse(saved) as AnalysisResult);
     } catch {
-      sessionStorage.removeItem(STORAGE_KEY);
+      try {
+        sessionStorage.removeItem(STORAGE_KEY);
+      } catch {
+        // Storage can throw again when the browser blocks the API entirely.
+      }
     } finally {
       setIsHydrated(true);
     }

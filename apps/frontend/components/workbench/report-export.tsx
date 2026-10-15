@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import html2canvas from 'html2canvas';
 import { CameraIcon, DownloadIcon, FileTextIcon, LoaderCircleIcon } from 'lucide-react';
 import type { HrAnalysis } from './analysis-context';
+import { evidenceDecisionPending, evidenceRecommendation, evidenceScoreBasis, evidenceScoreLabel, evidenceScoreNotice, evidenceScoreSummary, isResumeJdEvidenceMatch } from './evidence-score-status';
+import { agentValidationNeedsReview, agentValidationStatus } from './agent-validation-status';
 import { fetchResumeReviewMarkers, type ResumeReviewData } from '@/lib/api/screening';
 
 export const AGENT_RULE_LABELS = ['', '论断超出简历依据', '评分依据不可追溯', '加分项与岗位无关', '缺失项标注"未提供"', '风险与未体现混淆'];
@@ -73,24 +75,34 @@ function buildReportInner(opts: {
   const { analysis: a, markers } = opts;
   const name = opts.candidateName || a.candidate_name || '候选人';
   const out: string[] = [];
+  const scoreLabel = evidenceScoreLabel(a);
+  const evidenceMatch = isResumeJdEvidenceMatch(a);
+  const pending = evidenceDecisionPending(a);
+  const recommendation = evidenceRecommendation(a);
+  const fitTag = pending ? '待确认' : a.fit_tag;
+  const fitGrade = pending ? '待确认' : a.fit_grade;
 
   out.push(`
 <h1>候选人分析报告 · ${esc(name)}</h1>
 <div class="meta">
   <span>生成日期：${new Date().toISOString().slice(0, 10)}</span>
-  <span>综合得分：<b>${esc(a.final_score)}</b>/100（${esc(a.fit_grade)}）</span>
-  <span>招聘建议：${esc(a.recruitment_recommendation)} · ${esc(a.fit_tag)}</span>
+  <span>${esc(scoreLabel)}：<b>${esc(a.final_score)}</b>/100（${esc(fitGrade)}）</span>
+  <span>招聘建议：${esc(recommendation)} · ${esc(fitTag)}</span>
 </div>`);
+
+  if (a.scoring_meta) {
+    out.push(`<p class="para">${esc(evidenceScoreSummary(a))}</p><p class="para">${esc(evidenceScoreNotice(a))}</p>`);
+  }
 
   out.push(`
 <h2>评估总览</h2>
 <table>
   <tr>
-    <td class="lab">综合得分</td><td class="lab">能力匹配度</td><td class="lab">简历美化程度</td><td class="lab">招聘建议</td>
+    <td class="lab">${esc(scoreLabel)}</td><td class="lab">${a.scoring_meta ? '证据支持分' : '能力匹配度'}</td><td class="lab">简历美化程度</td><td class="lab">招聘建议</td>
   </tr>
   <tr>
-    <td class="val"><b class="green">${esc(a.final_score)}</b><br><span class="sub">${esc(a.fit_grade)}</span></td>
-    <td class="val"><b class="blue">${esc(a.capability_score ?? a.final_score)} / 100</b><br><span class="sub">${esc(a.job_fit_percentage)}% 基础契合度${a.ai_deduction > 0 ? ` · AI 美化扣 ${esc(a.ai_deduction)}` : ''}${a.hard_gate_deduction ? ` · 硬门槛扣 ${esc(a.hard_gate_deduction)}` : ''}${a.gate_cap_applied ? ` · 封顶 ${esc(a.gate_cap_applied)}` : ''}</span></td>
+    <td class="val"><b class="green">${esc(a.final_score)}</b><br><span class="sub">${esc(fitGrade)}</span></td>
+    <td class="val"><b class="blue">${esc(a.scoring_meta?.supported_score ?? a.capability_score ?? a.final_score)} / 100</b><br><span class="sub">${esc(evidenceScoreBasis(a))}${a.ai_deduction > 0 ? ` · AI 美化扣 ${esc(a.ai_deduction)}` : ''}${a.hard_gate_deduction ? ` · 硬门槛扣 ${esc(a.hard_gate_deduction)}` : ''}${a.gate_cap_applied ? ` · 封顶 ${esc(a.gate_cap_applied)}` : ''}</span></td>
     <td class="val"><b class="purple">${esc(a.ai_risk_level)}</b><br><span class="sub">${esc(a.ai_risk_label)}${
       a.ai_deduction > 0
         ? ` · 扣 ${esc(a.ai_deduction)} 分`
@@ -98,11 +110,11 @@ function buildReportInner(opts: {
           ? ' · 仅风险提示，未扣分'
           : ''
     }</span></td>
-    <td class="val"><b>${esc(a.recruitment_recommendation)}</b><br><span class="sub">${esc(a.fit_tag)}</span></td>
+    <td class="val"><b>${esc(recommendation)}</b><br><span class="sub">${esc(fitTag)}</span></td>
   </tr>
 </table>`);
 
-  if (a.override_review) {
+  if (!evidenceMatch && !pending && a.override_review) {
     out.push(`
 <h2>建议破格复核</h2>
 <p class="para">能力匹配 <b>${esc(a.capability_score)}</b> 分，只被硬门槛卡住，最终得分封顶至 <b>${esc(a.final_score)}</b> 分。系统不据此放宽分数，也不将其归入淘汰——请人工确认是否值得破格进入面试。</p>
@@ -118,7 +130,7 @@ ${(a.gate_blockers || []).length > 0 ? `<table>
     </tr>`).join('')}
   </tbody>
 </table>` : ''}`);
-  } else if ((a.non_mitigable_blockers || []).length > 0 && a.final_score < 60) {
+  } else if (!evidenceMatch && !pending && (a.non_mitigable_blockers || []).length > 0 && a.final_score < 60) {
     out.push(`
 <h2>不支持破格复核</h2>
 <p class="para">能力匹配 <b>${esc(a.capability_score ?? a.final_score)}</b> 分，但被<b>不能由能力弥补</b>的门槛卡住，因此不给"破格复核"结论：</p>
@@ -138,9 +150,10 @@ ${bullets((a.non_mitigable_blockers || []).map((b) => b.text))}
   const checklist = a.requirements_checklist || [];
   const undetermined = a.undetermined_requirements || [];
   if (checklist.length > 0) {
-    const countOf = (status: string) => checklist.filter((item) => item.status === status).length;
-    const metItems = checklist.filter((item) => item.status === 'met');
-    const notMetItems = checklist.filter((item) => item.status === 'not_met');
+      const statusOf = (item: (typeof checklist)[number]) => item.effective_status || item.status;
+    const countOf = (status: string) => checklist.filter((item) => statusOf(item) === status).length;
+    const metItems = checklist.filter((item) => statusOf(item) === 'met');
+    const notMetItems = checklist.filter((item) => statusOf(item) === 'not_met');
     const restParts = [
       countOf('not_met') > 0 ? `不符合 ${countOf('not_met')}` : '',
       countOf('manual_review') > 0 ? `待人工确认 ${countOf('manual_review')}` : '',
@@ -149,7 +162,8 @@ ${bullets((a.non_mitigable_blockers || []).map((b) => b.text))}
     out.push(`
 <h2>岗位要求逐条判定</h2>
 <p class="sub">共 ${checklist.length} 条：符合 ${metItems.length}${restParts.length > 0 ? ` · ${restParts.join(' · ')}` : ''}。
-下表只逐条列出「符合」的条目${restParts.length > 0 ? '；其余条目不在此展开（不符合的已计入硬门槛扣分与封顶，「未写明」按"没写不等于没有"处理）。' : ''}</p>
+下表只逐条列出「符合」的条目${restParts.length > 0 ? '；其余条目以计数和摘要保留。' : ''}</p>
+<p class="sub">四态口径：符合＝有对应证据；不符合＝有明确冲突；未写明＝简历未体现，不等于不符合；待人工确认＝证据不足或需核实。相关技术线索只说明有关联，不能直接认定熟练。</p>
 ${
   notMetItems.length > 0
     ? `<p class="sub"><b class="red">不符合（${notMetItems.length} 条）：</b>${notMetItems.map((item) => esc(item.text)).join('、')}</p>`
@@ -213,10 +227,10 @@ ${esc(item.detail)}<br>
   // 无问题时不再输出"已核查 N 项要求，全部通过"这种空结论：导出的报告是给 HR 与用人部门看的，
   // 没有检出问题就不占版面（界面上那行绿字仍然保留）。
   const av = a.agent_validation;
-  if (av && av.issues.length > 0) {
+  if (av && agentValidationNeedsReview(av)) {
     out.push(`
 <h2>Agent 校验</h2>
-<p class="sub">已校验 ${esc(av.checked_rules)} 项要求，检出 ${av.issues.length} 个问题${av.revised ? '并已修正' : ''}</p>
+<p class="sub">${esc(agentValidationStatus(av))}</p>
 <table>
   <thead><tr><th style="width:140px">问题类型</th><th>问题</th><th>修正</th></tr></thead>
   <tbody>
@@ -350,7 +364,7 @@ function downloadWord(html: string, name: string) {
   anchor.href = url;
   anchor.download = `候选人分析报告-${name}.doc`;
   anchor.click();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 const BUTTON_CLASS = 'inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium disabled:opacity-50';

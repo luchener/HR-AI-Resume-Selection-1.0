@@ -45,6 +45,8 @@ import llm
 import parser as doc_parser
 import resume_original
 import screening_agent
+import analysis_cache
+import evidence_scoring
 import deception_check
 import resume_review
 import resume_sanitize
@@ -88,15 +90,15 @@ MAX_RESUME_FILE_SIZE = 30 * 1024 * 1024
 # 岗位批量上传硬上限：数量 + 单条长度（防"一条请求写出上千万文件"）
 MAX_JOB_DESCRIPTIONS_PER_REQUEST = 50
 MAX_JOB_DESCRIPTION_CHARS = 20000
-_HR_ANALYSIS_VERSION = "screening-agent-v15-same-month-handover"
+_HR_ANALYSIS_VERSION = "screening-agent-v20-evidence-only-practice-branches"
 # 硬门槛判定口径变更时必须改上面的版本号：缓存里存的是**已评分**的最终结果，
 # 不会重新走一遍判定，不换 key 就会继续展示旧口径的分数与 not_met。
 # v15：任职重叠改为严格相交（同月辞职并入职=正常交接，不再报"时间重叠"），
 #      提示词同步加上"月份精度下同月交接不算重叠"，报告侧 risk_points 不会再误报。
 # v2：学历补全校验学员层次维度、年限/证书门槛不再把“优先/可放宽”当硬门槛、
 #     院校层次不达标改为封顶 69（学历层级仍封顶 59）。
-# HR 分析结果缓存：LRU（最近最久未用淘汰）+ TTL（24h），防内存无界增长，
-# 同时保留"同一简历+同一职位+同一模型配置重复分析不调 LLM"的省 token 语义。
+# HR 结果缓存：共享数据卷上的内容寻址结果，24h TTL + 数量上限。
+# 旧内存容器仅保留兼容测试调用；请求读写以 analysis_cache 磁盘数据为准。
 _HR_ANALYSIS_CACHE_MAX = 1000
 _HR_ANALYSIS_CACHE_TTL_SECONDS = 24 * 3600
 _HR_ANALYSIS_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
@@ -104,28 +106,32 @@ _HR_ANALYSIS_CACHE_LOCK = threading.Lock()
 
 
 def _hr_cache_get(key: tuple) -> dict | None:
-    """取缓存（命中刷新 LRU 位置；过期条目惰性剔除）。"""
-    now = time.time()
-    with _HR_ANALYSIS_CACHE_LOCK:
-        entry = _HR_ANALYSIS_CACHE.get(key)
-        if entry is None:
-            return None
-        if now - entry.get("_ts", 0) > _HR_ANALYSIS_CACHE_TTL_SECONDS:
-            _HR_ANALYSIS_CACHE.pop(key, None)
-            return None
-        _HR_ANALYSIS_CACHE.move_to_end(key)
-        return entry.get("value")
+    """Only call after authorizing both source records; disk is authoritative."""
+    return analysis_cache.get(key)
 
 
 def _hr_cache_put(key: tuple, value: dict) -> None:
-    """写缓存：超容量淘汰最久未用条目。"""
-    now = time.time()
-    with _HR_ANALYSIS_CACHE_LOCK:
-        if key in _HR_ANALYSIS_CACHE:
-            _HR_ANALYSIS_CACHE.pop(key, None)
-        _HR_ANALYSIS_CACHE[key] = {"_ts": now, "value": value}
-        while len(_HR_ANALYSIS_CACHE) > _HR_ANALYSIS_CACHE_MAX:
-            _HR_ANALYSIS_CACHE.popitem(last=False)
+    analysis_cache.put(key, value)
+
+
+def _hr_authorized_sources(resume_id: str, job_id: str, user_id: str) -> tuple[dict, dict]:
+    resume = store.get_resume(resume_id, user_id=user_id)
+    if not resume:
+        raise ApiError(f"Resume not found: {resume_id}", 404, "resumes")
+    job = store.get_job(job_id, user_id=user_id)
+    if not job:
+        raise ApiError(f"Job not found: {job_id}", 404, "resumes")
+    return resume, job
+
+
+def _hr_content_cache_key(resume: dict, job: dict, user_id: str, ai_config, agent_config) -> tuple:
+    return (
+        _HR_ANALYSIS_VERSION, user_id,
+        hashlib.sha256(resume.get("content", "").encode("utf-8")).hexdigest(),
+        hashlib.sha256(job.get("content", "").encode("utf-8")).hexdigest(),
+        llm.model_config_fingerprint(ai_config), _agent_config_fingerprint(agent_config),
+        config.DECEPTION_CHECK_MODE, datetime.now().strftime("%Y-%m"),
+    )
 
 
 @app.errorhandler(413)
@@ -3020,12 +3026,20 @@ def _normalize_hr_analysis(
     log_context: dict | None = None,
 ) -> dict:
     """Enforce the scoring formula and all allowed deduction/grade ranges."""
+    evidence_score = None
+    if raw.get("evidence_pipeline_version") == "evidence-v1":
+        evidence_score = evidence_scoring.score_evidence(raw.get("evidence_assessments") or [])
+        # Keep the LLM's numbers out of all downstream grade/capability decisions.
+        raw = {**raw, "score_breakdown": evidence_score["score_breakdown"],
+               "job_fit_score": evidence_score["job_fit_score"]}
     score_breakdown, has_complete_breakdown = _normalize_score_breakdown(raw.get("score_breakdown"))
     base_score = (
         sum(score_breakdown.values())
         if has_complete_breakdown
         else max(0, min(100, _as_int(raw.get("job_fit_score"))))
     )
+    if evidence_score is not None:
+        base_score = evidence_score["job_fit_score"]
     risk = str(raw.get("ai_risk") or "none").strip().lower()
     if risk not in _AI_RISK_RULES:
         risk = "none"
@@ -3044,11 +3058,25 @@ def _normalize_hr_analysis(
     # 在 AI 美化扣分之后再次扣分，并按最严的一档封顶。
     # 三态口径：`manual_review`（简历未写明 / 真实性待核实）不在这里——它不扣分、不封顶。
     raw_checklist = raw.get("requirements_checklist") if isinstance(raw.get("requirements_checklist"), list) else []
+    effective_by_id = {}
+    if evidence_score is not None:
+        # The audited evidence ledger is authoritative; model-only checklist
+        # entries cannot create a hard-gate deduction after validation.
+        raw_checklist = raw.get("evidence_assessments") if isinstance(raw.get("evidence_assessments"), list) else []
+        effective_by_id = {
+            (str(item.get("id") or ""), str(item.get("text") or "")): item.get("effective_status")
+            for item in evidence_score["scoring_meta"]["items"]
+        }
     tier_counts = {"A": 0, "B": 0, "C": 0}
     capped_tiers: set[str] = set()
     gate_blockers: list[dict] = []
     for item in raw_checklist:
-        if not isinstance(item, dict) or item.get("status") != "not_met":
+        if not isinstance(item, dict):
+            continue
+        assessed_status = effective_by_id.get((str(item.get("id") or ""), str(item.get("text") or "")), item.get("status")) if evidence_score is not None else item.get("status")
+        if assessed_status != "not_met":
+            continue
+        if evidence_score is not None and (not item.get("hard") or item.get("logic") == "preferred" or not item.get("explicit_negative")):
             continue
         tier = str(item.get("gate_tier") or "").strip().upper()
         if tier not in _GATE_TIER_POLICY:
@@ -3111,6 +3139,11 @@ def _normalize_hr_analysis(
     capability_score, capability_basis = _capability_score(
         score_breakdown, has_complete_breakdown, base_score
     )
+    if evidence_score is not None:
+        # Evidence score is already normalized over applicable JD dimensions;
+        # fixed 75-point capability arithmetic would contradict that value.
+        capability_score, capability_basis = base_score, "resume_jd_evidence_match"
+        score_breakdown = evidence_score["scoring_meta"]["normalized_breakdown"]
     non_mitigable_blockers = [
         {"text": b["text"], "category": b["category"], "tier": b["tier"]}
         for b in gate_blockers
@@ -3167,6 +3200,11 @@ def _normalize_hr_analysis(
     agent_trace = raw.get("agent_trace") if isinstance(raw.get("agent_trace"), dict) else None
     agent_validation = raw.get("agent_validation") if isinstance(raw.get("agent_validation"), dict) else None
     requirements_checklist = raw_checklist if isinstance(raw_checklist, list) else []
+    if evidence_score is not None and isinstance(raw.get("evidence_assessments"), list):
+        requirements_checklist = [
+            {**item, "effective_status": effective_by_id.get((str(item.get("id") or ""), str(item.get("text") or "")), item.get("status"))}
+            for item in raw.get("evidence_assessments") if isinstance(item, dict)
+        ]
     result = {
         "candidate_name": _as_text(raw.get("candidate_name")),
         "final_score": final_score,
@@ -3215,7 +3253,29 @@ def _normalize_hr_analysis(
         "fit_tag": requested_fit_tag,
         "agent_trace": agent_trace,
         "agent_validation": agent_validation,
+        # 结构校验与语义自校是两条独立证据，不能只透传自校而丢掉结构失败。
+        "agent_meta": dict(raw.get("agent_meta") or {}) if isinstance(raw.get("agent_meta"), dict) else {},
     }
+    if evidence_score is not None:
+        result["scoring_meta"] = evidence_score["scoring_meta"]
+        result["evidence_assessments"] = [
+            {**item, "effective_status": effective_by_id.get((str(item.get("id") or ""), str(item.get("text") or "")), item.get("status"))}
+            for item in (raw.get("evidence_assessments") or []) if isinstance(item, dict)
+        ]
+        # Highlights and unresolved items use the audited effective status, not
+        # the model's pre-audit status.
+        ledger = result["evidence_assessments"]
+        result["strengths"] = [f"{'原文支持' if (i.get('effective_status') or i.get('status')) == 'met' else '部分要求有原文支持'}：{i['text']}。{i.get('source_quote') or (i.get('supported_components') or [{}])[0].get('source_quote', '')}" for i in ledger if (i.get("effective_status") or i.get("status")) == "met" or i.get("supported_components")] [:5] or ["暂未找到与本次岗位要求对应的有效原文证据。"]
+        result["weaknesses"] = [f"{'明确不符合' if (i.get('effective_status') or i.get('status')) == 'not_met' else '待确认' if (i.get('effective_status') or i.get('status')) == 'manual_review' else '未体现'}：{i['text']}。{i.get('reason', '')}" for i in ledger if (i.get("effective_status") or i.get("status")) != "met"][:5] or ["本次逐项核对未发现明确不符合或待补充的要求。"]
+        result["recruitment_recommendation"] = score_recommendation
+        result["summary"] = "评分仅衡量简历原文对本次岗位要求的证据匹配程度；未体现项不获得匹配分，但不代表候选人不具备，真实性与能力程度仍需核验。"
+        if not gate_blockers and (not evidence_score["scoring_meta"].get("decision_ready") or (final_score < 60 and evidence_score["scoring_meta"].get("unknown_ratio", 0) > 0)):
+            result["recruitment_recommendation"] = "待补充材料"
+            result["fit_grade"] = "待确认"
+            result["fit_tag"] = "待确认"
+        if evidence_score["scoring_meta"].get("incomplete"):
+            result["analysis_incomplete"] = True
+            result["analysis_incomplete_reason"] = "简历原文未提供足够匹配证据，请补充材料；不能据此推断候选人不具备相关能力。"
     _mark_incomplete_analysis(result, raw)
 
     # 简历文案核验（防"文案骗人"）：只读字段，绝不参与评分——
@@ -3355,32 +3415,24 @@ def _run_hr_analysis(
     agent_config: dict | None = None,
     on_event=None,
 ) -> dict:
-    config_fingerprint = llm.model_config_fingerprint(ai_config)
-    agent_fingerprint = _agent_config_fingerprint(agent_config)
-    # 核验三态必须进缓存键：`on` 的结果里带 credibility、`shadow`/`off` 的不带。
-    # 否则把开关从 on 切回 shadow 后，同一份简历/岗位会命中 `on` 时期缓存，
-    # 继续把核验结果吐给 HR —— 与"影子期不挂载、不进缓存"的设计意图相反。
-    deception_mode = config.DECEPTION_CHECK_MODE
-    cache_key = (
-        _HR_ANALYSIS_VERSION,
-        user_id,
-        resume_id,
-        job_id,
-        config_fingerprint,
-        agent_fingerprint,
-        deception_mode,
-    )
-    cached = _hr_cache_get(cache_key)
-    if cached is not None:
-        return cached
+    resume, job = _hr_authorized_sources(resume_id, job_id, user_id)
+    cache_key = _hr_content_cache_key(resume, job, user_id, ai_config, agent_config)
+    with analysis_cache.singleflight(cache_key):
+        # Waiting for another worker must not revive a deleted or reassigned source.
+        resume, job = _hr_authorized_sources(resume_id, job_id, user_id)
+        if cache_key != _hr_content_cache_key(resume, job, user_id, ai_config, agent_config):
+            raise ApiError("分析材料已变更，请重试。", 409, "resumes")
+        cached = _hr_cache_get(cache_key)
+        if cached is not None:
+            return cached
+        return _compute_hr_analysis(
+            resume_id, job_id, user_id, resume, job, cache_key,
+            ai_config, precomputed_requirements, agent_config, on_event,
+        )
 
-    resume = store.get_resume(resume_id, user_id=user_id)
-    if not resume:
-        raise ApiError(f"Resume not found: {resume_id}", 404, "resumes")
-    job = store.get_job(job_id, user_id=user_id)
-    if not job:
-        raise ApiError(f"Job not found: {job_id}", 404, "resumes")
 
+def _compute_hr_analysis(resume_id, job_id, user_id, resume, job, cache_key,
+                         ai_config, precomputed_requirements, agent_config, on_event):
     # ── 使用次数配额：原子预占（检查 + 自增在同一把跨进程文件锁内完成）。
     # 原来的"先检查、成功后再记账"在 gunicorn -w 4 + 多线程下可被并发击穿每日限额。
     quota_err = quota_mod.reserve_analysis(user_id, 1)
@@ -3405,7 +3457,8 @@ def _run_hr_analysis(
             resume.get("content", ""),
             log_context={"resume_id": resume_id, "job_id": job_id, "user_id": user_id},
         )
-        _hr_cache_put(cache_key, result)
+        if analysis_cache.cacheable(result, raw):
+            _hr_cache_put(cache_key, result)
         logger.info(
             "HR analysis completed: candidates=1 input_chars=%s elapsed_ms=%s",
             len(job.get("content", "")) + len(resume.get("content", "")),
@@ -3430,37 +3483,22 @@ def _run_hr_batch_analysis(
     agent_config: dict | None = None,
 ) -> tuple[dict[str, dict], list[dict]]:
     """Run isolated candidate analyses concurrently; pre-extract job requirements once to avoid redundant LLM calls."""
-    agent_fingerprint = _agent_config_fingerprint(agent_config)
     results: dict[str, dict] = {}
     failures: list[dict] = []
     pending: list[str] = []
     job: dict | None = None
     for resume_id in resume_ids:
-        cache_key = (
-            _HR_ANALYSIS_VERSION,
-            user_id,
-            resume_id,
-            job_id,
-            llm.model_config_fingerprint(ai_config),
-            agent_fingerprint,
-            # 同 _run_hr_analysis：核验三态不同 → 缓存内容不同，不能互相命中
-            config.DECEPTION_CHECK_MODE,
-        )
+        try:
+            resume, job = _hr_authorized_sources(resume_id, job_id, user_id)
+        except ApiError as exc:
+            failures.append({"resume_id": resume_id, "detail": exc.message})
+            continue
+        cache_key = _hr_content_cache_key(resume, job, user_id, ai_config, agent_config)
         cached = _hr_cache_get(cache_key)
         if cached is not None:
             results[resume_id] = cached
             continue
-        resume = store.get_resume(resume_id, user_id=user_id)
-        if not resume:
-            failures.append({"resume_id": resume_id, "detail": f"Resume not found: {resume_id}"})
-            continue
         pending.append(resume_id)
-        if job is None:
-            job = store.get_job(job_id, user_id=user_id)
-            if not job:
-                for rid in pending:
-                    failures.append({"resume_id": rid, "detail": f"Job not found: {job_id}"})
-                return results, failures
 
     if not pending:
         return results, failures
@@ -3532,6 +3570,12 @@ def _compare_candidates(analysis_results: list[dict], runtime_config: dict | Non
                 "note": analysis.get("analysis_incomplete_reason") or ("分析未完成" if incomplete else ""),
             })
 
+    if any((a.get("hr_analysis") or {}).get("scoring_meta", {}).get("score_semantics") == "resume_jd_evidence_match" for a in analysis_results if isinstance(a, dict)):
+        return {
+            "ranking": _build_authoritative_ranking(items, []),
+            "pairwise": [],
+            "recommendation": "仅对比各份简历对本次JD的匹配证据，不代表能力或真实性排名；材料缺口请逐项核验。",
+        }
     candidates_json = json.dumps(items, ensure_ascii=False)
     prompt = f"""你是招聘委员会主席。对比以下 {len(items)} 位候选人：
 {candidates_json}

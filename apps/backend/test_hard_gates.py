@@ -503,6 +503,12 @@ class CertificateGateTests(unittest.TestCase):
         self.assertEqual(status, "manual_review")
         self.assertIn("未写明", note)
 
+    def test_certificate_negation_before_name_match_is_not_met(self):
+        for line in ("未取得PMP证书", "未获得PMP证书", "未通过PMP证书", "不具备PMP证书", "未持有PMP证书", "未取得一建"):
+            with self.subTest(line=line):
+                status, _ = self._gate("必须持有PMP证书" if "PMP" in line else "必须持有一级建造师证书", certificates=(line,), resume="张三\n" + line)
+                self.assertEqual(status, "not_met")
+
     def test_certificate_explicitly_absent_is_not_met(self):
         """三态·明确不符合：简历自己写明没有这项 → 这才是 not_met。"""
         status, note = self._gate("必须持有PMP证书", certificates=("无PMP证书",))
