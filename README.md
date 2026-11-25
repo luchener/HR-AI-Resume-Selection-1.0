@@ -1,4 +1,4 @@
-# AI 简历智选 1.0
+# AI 简历智选 2.0
 
 <img width="2865" height="1577" alt="image" src="https://github.com/user-attachments/assets/82373123-97f4-493a-bd8b-1a5924adb648" />
 
