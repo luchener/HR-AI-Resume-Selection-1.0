@@ -7,11 +7,17 @@ services:
     image: hr-ai-resume-selection-backend:1.0.0
     container_name: hr-ai-resume-selection-backend
     restart: unless-stopped
+    stop_grace_period: 1250s
     env_file:
       - path: apps/backend/.env
-        required: false
+        required: true
     environment:
       LOG_DIR: /app/logs
+      # CSRF_TRUSTED_ORIGINS 的唯一持久来源是 apps/backend/.env（见该文件的同名键）。
+      # 这里**不能**再写 `CSRF_TRUSTED_ORIGINS: ${CSRF_TRUSTED_ORIGINS:-}`：
+      # Compose 的 environment 优先级高于 env_file，外层未导出该变量时会用空串覆盖
+      # env_file 里的正确值，导致浏览器写请求全部 fail closed（403）。
+      # 部署前用 scripts/security-deployment-preflight.py 校验最终生效值。
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

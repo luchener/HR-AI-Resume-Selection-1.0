@@ -42,4 +42,4 @@ EXPOSE 8000
 # Flask + gunicorn，宝塔/Docker 通用，无 ASGI/WSGI 坑。
 # GUNICORN_WORKERS 可通过 docker-compose 的 environment 覆盖（默认 4，支持多用户并发）。
 ENV GUNICORN_WORKERS=4
-CMD ["sh", "-c", "gunicorn -w ${GUNICORN_WORKERS} -b 0.0.0.0:8000 --timeout 1200 app:app"]
+CMD ["sh", "-c", "exec gunicorn -c python:gunicorn_source_drain -w ${GUNICORN_WORKERS} -b 0.0.0.0:8000 --timeout 1200 --graceful-timeout 1200 app:app"]

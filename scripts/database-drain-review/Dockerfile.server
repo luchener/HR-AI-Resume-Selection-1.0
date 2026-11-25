@@ -1,0 +1,13 @@
+# Isolated synthetic test only. Pin REVIEW_BASE to the running backend image ID
+# via a temporary local tag. Build without network or production env/data files.
+ARG REVIEW_BASE
+FROM ${REVIEW_BASE}
+USER root
+COPY apps/backend/*.py /app/
+COPY scripts/database-drain-review/*.py /app/
+COPY scripts/database-drain-review/start.sh /review-start.sh
+RUN mkdir -p /review /app/data /app/logs && chown -R 10001:10001 /review /app \
+    && chown 10001:10001 /review-start.sh && chmod 700 /review-start.sh
+ENV ENV=local LLM_API_KEY= SMTP_PASSWORD= JWT_SECRET_KEY=synthetic-review-only SESSION_SECRET_KEY=synthetic-review-only SOURCE_DRAIN_STATE_PATH=/review/control.sqlite PYTHONDONTWRITEBYTECODE=1
+USER 10001:10001
+ENTRYPOINT ["sh", "/review-start.sh"]

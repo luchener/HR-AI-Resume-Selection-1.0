@@ -1,0 +1,35 @@
+# 正式发布镜像：SQL 前端（多阶段，Node 24 LTS，离线锁定缓存）
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS builder
+WORKDIR /app
+# 仅拷贝按 lockfile 校验过的小型 _cacache（约 176 MiB），不搬运宿主整库缓存。
+COPY npm-cache/_cacache/ /root/.npm/_cacache/
+COPY build/package.json build/package-lock.json ./
+RUN npm ci --offline --no-audit --no-fund
+COPY build/ ./
+ARG NEXT_PUBLIC_API_URL=
+ARG NEXT_PUBLIC_ANALYSIS_BACKEND=sql
+ARG BACKEND_INTERNAL_URL=http://backend:8000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+    NEXT_PUBLIC_ANALYSIS_BACKEND=$NEXT_PUBLIC_ANALYSIS_BACKEND \
+    BACKEND_INTERNAL_URL=$BACKEND_INTERNAL_URL \
+    NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+RUN node -e "const fs=require('fs'),path=require('path'),crypto=require('crypto');function walk(d,out){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);if(e.isSymbolicLink())continue;if(e.isDirectory())walk(p,out);else out.push(p)}}const files=[];walk('/app/node_modules',files);walk('/app/.next',files);files.sort();const h=crypto.createHash('sha256');for(const f of files){h.update(path.relative('/app',f));h.update(fs.readFileSync(f))}fs.writeFileSync('/app/release-manifest.json',JSON.stringify({node:process.version,files:files.length,sha256:h.digest('hex')},null,2))"
+
+FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
+WORKDIR /app
+ENV NODE_ENV=production PORT=3000 NEXT_TELEMETRY_DISABLED=1 XDG_CONFIG_HOME=/tmp XDG_CACHE_HOME=/tmp
+ARG ALPINE_MIRROR=https://dl-cdn.alpinelinux.org
+RUN sed -i "s|https://dl-cdn.alpinelinux.org|${ALPINE_MIRROR}|g" /etc/apk/repositories \
+    && apk add --no-cache chromium font-noto-cjk
+RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/next.config.ts ./next.config.ts
+COPY --from=builder /app/release-manifest.json ./release-manifest.json
+RUN chmod -R +x /app/node_modules/.bin
+USER nextjs
+EXPOSE 3000
+CMD ["npm", "start"]

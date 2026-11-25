@@ -22,6 +22,7 @@ from email.utils import formataddr
 
 import config
 import system_config
+from log_redaction import mask_email, redact_email_addresses
 
 logger = logging.getLogger(__name__)
 
@@ -393,11 +394,15 @@ def _send(
         server = _connect(cfg)
         try:
             server.sendmail(sender, [to_email], msg.as_string())
-            logger.info("email sent to %s (subject=%s)", to_email, subject)
+            logger.info("email sent to %s (subject=%s)", mask_email(to_email), subject)
         finally:
             server.quit()
-    except Exception:
-        logger.exception("send email failed for %s", to_email)
+    except Exception as exc:
+        logger.exception(
+            "send email failed for %s: %s",
+            mask_email(to_email),
+            redact_email_addresses(exc),
+        )
         raise
 
 
@@ -447,9 +452,13 @@ def send_broadcast_email(
         server = _connect(cfg)
         try:
             server.sendmail(sender, [to_email], outer.as_string())
-            logger.info("broadcast email sent to %s (subject=%s)", to_email, subject)
+            logger.info("broadcast email sent to %s (subject=%s)", mask_email(to_email), subject)
         finally:
             server.quit()
-    except Exception:
-        logger.exception("broadcast email failed for %s", to_email)
+    except Exception as exc:
+        logger.exception(
+            "broadcast email failed for %s: %s",
+            mask_email(to_email),
+            redact_email_addresses(exc),
+        )
         raise

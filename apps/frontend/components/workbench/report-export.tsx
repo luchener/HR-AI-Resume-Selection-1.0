@@ -1,360 +1,224 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { forwardRef, useImperativeHandle, useRef, useState } from 'react';
 import html2canvas from 'html2canvas';
+import { downloadReportPdf } from '@/lib/api/report-pdf';
+import { REPORT_EXPORT_STYLE } from '@/lib/report-export-styles';
 import { CameraIcon, DownloadIcon, FileTextIcon, LoaderCircleIcon } from 'lucide-react';
 import type { HrAnalysis } from './analysis-context';
-import { evidenceDecisionPending, evidenceRecommendation, evidenceScoreBasis, evidenceScoreLabel, evidenceScoreNotice, evidenceScoreSummary, isResumeJdEvidenceMatch } from './evidence-score-status';
-import { agentValidationNeedsReview, agentValidationStatus } from './agent-validation-status';
+import { HIRING_BAND_NOTE, evidenceDecisionPending, evidenceRecommendation, relevantExperienceSummary, reportCoreVerdict } from './evidence-score-status';
+import { agentValidationNeedsReview } from './agent-validation-status';
 import { fetchResumeReviewMarkers, type ResumeReviewData } from '@/lib/api/screening';
 
 export const AGENT_RULE_LABELS = ['', '论断超出简历依据', '评分依据不可追溯', '加分项与岗位无关', '缺失项标注"未提供"', '风险与未体现混淆'];
 
-const MARKER_LABELS: Record<string, string> = {
-  strength: '匹配亮点',
-  match: '岗位匹配',
-  risk: '待核实',
-  missing: '未体现',
-  verify: '学历待核实',
-};
-
-/** 硬门槛档位（与后端 _GATE_TIER_POLICY 对应）：A 学历层级 / B 岗位硬门槛 / C 生活类 */
-const TIER_LABELS: Record<string, string> = {
-  A: '学历层级',
-  B: '岗位硬门槛',
-  C: '生活类要求',
-};
-
-type ExportFormat = 'png' | 'pdf' | 'doc';
+export type ExportFormat = 'png' | 'pdf' | 'doc';
 
 function esc(value: unknown): string {
-  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // 引号一并转义：这份 HTML 会进 innerHTML 与 .doc 导出，任何属性上下文都不能被打断。
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function bullets(items: unknown): string {
-  const clean = Array.isArray(items) ? items.map((item) => String(item || '').trim()).filter(Boolean) : [];
-  if (!clean.length) return '<p class="empty">未提供</p>';
-  return `<ul>${clean.map((item) => `<li>${esc(item)}</li>`).join('')}</ul>`;
+function clip(value: unknown, max = 46): string {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-// 布局只用 table/h*/p/ul，保证 Word（.doc HTML）渲染不塌陷
-const DOC_STYLE = `
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;color:#2c394f;font-size:13px;line-height:1.7;background:#ffffff}
-.page{width:800px;margin:0 auto;padding:32px 36px;background:#ffffff}
-h1{font-size:20px;color:#253249;margin-bottom:6px}
-h2{font-size:14px;color:#3e6fd3;margin:20px 0 8px;border-bottom:1px solid #dce2eb;padding-bottom:4px}
-h3{font-size:13px;color:#29364c;margin:12px 0 4px}
-.meta{margin:6px 0 4px;font-size:12px;color:#65738a}
-.meta span{margin-right:16px}
-.meta b{color:#1d7f5c;font-size:18px}
-table{border-collapse:collapse;width:100%;margin:6px 0 10px;font-size:12px}
-th,td{border:1px solid #dce2eb;padding:6px 9px;text-align:left;vertical-align:top}
-th{background:#eaf0fb;color:#3e6fd3;font-weight:600;font-size:11px}
-ul{margin:4px 0 8px 18px}
-li{margin-bottom:3px}
-p.para{margin:4px 0;font-size:13px;line-height:1.8}
-td.lab{background:#f7f8fa;color:#66758b;font-size:11px;width:90px}
-td.val{text-align:center;width:25%}
-b.green,.green{color:#1d7f5c}
-.blue{color:#3e6fd3}
-.purple{color:#995c87}
-.red{color:#b23b4e}
-.sub{color:#65738a;font-size:11px}
-.tag{display:inline-block;background:#fef6e6;color:#b0761a;border-radius:2px;padding:1px 6px;font-size:10px}
-.empty{color:#8190a4}
-.notice{margin-top:18px;font-size:10px;color:#8190a4}
-@media print{.page{width:auto;padding:10px 12px}}
-`;
+function uniqText(items: unknown[], limit: number): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const text = String(item ?? '').trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** 从履历、项目、待核实要求和核验提示中生成 3–5 个 HR 必问问题（确定性、不额外调用模型）。 */
+function buildInterviewQuestions(a: HrAnalysis): string[] {
+  const questions: string[] = [];
+  const push = (value: string) => {
+    const text = value.trim();
+    if (text && !questions.includes(text) && questions.length < 5) questions.push(text);
+  };
+  const records = a.work_history?.employment_records || [];
+  const recent = records.find((record) => record.job_title && !/未提供|未知/.test(record.job_title));
+  if (recent) {
+    const company = /未提供|未知/.test(recent.company_name || '') ? '' : `在「${clip(recent.company_name, 20)}」`;
+    push(`请介绍你${company}担任「${clip(recent.job_title, 24)}」期间的主要职责和一个代表性项目，说明你本人做了什么、结果如何。`);
+  }
+  const project = (a.skill_match?.project_match_points || []).find((item) => !/未提供/.test(item));
+  if (project) {
+    push(`简历提到「${clip(project, 40)}」，请说明你负责的具体部分、技术难点和可量化结果。`);
+  }
+  const pending = (a.requirements_checklist || []).filter((item) =>
+    ['not_met', 'manual_review', 'not_mentioned'].includes(item.effective_status || item.status));
+  for (const item of pending.slice(0, 2)) {
+    const status = item.effective_status || item.status;
+    push(`岗位要求「${clip(item.text, 42)}」，简历${status === 'not_met' ? '显示不满足' : '未明确体现'}，请举例说明你的实际经历或补充证据。`);
+  }
+  if (records.length >= 3 || /频繁|较低|一般/.test(a.work_history?.stability || '')) {
+    push(`过去${clip(a.work_history?.total_years || '', 8)}有 ${records.length} 段工作经历，请说明每次离职原因和选择下一份工作的标准。`);
+  }
+  if (a.education_history?.length) {
+    push('学历信息为简历自述，请提供毕业证、学位证或学信网备案等可核验材料。');
+  }
+  if (a.ai_deduction > 0 || /美化|包装/.test(a.ai_risk_level || '')) {
+    push('简历中部分表述较概括，请用具体项目、数据和你的实际贡献说明。');
+  }
+  if (!questions.length) {
+    push('请用 3 分钟介绍最近一段工作：负责什么、最拿得出手的成果、为什么考虑新机会。');
+  }
+  return questions.slice(0, 5);
+}
 
 function buildReportInner(opts: {
   analysis: HrAnalysis;
   candidateName: string;
   markers: ResumeReviewData | null;
 }): string {
-  const { analysis: a, markers } = opts;
+  const { analysis: a } = opts;
   const name = opts.candidateName || a.candidate_name || '候选人';
   const out: string[] = [];
-  const scoreLabel = evidenceScoreLabel(a);
-  const evidenceMatch = isResumeJdEvidenceMatch(a);
   const pending = evidenceDecisionPending(a);
   const recommendation = evidenceRecommendation(a);
-  const fitTag = pending ? '待确认' : a.fit_tag;
-  const fitGrade = pending ? '待确认' : a.fit_grade;
-
-  out.push(`
-<h1>候选人分析报告 · ${esc(name)}</h1>
-<div class="meta">
-  <span>生成日期：${new Date().toISOString().slice(0, 10)}</span>
-  <span>${esc(scoreLabel)}：<b>${esc(a.final_score)}</b>/100（${esc(fitGrade)}）</span>
-  <span>招聘建议：${esc(recommendation)} · ${esc(fitTag)}</span>
-</div>`);
-
-  if (a.scoring_meta) {
-    out.push(`<p class="para">${esc(evidenceScoreSummary(a))}</p><p class="para">${esc(evidenceScoreNotice(a))}</p>`);
-  }
-
-  out.push(`
-<h2>评估总览</h2>
-<table>
-  <tr>
-    <td class="lab">${esc(scoreLabel)}</td><td class="lab">${a.scoring_meta ? '证据支持分' : '能力匹配度'}</td><td class="lab">简历美化程度</td><td class="lab">招聘建议</td>
-  </tr>
-  <tr>
-    <td class="val"><b class="green">${esc(a.final_score)}</b><br><span class="sub">${esc(fitGrade)}</span></td>
-    <td class="val"><b class="blue">${esc(a.scoring_meta?.supported_score ?? a.capability_score ?? a.final_score)} / 100</b><br><span class="sub">${esc(evidenceScoreBasis(a))}${a.ai_deduction > 0 ? ` · AI 美化扣 ${esc(a.ai_deduction)}` : ''}${a.hard_gate_deduction ? ` · 硬门槛扣 ${esc(a.hard_gate_deduction)}` : ''}${a.gate_cap_applied ? ` · 封顶 ${esc(a.gate_cap_applied)}` : ''}</span></td>
-    <td class="val"><b class="purple">${esc(a.ai_risk_level)}</b><br><span class="sub">${esc(a.ai_risk_label)}${
-      a.ai_deduction > 0
-        ? ` · 扣 ${esc(a.ai_deduction)} 分`
-        : a.ai_deduction_suggested
-          ? ' · 仅风险提示，未扣分'
-          : ''
-    }</span></td>
-    <td class="val"><b>${esc(recommendation)}</b><br><span class="sub">${esc(fitTag)}</span></td>
-  </tr>
-</table>`);
-
-  if (!evidenceMatch && !pending && a.override_review) {
-    out.push(`
-<h2>建议破格复核</h2>
-<p class="para">能力匹配 <b>${esc(a.capability_score)}</b> 分，只被硬门槛卡住，最终得分封顶至 <b>${esc(a.final_score)}</b> 分。系统不据此放宽分数，也不将其归入淘汰——请人工确认是否值得破格进入面试。</p>
-<p class="sub">能力分口径：${a.capability_basis === 'total' ? '模型未给出分项，退回模型总分' : '已剔除模型对硬门槛的打分，避免同一缺口被扣两次'}</p>
-${(a.gate_blockers || []).length > 0 ? `<table>
-  <thead><tr><th style="width:140px">门槛档位</th><th>岗位要求</th><th>简历证据</th></tr></thead>
-  <tbody>
-    ${(a.gate_blockers || []).map((b) => `
-    <tr>
-      <td><span class="tag">${esc(TIER_LABELS[b.tier] || b.tier || '硬门槛')}</span></td>
-      <td>${esc(b.text)}</td>
-      <td class="red">${esc(b.evidence_label)}${b.basis ? `<br><span class="sub">${esc(b.basis)}</span>` : ''}</td>
-    </tr>`).join('')}
-  </tbody>
-</table>` : ''}`);
-  } else if (!evidenceMatch && !pending && (a.non_mitigable_blockers || []).length > 0 && a.final_score < 60) {
-    out.push(`
-<h2>不支持破格复核</h2>
-<p class="para">能力匹配 <b>${esc(a.capability_score ?? a.final_score)}</b> 分，但被<b>不能由能力弥补</b>的门槛卡住，因此不给"破格复核"结论：</p>
-${bullets((a.non_mitigable_blockers || []).map((b) => b.text))}
-<p class="sub">这类门槛通常意味着岗位工作本身要求持证或满足事实条件（法规执业资格、驾照、届别等），破格等于违规上岗——请按制度处理。</p>`);
-  }
-
-  out.push(`<h2>核心判定</h2><p class="para">${esc(a.summary)}</p>`);
-
-  // 岗位要求逐条判定：导出**只逐条列出「符合」的条目**。
-  // 不符合 / 未写明 / 待人工确认一次能到二三十条，逐条铺开太占版面；而且不符合已经通过
-  // 硬门槛扣分与封顶体现在「评估总览」的分数里，不在这里再重复一遍。
-  // 但"缺哪几条"不能丢：不符合的条目名合并成一行列出（没有判定/依据，只留要求本身），
-  // 报告被转发给用人部门时还看得出缺什么。
-  // 与界面上那份是互补分工：屏幕按"需要处理的优先"（默认只显示不符合 + 待人工确认，可展开全部），
-  // 导出按"够格在哪"（表格只列符合，其余压缩成几行）。
+  const fitTag = pending ? '' : a.fit_tag;
+  const fitGrade = pending ? '' : a.fit_grade;
   const checklist = a.requirements_checklist || [];
-  const undetermined = a.undetermined_requirements || [];
-  if (checklist.length > 0) {
-      const statusOf = (item: (typeof checklist)[number]) => item.effective_status || item.status;
-    const countOf = (status: string) => checklist.filter((item) => statusOf(item) === status).length;
-    const metItems = checklist.filter((item) => statusOf(item) === 'met');
-    const notMetItems = checklist.filter((item) => statusOf(item) === 'not_met');
-    const restParts = [
-      countOf('not_met') > 0 ? `不符合 ${countOf('not_met')}` : '',
-      countOf('manual_review') > 0 ? `待人工确认 ${countOf('manual_review')}` : '',
-      countOf('not_mentioned') > 0 ? `未写明 ${countOf('not_mentioned')}` : '',
-    ].filter(Boolean);
-    out.push(`
-<h2>岗位要求逐条判定</h2>
-<p class="sub">共 ${checklist.length} 条：符合 ${metItems.length}${restParts.length > 0 ? ` · ${restParts.join(' · ')}` : ''}。
-下表只逐条列出「符合」的条目${restParts.length > 0 ? '；其余条目以计数和摘要保留。' : ''}</p>
-<p class="sub">四态口径：符合＝有对应证据；不符合＝有明确冲突；未写明＝简历未体现，不等于不符合；待人工确认＝证据不足或需核实。相关技术线索只说明有关联，不能直接认定熟练。</p>
-${
-  notMetItems.length > 0
-    ? `<p class="sub"><b class="red">不符合（${notMetItems.length} 条）：</b>${notMetItems.map((item) => esc(item.text)).join('、')}</p>`
-    : ''
-}
-${
-  metItems.length > 0
-    ? `<table>
-  <thead><tr><th style="width:96px">档位</th><th>岗位要求</th><th>依据</th></tr></thead>
-  <tbody>
-    ${metItems.map((item) => `
-    <tr>
-      <td><span class="tag">${esc(TIER_LABELS[item.gate_tier || ''] || '—')}</span></td>
-      <td>${esc(item.text)}</td>
-      <td class="sub">${item.resume_basis ? esc(item.resume_basis) : '—'}</td>
-    </tr>`).join('')}
-  </tbody>
-</table>`
-    : '<p class="sub">本次没有判定为「符合」的条目。</p>'
-}`);
-  }
-  if (undetermined.length > 0) {
-    out.push(`
-<h2>系统不判定，请人工确认</h2>
-${bullets(undetermined.map((entry) => `${entry.type}：${entry.text}${entry.note ? `（${entry.note}）` : ''}`))}
-<p class="sub">这类要求（学历形式、年龄、出差意愿等）机器无法从简历确认，系统不替 HR 下结论，也不据此扣分。</p>`);
+  const statusOf = (item: (typeof checklist)[number]) => item.effective_status || item.status;
+  const countOf = (status: string) => checklist.filter((item) => statusOf(item) === status).length;
+  const records = a.work_history?.employment_records || [];
+  const experience = relevantExperienceSummary(records, a.work_history?.total_years);
+  const verdict = reportCoreVerdict(a);
+  const questions = buildInterviewQuestions(a);
+  const weaknesses = uniqText([...(a.weaknesses || []), ...(a.risk_points || [])], 3);
+  const strengths = uniqText([...(a.strengths || []), ...(a.skill_match?.project_match_points || [])], 3);
+  const notMet = checklist.filter((item) => statusOf(item) === 'not_met');
+  const pendingItems = checklist.filter((item) => ['manual_review', 'not_mentioned'].includes(statusOf(item)));
+
+  out.push(`
+<header class="hero">
+  <div class="hero-main">
+    <div class="kicker">候选人分析报告</div>
+    <h1>${esc(name)}</h1>
+    <div class="meta">生成日期 ${new Date().toISOString().slice(0, 10)} · 岗位相关经验 ${esc(experience)}</div>
+  </div>
+  <div class="hero-score">
+    <div class="num">${esc(a.final_score)}<span class="den"> / 100</span></div>
+    <div class="rec">${esc(recommendation)}${fitTag ? ` · ${esc(fitTag)}` : ''}</div>
+    ${fitGrade ? `<div class="grade">${esc(fitGrade)}</div>` : ''}
+  </div>
+</header>`);
+
+  if (verdict.summary) {
+    out.push(`<div class="verdict"><div class="label">核心判定</div><p>${esc(verdict.summary)}</p>${verdict.notice ? `<p class="verdict-notice">${esc(verdict.notice)}</p>` : ''}</div>`);
   }
 
-  // 真实性核验（只读）：文件里没有折叠按钮，所以这里全量导出，并保留 notice 的定性说明。
-  // 标题不带"（只读，不参与评分）"——只读这件事由下方口径行说明，标题保持干净。
-  // 0 命中时整段不输出：文件里没有"展开"按钮，「核验规则全部跑完，未发现…」这种空结论
-  // 对读者只有噪音（界面上那行绿字仍然保留，信息不丢）。
-  const credibility = a.credibility;
-  const credibilityFindings = credibility?.findings || [];
-  if (credibility?.enabled && credibilityFindings.length > 0) {
-    const levelLabels: Record<string, string> = { red_flag: '需优先核实', review: '待核实', info: '提示' };
-    const srcLabels: Record<string, string> = { resume: '简历原文', report: '报告表述' };
-    const items = credibilityFindings;
-    const counts = credibility.counts || { red_flag: 0, review: 0, info: 0 };
-    out.push(`
-<h2>真实性核验</h2>
-<p class="sub">${esc(credibility.notice || '核验结果只用于提示，不构成对候选人的任何结论。')}
-已跑 ${esc(String(credibility.checks_run))} 条规则：需优先核实 ${counts.red_flag} · 待核实 ${counts.review} · 提示 ${counts.info}。</p>
-${
-  items
-    .map(
-      (item) => `
-<p><span class="tag">${esc(levelLabels[item.level] || item.level)}</span> <b>${esc(item.title)}</b>
-<span class="sub">（${esc(srcLabels[String(item.source || 'report')] || '报告表述')}）</span><br>
-${esc(item.detail)}<br>
-<span class="sub">证据：${esc(item.evidence)}</span>${
-        item.quote ? `<br><span class="sub">原文引用：${esc(item.quote)}</span>` : ''
-      }<br>
-<span class="sub">面试该问：${esc(item.ask)}</span></p>`,
-    )
-    .join('')
-}
-<p class="sub">核验口径：${esc(credibility.version)}（只读字段，不参与分数与等级）</p>`);
-  }
+  out.push(`
+<div class="cards">
+  <div class="card"><div class="k">综合得分</div><div class="v green">${esc(a.final_score)}<span class="den"> / 100</span></div><div class="s">${esc(fitGrade || '按简历原文证据计分')}</div></div>
+  <div class="card"><div class="k">招聘建议</div><div class="v">${esc(recommendation)}</div><div class="s">${esc(pending ? '证据待核实' : fitTag || '按综合得分分档')}</div></div>
+  <div class="card"><div class="k">岗位相关经验</div><div class="v small">${esc(experience)}</div><div class="s">职责重合 ${esc(a.work_history?.responsibility_match || '未提供')}</div></div>
+  <div class="card"><div class="k">简历美化程度</div><div class="v small purple">${esc(a.ai_risk_level || '未评估')}</div><div class="s">${esc(a.ai_risk_label || '未发现明显美化痕迹')}</div></div>
+</div>
+<p class="band">${pending ? '当前得分仅反映已提供证据，不作为招聘结论。' : `招聘建议按综合得分：${esc(HIRING_BAND_NOTE)}`}</p>`);
 
-  // 无问题时不再输出"已核查 N 项要求，全部通过"这种空结论：导出的报告是给 HR 与用人部门看的，
-  // 没有检出问题就不占版面（界面上那行绿字仍然保留）。
-  const av = a.agent_validation;
-  if (av && agentValidationNeedsReview(av)) {
-    out.push(`
-<h2>Agent 校验</h2>
-<p class="sub">${esc(agentValidationStatus(av))}</p>
-<table>
-  <thead><tr><th style="width:140px">问题类型</th><th>问题</th><th>修正</th></tr></thead>
-  <tbody>
-    ${av.issues.map((issue) => `
-    <tr>
-      <td><span class="tag">${esc(AGENT_RULE_LABELS[issue.rule] || '')}</span></td>
-      <td class="red">${esc(issue.problem)}</td>
-      <td class="green">${esc(issue.fix)}</td>
-    </tr>`).join('')}
-  </tbody>
-</table>`);
-  }
+  out.push(`
+<section class="qa">
+  <h2>面试建议提问</h2>
+  <ol class="questions">${questions.map((question, index) => `<li><span class="qnum">${index + 1}</span>${esc(question)}</li>`).join('')}</ol>
+  <p class="sub">根据简历中的履历、项目与待核实要求生成，供面试官按顺序提问。</p>
+</section>`);
+
+
 
   const bs = a.basic_screening;
+  const education = (a.education_history || [])[0];
   out.push(`
-<h2>基础信息筛选</h2>
-<table>
-  <tr><td class="lab">姓名</td><td>${esc(name)}</td><td class="lab">性别</td><td>${esc(bs.gender)}</td><td class="lab">年龄</td><td>${esc(bs.age)}</td></tr>
-  <tr><td class="lab">籍贯</td><td>${esc(bs.native_place)}</td><td class="lab">工作所在地</td><td>${esc(bs.work_location)}</td><td class="lab">期望薪资</td><td>${esc(bs.salary_expectation)}</td></tr>
-</table>`);
+<section>
+  <h2>基础信息与教育</h2>
+  <table class="compact">
+    <tr><td class="lab">姓名</td><td>${esc(name)}</td><td class="lab">性别</td><td>${esc(bs?.gender || '未提供')}</td><td class="lab">年龄</td><td>${esc(bs?.age || '未提供')}</td></tr>
+    <tr><td class="lab">所在地</td><td>${esc(bs?.work_location || '未提供')}</td><td class="lab">期望薪资</td><td>${esc(bs?.salary_expectation || '未提供')}</td><td class="lab">学历</td><td>${esc(education?.degree || '未提供')}</td></tr>
+    ${education ? `<tr><td class="lab">院校</td><td>${esc(education.school_name)}</td><td class="lab">专业</td><td>${esc(education.major)}</td><td class="lab">毕业</td><td>${esc(education.graduation_year)}</td></tr>` : ''}
+  </table>
+</section>`);
 
-  if (a.education_history?.length > 0) {
-    out.push(`
-<h2>教育经历</h2>
-<table>
-  <thead><tr><th style="width:64px">学历</th><th>院校</th><th style="width:100px">层次</th><th>专业</th><th style="width:80px">毕业时间</th></tr></thead>
-  <tbody>
-    ${a.education_history.map((edu) => `
-    <tr><td><b>${esc(edu.degree)}</b></td><td>${esc(edu.school_name)}</td><td>${esc(edu.school_tier)}</td><td>${esc(edu.major)}</td><td>${esc(edu.graduation_year)}</td></tr>`).join('')}
-  </tbody>
-</table>`);
-  }
-
-  const wh = a.work_history;
   out.push(`
-<h2>工作履历</h2>
-<table>
-  <tr><td class="lab">总工作年限</td><td>${esc(wh.total_years)}</td><td class="lab">相关岗位年限</td><td>${esc(wh.relevant_years)}</td></tr>
-  <tr><td class="lab">职责重合度</td><td>${esc(wh.responsibility_match)}</td><td class="lab">行业匹配</td><td>${esc(wh.industry_match)}</td></tr>
-  <tr><td class="lab">公司背景</td><td>${esc(wh.company_background)}</td><td class="lab">岗位层级</td><td>${esc(wh.seniority)}</td></tr>
-  <tr><td class="lab">带人规模</td><td>${esc(wh.team_size)}</td><td class="lab">跳槽稳定性</td><td>${esc(wh.stability)}</td></tr>
-  <tr><td class="lab">空窗期核算</td><td colspan="3">${esc(wh.employment_gaps)}</td></tr>
-</table>`);
+<section>
+  <h2>工作履历</h2>
+  <div class="facts">
+    <span><b>总工作年限</b>${esc(a.work_history?.total_years || '未提供')}</span>
+    <span><b>岗位相关经验</b>${esc(experience)}</span>
+    <span><b>职责重合</b>${esc(a.work_history?.responsibility_match || '未提供')}</span>
+    <span><b>跳槽稳定性</b>${esc(a.work_history?.stability || '未提供')}</span>
+  </div>
+  ${records.length > 0 ? `<table class="compact">
+    <thead><tr><th>公司</th><th>岗位</th><th style="width:110px">起止</th><th style="width:64px">时长</th></tr></thead>
+    <tbody>${records.slice(0, 6).map((record) => `
+      <tr><td>${esc(record.company_name)}</td><td>${esc(record.job_title)}</td><td>${esc(record.start_date)} ~ ${esc(record.end_date)}</td><td>${esc(record.duration)}</td></tr>`).join('')}
+    </tbody>
+  </table>` : ''}
+  ${a.work_history?.employment_gaps && !/^未提供|无空窗|无明显/.test(a.work_history.employment_gaps) ? `<p class="sub">空窗期：${esc(a.work_history.employment_gaps)}</p>` : ''}
+</section>`);
 
-  const records = wh.employment_records || [];
-  if (records.length > 0) {
+  if (weaknesses.length > 0) {
+    out.push(`<section><h2>关键短板</h2><ul class="tight">${weaknesses.map((item) => `<li>${esc(item)}</li>`).join('')}</ul></section>`);
+  }
+
+  const blockers = (a.gate_blockers || []).slice(0, 3);
+  if (blockers.length > 0) {
+    out.push(`<section><h2>硬门槛提示</h2><ul class="tight">${blockers.map((blocker) => `<li>${esc(blocker.text)}：<span class="red">${esc(blocker.evidence_label)}</span></li>`).join('')}</ul></section>`);
+  }
+
+  if (strengths.length > 0) {
+    out.push(`<section><h2>匹配亮点</h2><ul class="tight">${strengths.map((item) => `<li>${esc(item)}</li>`).join('')}</ul></section>`);
+  }
+
+  if (checklist.length > 0) {
     out.push(`
-<table>
-  <thead><tr><th>公司</th><th>岗位</th><th style="width:130px">起止</th><th style="width:80px">时长</th></tr></thead>
-  <tbody>
-    ${records.map((record) => `
-    <tr><td>${esc(record.company_name)}</td><td>${esc(record.job_title)}</td><td>${esc(record.start_date)} ~ ${esc(record.end_date)}</td><td>${esc(record.duration)}</td></tr>`).join('')}
-  </tbody>
-</table>`);
+<section>
+  <h2>岗位要求核对</h2>
+  <p class="chips">
+    <span>共 ${checklist.length} 条</span>
+    <span class="ok">已满足 ${countOf('met')}</span>
+    <span class="warn">部分满足 ${countOf('manual_review')}</span>
+    <span class="muted">未提及 ${countOf('not_mentioned')}</span>
+    ${countOf('not_met') > 0 ? `<span class="bad">不符合 ${countOf('not_met')}</span>` : ''}
+  </p>
+  ${notMet.length > 0 ? `<p class="sub"><b class="red">不符合：</b>${notMet.slice(0, 4).map((item) => esc(item.text)).join('；')}</p>` : ''}
+  ${pendingItems.length > 0 ? `<p class="sub"><b>需重点核实：</b>${pendingItems.slice(0, 4).map((item) => esc(item.text)).join('；')}${pendingItems.length > 4 ? ' 等' : ''}</p>` : ''}
+  ${(a.undetermined_requirements || []).length > 0 ? `<p class="sub"><b>待人工确认：</b>${(a.undetermined_requirements || []).slice(0, 4).map((entry) => esc(entry.text)).join('；')}</p>` : ''}
+  <p class="sub">未提及不等于不符合；面试时按下发要求逐条确认。</p>
+</section>`);
   }
 
-  out.push(`<h2>匹配亮点</h2>${bullets(a.strengths)}`);
-  if (a.skill_match.project_match_points?.length > 0) {
-    out.push(`<h3>项目匹配点</h3>${bullets(a.skill_match.project_match_points)}`);
-  }
-  out.push(`<h2>短板与风险</h2><h3>短板不足</h3>${bullets(a.weaknesses)}<h3>招聘风险预警</h3>${bullets(a.risk_points)}`);
-  out.push(`<h2>专业技能匹配</h2><h3>硬技能与工具</h3>${bullets(a.skill_match.hard_skills)}<h3>软实力</h3>${bullets(a.skill_match.soft_skills)}`);
-  out.push(`<h2>竞争力加分项</h2>${bullets(a.bonus_items)}<h3>证书资质</h3>${bullets(a.certificates)}`);
-  if (a.role_specific_assessment?.length > 0) {
-    out.push(`<h2>岗位定制判断</h2>${bullets(a.role_specific_assessment)}`);
-  }
-  if (a.deduction_reasons?.length > 0) {
-    out.push(
-      `<h2>美化程度判断依据</h2>` +
-        (a.ai_deduction > 0
-          ? ''
-          : `<p class="sub">以下是模型给出的“疑似 AI 包装”语言特征。该项当前<strong>不参与扣分</strong>——风格印象没有可核对的对象，是否采信请 HR 自行判断。</p>`) +
-        bullets(a.deduction_reasons),
-    );
-  }
 
-  if (markers && markers.annotations?.length > 0) {
+  const findings = (a.credibility?.findings || []).filter((item) => item.level === 'red_flag' || item.level === 'review');
+  const agentIssues = a.agent_validation && agentValidationNeedsReview(a.agent_validation) ? a.agent_validation.issues.slice(0, 3) : [];
+  if (findings.length > 0 || agentIssues.length > 0) {
     out.push(`
-<h2>简历标记要点</h2>
-<p class="sub">匹配重点 ${esc(markers.summary.highlights)} 处 · 待核实 ${esc(markers.summary.risks)} 处${markers.summary.verify_count ? ` · 学历待核实 ${esc(markers.summary.verify_count)} 处` : ''}</p>
-<table>
-  <thead><tr><th style="width:90px">类型</th><th>引用原文</th><th style="width:32%">HR 说明</th></tr></thead>
-  <tbody>
-    ${markers.annotations.map((marker) => `
-    <tr><td><b class="blue">${esc(MARKER_LABELS[marker.category] || marker.category)}</b></td><td>${esc(marker.quote)}</td><td class="sub">${esc(marker.reason)}</td></tr>`).join('')}
-  </tbody>
-</table>`);
+<section class="appendix">
+  <h2>核验提示（不影响分数）</h2>
+  ${findings.slice(0, 3).map((item) => `<p><b>${esc(item.title)}</b>：${esc(clip(item.detail, 90))}${item.ask ? ` <span class="sub">建议问：${esc(clip(item.ask, 60))}</span>` : ''}</p>`).join('')}
+  ${agentIssues.length > 0 ? `<ul class="tight">${agentIssues.map((issue) => `<li>${esc(issue.problem)}</li>`).join('')}</ul>` : ''}
+</section>`);
   }
 
-  out.push(`<p class="notice">本报告由 AI 简历筛选系统生成，Agent 已按 5 项规则自检；结论仅供招聘决策参考。</p>`);
+  out.push(`<p class="notice">本报告由 AI 简历筛选系统生成，结论仅供招聘决策参考；标记与核验信息不改变原始简历。</p>`);
   return out.join('\n');
 }
 
 function wrapDocument(inner: string, title: string): string {
-  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>${esc(title)}</title><style>${DOC_STYLE}</style></head><body><div class="page">${inner}</div></body></html>`;
-}
-
-function printDocument(html: string) {
-  const iframe = document.createElement('iframe');
-  iframe.style.position = 'fixed';
-  iframe.style.right = '0';
-  iframe.style.bottom = '0';
-  iframe.style.width = '0';
-  iframe.style.height = '0';
-  iframe.style.border = '0';
-  document.body.appendChild(iframe);
-  const doc = iframe.contentWindow?.document;
-  if (!doc) {
-    iframe.remove();
-    return;
-  }
-  doc.open();
-  doc.write(html);
-  doc.close();
-  const win = iframe.contentWindow;
-  if (win) {
-    win.focus();
-    setTimeout(() => {
-      win.print();
-      setTimeout(() => iframe.remove(), 1000);
-    }, 250);
-  } else {
-    iframe.remove();
-  }
+  return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>${esc(title)}</title><style>${REPORT_EXPORT_STYLE}</style></head><body><div class="page">${inner}</div></body></html>`;
 }
 
 function downloadWord(html: string, name: string) {
@@ -386,7 +250,7 @@ export async function captureReportPng(opts: {
     markers = null;
   }
   const inner = buildReportInner({ analysis: opts.analysis, candidateName: opts.candidateName, markers });
-  const captureHtml = `<style>${DOC_STYLE}</style><div class="page">${inner}</div>`;
+  const captureHtml = `<style>${REPORT_EXPORT_STYLE}</style><div class="page">${inner}</div>`;
 
   const holder = document.createElement('div');
   // 与 ReportExportCenter 的隐藏捕获容器保持一致的离屏方式：
@@ -425,112 +289,164 @@ export async function downloadReportImage(opts: {
   return true;
 }
 
-export default function ReportExportCenter({
-  analysis,
-  candidateName,
-  resumeId,
-}: {
+export type ReportExportHandle = {
+  exportReport: (format: ExportFormat, signal?: AbortSignal) => Promise<void>;
+};
+
+type ReportExportCenterProps = {
   analysis: HrAnalysis;
   candidateName: string;
   resumeId: string;
-}) {
+  /** 外部弹层通过 ref.exportReport(format) 启动导出。 */
+  onRequestExport?: (format: ExportFormat) => void;
+};
+
+const ReportExportCenter = forwardRef<ReportExportHandle, ReportExportCenterProps>(function ReportExportCenter(
+  { analysis, candidateName, resumeId, onRequestExport },
+  ref,
+) {
   const [busy, setBusy] = useState<ExportFormat | null>(null);
+  const activeExport = useRef<object | null>(null);
+  const [exportError, setExportError] = useState('');
   const [markers, setMarkers] = useState<ResumeReviewData | null>(null);
-  const [captureHtml, setCaptureHtml] = useState('');
-  const captureRef = useRef<HTMLDivElement>(null);
 
   // 标记数据懒加载：首次导出才请求，失败不阻断报告导出
-  async function ensureMarkers(): Promise<ResumeReviewData | null> {
+  async function ensureMarkers(signal?: AbortSignal): Promise<ResumeReviewData | null> {
     if (markers) return markers;
     try {
-      const data = await fetchResumeReviewMarkers(resumeId, analysis as unknown as Record<string, unknown>, candidateName);
+      const data = await fetchResumeReviewMarkers(resumeId, analysis as unknown as Record<string, unknown>, candidateName, signal);
+      signal?.throwIfAborted();
       setMarkers(data);
       return data;
     } catch {
+      signal?.throwIfAborted();
       return null;
     }
   }
 
-  async function handleExport(format: ExportFormat) {
-    if (busy) return;
-    setBusy(format);
-    try {
-      const markerData = await ensureMarkers();
-      const name = candidateName || analysis.candidate_name || '候选人';
-      const inner = buildReportInner({ analysis, candidateName, markers: markerData });
-      if (format === 'png') {
-        setCaptureHtml(`<style>${DOC_STYLE}</style><div class="page">${inner}</div>`);
-        return; // busy 在截图完成后释放
-      }
-      if (format === 'pdf') {
-        printDocument(wrapDocument(inner, `候选人分析报告-${name}`));
-      } else {
-        downloadWord(wrapDocument(inner, `候选人分析报告-${name}`), name);
-      }
-    } finally {
-      if (format !== 'png') setBusy(null);
-    }
-  }
-
-  useEffect(() => {
-    if (!captureHtml || !captureRef.current) return;
+  function captureImage(inner: string, signal?: AbortSignal) {
+    const throwIfAborted = () => {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    };
     const name = candidateName || analysis.candidate_name || '候选人';
-    html2canvas(captureRef.current, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false })
-      .then((canvas) => canvas.toBlob((img) => {
-        if (!img) return;
-        const url = URL.createObjectURL(img);
+    const html = `<style>${REPORT_EXPORT_STYLE}</style><div class="page">${inner}</div>`;
+    const holder = document.createElement('div');
+    holder.style.cssText = 'position:fixed;left:-99999px;top:0;width:800px;background:#ffffff;';
+    holder.innerHTML = html;
+    document.body.appendChild(holder);
+
+    return html2canvas(holder, { scale: 2, backgroundColor: '#ffffff', useCORS: true, logging: false })
+      .then((canvas) => {
+        throwIfAborted();
+        return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+      })
+      .then((blob) => {
+        throwIfAborted();
+        if (!blob) throw new Error('图片生成失败，请稍后重试。');
+        const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a');
         anchor.href = url;
         anchor.download = `候选人分析报告-${name}.jpg`;
         anchor.click();
-        URL.revokeObjectURL(url);
-      }, 'image/jpeg', 0.9))
-      .catch(() => printDocument(captureHtml)) // 截图失败回退打印对话框
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      })
+      .catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        throw error instanceof Error ? error : new Error('图片生成失败，请稍后重试。');
+      })
       .finally(() => {
-        setCaptureHtml(''); // 清空以卸载隐藏容器，并保证下次导出能重新触发
-        setBusy(null);
+        holder.remove();
       });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [captureHtml]);
+  }
+
+  async function handleExport(format: ExportFormat, signal?: AbortSignal) {
+    signal?.throwIfAborted();
+    if (activeExport.current !== null) {
+      const message = '导出正在进行中，请稍后再试。';
+      setExportError(message);
+      throw new Error(message);
+    }
+    const attempt = {};
+    activeExport.current = attempt;
+    const release = () => {
+      if (activeExport.current !== attempt) return;
+      activeExport.current = null;
+      setBusy(null);
+    };
+    signal?.addEventListener('abort', release, { once: true });
+    setBusy(format);
+    setExportError('');
+    try {
+      const markerData = await ensureMarkers(signal);
+      signal?.throwIfAborted();
+      const name = candidateName || analysis.candidate_name || '候选人';
+      const inner = buildReportInner({ analysis, candidateName, markers: markerData });
+      if (format === 'png') {
+        await captureImage(inner, signal);
+      } else if (format === 'pdf') {
+        const title = `候选人分析报告-${name}`;
+        await downloadReportPdf(wrapDocument(inner, title), title, 'analysis', { signal });
+      } else {
+        downloadWord(wrapDocument(inner, `候选人分析报告-${name}`), name);
+      }
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (error instanceof DOMException && error.name === 'AbortError') throw error;
+      const message = error instanceof Error ? error.message : '导出失败，请稍后重试。';
+      setExportError(message);
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', release);
+      release();
+    }
+  }
+
+  useImperativeHandle(ref, () => ({ exportReport: handleExport }));
+
+  const requestExport = (format: ExportFormat) => {
+    if (onRequestExport) {
+      onRequestExport(format);
+      return;
+    }
+    void handleExport(format).catch(() => {
+      /* 错误已写入 exportError */
+    });
+  };
 
   return (
     <>
       <div className="flex flex-wrap gap-1.5">
         <button
           type="button"
-          onClick={() => handleExport('png')}
+          onClick={() => requestExport('pdf')}
           disabled={busy !== null}
-          className={`${BUTTON_CLASS} bg-[#3e6fd3] text-white hover:bg-[#2f5cb8]`}
-        >
-          {busy === 'png' ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : <CameraIcon className="size-3.5" />}
-          导出图片
-        </button>
-        <button
-          type="button"
-          onClick={() => handleExport('pdf')}
-          disabled={busy !== null}
-          className={`${BUTTON_CLASS} border border-[#d5dde9] bg-white text-[#2c394f] hover:bg-[#f3f6fa]`}
+          className={`${BUTTON_CLASS} bg-ink text-white hover:bg-brand-hover`}
         >
           {busy === 'pdf' ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : <FileTextIcon className="size-3.5" />}
-          打印 PDF
+          {busy === 'pdf' ? '正在导出 PDF…' : '导出 PDF'}
         </button>
         <button
           type="button"
-          onClick={() => handleExport('doc')}
+          onClick={() => requestExport('png')}
           disabled={busy !== null}
-          className={`${BUTTON_CLASS} border border-[#d5dde9] bg-white text-[#2c394f] hover:bg-[#f3f6fa]`}
+          className={`${BUTTON_CLASS} border border-line-strong bg-white text-ink hover:bg-mist`}
+        >
+          {busy === 'png' ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : <CameraIcon className="size-3.5" />}
+          {busy === 'png' ? '正在导出图片…' : '导出图片'}
+        </button>
+        <button
+          type="button"
+          onClick={() => requestExport('doc')}
+          disabled={busy !== null}
+          className={`${BUTTON_CLASS} border border-line-strong bg-white text-ink hover:bg-mist`}
         >
           {busy === 'doc' ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : <DownloadIcon className="size-3.5" />}
-          导出 Word
+          {busy === 'doc' ? '正在导出 Word…' : '导出 Word'}
         </button>
       </div>
-      {captureHtml && (
-        <div
-          ref={captureRef}
-          style={{ position: 'fixed', left: -99999, top: 0, width: 800, backgroundColor: '#ffffff' }}
-          dangerouslySetInnerHTML={{ __html: captureHtml }}
-        />
-      )}
+      {exportError && <p role="alert" className="mt-2 text-xs text-bad">{exportError}</p>}
     </>
   );
-}
+});
+
+export default ReportExportCenter;

@@ -1,0 +1,46 @@
+"""Target metadata for versioned requirement/evidence records (no runtime switch)."""
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from db_models import Base
+
+metadata = sa.MetaData()
+# Copy FK targets for resolution only; canonical migration metadata merges by name.
+for name in ('users', 'resumes', 'jobs', 'analysis_tasks', 'analyses'):
+    Base.metadata.tables[name].to_metadata(metadata)
+
+requirements = sa.Table('job_requirements', metadata,
+    sa.Column('id', UUID(), primary_key=True),
+    sa.Column('job_id', UUID(), nullable=False),
+    sa.Column('owner_user_id', UUID(), nullable=False),
+    sa.Column('snapshot_version', sa.String(64), nullable=False),
+    sa.Column('requirement_key', sa.String(128), nullable=False),
+    sa.Column('text', sa.Text(), nullable=False),
+    sa.Column('category', sa.String(64)), sa.Column('dimension', sa.String(64)),
+    sa.Column('hard_requirement', sa.Boolean(), nullable=False, server_default=sa.text('false')),
+    sa.Column('logic', sa.String(8), nullable=False, server_default='AND'),
+    sa.Column('sort_order', sa.Integer(), nullable=False, server_default='0'),
+    sa.Column('payload', JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    sa.CheckConstraint("logic IN ('AND','OR')", name='ck_requirements_logic'),
+    sa.UniqueConstraint('job_id','snapshot_version','requirement_key', name='uq_requirement_snapshot_key'),
+    sa.UniqueConstraint('id','owner_user_id', name='uq_requirement_id_owner'),
+    sa.ForeignKeyConstraint(['job_id','owner_user_id'], ['jobs.id','jobs.owner_user_id'], ondelete='RESTRICT', name='fk_requirement_job_owner'),
+)
+evidence = sa.Table('evidence_assessments', metadata,
+    sa.Column('id', UUID(), primary_key=True),
+    sa.Column('analysis_id', UUID(), nullable=False),
+    sa.Column('requirement_id', UUID(), nullable=False),
+    sa.Column('owner_user_id', UUID(), nullable=False),
+    sa.Column('status', sa.String(24), nullable=False),
+    sa.Column('effective_status', sa.String(24), nullable=False),
+    sa.Column('reason', sa.Text()),
+    sa.Column('source_quotes', JSONB(), nullable=False, server_default=sa.text("'[]'::jsonb")),
+    sa.Column('payload', JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")),
+    sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+    sa.CheckConstraint("status IN ('met','not_met','manual_review','not_mentioned')", name='ck_evidence_status'),
+    sa.CheckConstraint("effective_status IN ('met','not_met','manual_review','not_mentioned')", name='ck_evidence_effective_status'),
+    sa.UniqueConstraint('analysis_id','requirement_id', name='uq_evidence_analysis_requirement'),
+    sa.ForeignKeyConstraint(['analysis_id','owner_user_id'], ['analyses.id','analyses.owner_user_id'], ondelete='RESTRICT', name='fk_evidence_analysis_owner'),
+    sa.ForeignKeyConstraint(['requirement_id','owner_user_id'], ['job_requirements.id','job_requirements.owner_user_id'], ondelete='RESTRICT', name='fk_evidence_requirement_owner'),
+)
+sa.Index('ix_evidence_owner_analysis', evidence.c.owner_user_id, evidence.c.analysis_id)

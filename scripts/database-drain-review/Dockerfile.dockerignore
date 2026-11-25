@@ -1,0 +1,14 @@
+**
+!apps/
+!apps/backend/
+!apps/backend/*.py
+apps/backend/test_*.py
+apps/backend/smoke_test_*.py
+!apps/backend/requirements.txt
+!apps/backend/school_tiers.json
+!apps/backend/tools/
+!apps/backend/tools/*.py
+!scripts/
+!scripts/database-drain-review/
+!scripts/database-drain-review/*.py
+!scripts/database-drain-review/start.sh

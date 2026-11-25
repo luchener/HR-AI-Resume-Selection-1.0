@@ -124,7 +124,7 @@ export async function createArchive(
     analysis?: Record<string, unknown>;
     analysisResult?: string;
   },
-): Promise<ArchiveRecord> {
+): Promise<{ record: ArchiveRecord; created: boolean }> {
   const response = await fetch(`${API_URL}/api/v1/archives`, {
     method: 'POST',
     headers: authHeaders({ 'Content-Type': 'application/json' }),
@@ -142,7 +142,7 @@ export async function createArchive(
   if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || `归档失败（HTTP ${response.status}）`); }
   const payload = (await response.json()) as { data?: ArchiveRecord };
   if (!payload.data) throw new Error('服务未返回归档记录。');
-  return payload.data;
+  return { record: payload.data, created: response.status === 201 };
 }
 
 /** 人才库列表（仅 active），支持姓名/岗位/分类/标签筛选与排序。 */

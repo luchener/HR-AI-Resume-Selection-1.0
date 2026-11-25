@@ -22,6 +22,21 @@ from config import RESUMES_DIR, JOBS_DIR, ARCHIVES_DIR
 import safe_fs
 
 
+def _resume_path(resume_id: str) -> str:
+    safe_id = safe_fs.safe_component(resume_id)
+    return os.path.join(RESUMES_DIR, f"{safe_id}.json") if safe_id else ""
+
+
+def _job_path(job_id: str) -> str:
+    safe_id = safe_fs.safe_component(job_id)
+    return os.path.join(JOBS_DIR, f"{safe_id}.json") if safe_id else ""
+
+
+def _archive_path(archive_id: str) -> str:
+    safe_id = safe_fs.safe_component(archive_id)
+    return os.path.join(ARCHIVES_DIR, f"{safe_id}.json") if safe_id else ""
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -101,7 +116,10 @@ def get_resume(resume_id: str, user_id: str = "") -> Optional[dict]:
     读取简历完整记录。
     当 user_id 非空时校验归属：不匹配时返回 None（跨用户隔离）。
     """
-    record = _read_json(os.path.join(RESUMES_DIR, f"{resume_id}.json"))
+    path = _resume_path(resume_id)
+    if not path:
+        return None
+    record = _read_json(path)
     if record is None:
         return None
     if user_id and record.get("user_id") != user_id:
@@ -171,7 +189,9 @@ def delete_resume(resume_id: str, user_id: str = "") -> bool:
     删除简历原文（含归属校验）。返回是否真的删除。
     注意：调用方需自行处理引用该简历的归档（通常先移入回收站）。
     """
-    path = os.path.join(RESUMES_DIR, f"{resume_id}.json")
+    path = _resume_path(resume_id)
+    if not path:
+        return False
     record = _read_json(path)
     if record is None:
         return False
@@ -187,7 +207,9 @@ def delete_resume(resume_id: str, user_id: str = "") -> bool:
 
 def set_resume_original(resume_id: str, meta: dict) -> bool:
     """把原始文件元信息（文件名/大小/哈希/留存时间）写入简历记录。"""
-    path = os.path.join(RESUMES_DIR, f"{resume_id}.json")
+    path = _resume_path(resume_id)
+    if not path:
+        return False
     record = _read_json(path)
     if record is None:
         return False
@@ -198,7 +220,9 @@ def set_resume_original(resume_id: str, meta: dict) -> bool:
 
 def delete_job(job_id: str, user_id: str = "") -> bool:
     """删除岗位描述原文（含归属校验）。返回是否真的删除。"""
-    path = os.path.join(JOBS_DIR, f"{job_id}.json")
+    path = _job_path(job_id)
+    if not path:
+        return False
     record = _read_json(path)
     if record is None:
         return False
@@ -239,7 +263,8 @@ def name_by_resume_id() -> dict:
             continue
         for status in ("active", "trashed"):
             for archive_id in bucket.get(status) or []:
-                record = _read_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"))
+                path = _archive_path(archive_id)
+                record = _read_json(path) if path else None
                 if not record:
                     continue
                 resume_id = str(record.get("resume_id") or "")
@@ -260,13 +285,16 @@ def save_job(resume_id: str, content: str, processed: dict, user_id: str) -> str
         "created_at": _now_iso(),
         "processed": processed,
     }
-    _write_json(os.path.join(JOBS_DIR, f"{job_id}.json"), record)
+    _write_json(_job_path(job_id), record)
     return job_id
 
 
 def get_job(job_id: str, user_id: str = "") -> Optional[dict]:
     """读取 JD 完整记录。当 user_id 非空时校验归属。"""
-    record = _read_json(os.path.join(JOBS_DIR, f"{job_id}.json"))
+    path = _job_path(job_id)
+    if not path:
+        return None
+    record = _read_json(path)
     if record is None:
         return None
     if user_id and record.get("user_id") != user_id:
@@ -460,7 +488,7 @@ def save_archive(
         "trashed_at": None,
         "created_at": _now_iso(),
     }
-    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), record)
+    _write_json(_archive_path(archive_id), record)
     _update_archive_index(user_id, archive_id, "add_active")
     return archive_id
 
@@ -481,7 +509,9 @@ def mark_archives_source_purged(resume_ids: set[str], *, dry_run: bool = False) 
             continue
         for status_key in ("active", "trashed"):
             for archive_id in list(buckets.get(status_key, [])):
-                path = os.path.join(ARCHIVES_DIR, f"{archive_id}.json")
+                path = _archive_path(archive_id)
+                if not path:
+                    continue
                 record = _read_json(path)
                 if not record or record.get("source_purged"):
                     continue
@@ -502,7 +532,8 @@ def find_existing_archive(user_id: str, resume_id: str, job_id: str) -> str | No
     user_data = index.get(user_id, {})
     for status_key in ("active", "trashed"):
         for aid in user_data.get(status_key, []):
-            rec = _read_json(os.path.join(ARCHIVES_DIR, f"{aid}.json"))
+            path = _archive_path(aid)
+            rec = _read_json(path) if path else None
             if rec and rec.get("resume_id") == resume_id and rec.get("job_id") == job_id:
                 return aid
     return None
@@ -510,7 +541,10 @@ def find_existing_archive(user_id: str, resume_id: str, job_id: str) -> str | No
 
 def get_archive(archive_id: str, user_id: str = "") -> dict | None:
     """读取归档记录。当 user_id 非空时校验归属。"""
-    record = _read_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"))
+    path = _archive_path(archive_id)
+    if not path:
+        return None
+    record = _read_json(path)
     if record is None:
         return None
     if user_id and record.get("user_id") != user_id:
@@ -526,7 +560,8 @@ def list_archives(user_id: str, status: str = "active") -> list[dict]:
 
     result = []
     for aid in archive_ids:
-        rec = _read_json(os.path.join(ARCHIVES_DIR, f"{aid}.json"))
+        path = _archive_path(aid)
+        rec = _read_json(path) if path else None
         if rec and rec.get("user_id") == user_id:
             result.append(rec)
 
@@ -595,38 +630,46 @@ def get_distinct_categories(user_id: str) -> list[str]:
 
 def soft_delete_archive(archive_id: str, user_id: str) -> bool:
     """软删除：移入回收站。"""
+    path = _archive_path(archive_id)
+    if not path:
+        return False
     rec = get_archive(archive_id, user_id=user_id)
     if not rec or rec.get("status") != "active":
         return False
 
     rec["status"] = "trashed"
     rec["trashed_at"] = _now_iso()
-    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), rec)
+    _write_json(path, rec)
     _update_archive_index(user_id, archive_id, "move_to_trashed")
     return True
 
 
 def restore_archive(archive_id: str, user_id: str) -> bool:
     """从回收站恢复到人才库。"""
+    path = _archive_path(archive_id)
+    if not path:
+        return False
     rec = get_archive(archive_id, user_id=user_id)
     if not rec or rec.get("status") != "trashed":
         return False
 
     rec["status"] = "active"
     rec["trashed_at"] = None
-    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), rec)
+    _write_json(path, rec)
     _update_archive_index(user_id, archive_id, "move_to_active")
     return True
 
 
 def permanent_delete_archive(archive_id: str, user_id: str) -> bool:
     """彻底删除归档记录。"""
+    json_path = _archive_path(archive_id)
+    if not json_path:
+        return False
     rec = get_archive(archive_id, user_id=user_id)
     if not rec or rec.get("status") != "trashed":
         return False
 
     # 删除 JSON 明细
-    json_path = os.path.join(ARCHIVES_DIR, f"{archive_id}.json")
     if os.path.exists(json_path):
         os.remove(json_path)
 
@@ -646,21 +689,27 @@ def empty_trash(user_id: str) -> int:
 
 def update_archive_tags(archive_id: str, user_id: str, custom_tags: list[str]) -> bool:
     """更新自定义标签（仅 active 状态可操作）。"""
+    path = _archive_path(archive_id)
+    if not path:
+        return False
     rec = get_archive(archive_id, user_id=user_id)
     if not rec or rec.get("status") != "active":
         return False
 
     rec["custom_tags"] = custom_tags
-    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), rec)
+    _write_json(path, rec)
     return True
 
 
 def update_archive_category(archive_id: str, user_id: str, category: str) -> bool:
     """更新岗位分类（仅 active 状态可操作）。"""
+    path = _archive_path(archive_id)
+    if not path:
+        return False
     rec = get_archive(archive_id, user_id=user_id)
     if not rec or rec.get("status") != "active":
         return False
 
     rec["category"] = category or rec.get("job_title", "")
-    _write_json(os.path.join(ARCHIVES_DIR, f"{archive_id}.json"), rec)
+    _write_json(path, rec)
     return True

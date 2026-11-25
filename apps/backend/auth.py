@@ -38,6 +38,8 @@ import config
 from config import DATA_DIR
 
 import safe_fs
+import source_drain
+from log_redaction import mask_email
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,23 @@ for _d in (
 # 用户名索引文件：username_lower → user_id，O(1) 查重/查找
 _INDEX_FILE = os.path.join(USERS_DIR, "_index.json")
 _INDEX_LOCK = os.path.join(USERS_DIR, "_index.lock")
+
+
+def _user_record_path(user_id: str) -> str:
+    """Map a user id to one JSON file without allowing path traversal."""
+    component = safe_fs.safe_component(user_id)
+    return os.path.join(USERS_DIR, f"{component}.json") if component else ""
+
+
+def _write_user_record(user: dict) -> bool:
+    """Write a user record only when its ID is a single safe path component."""
+    if not isinstance(user, dict):
+        return False
+    path = _user_record_path(user.get("user_id"))
+    if not path:
+        return False
+    _write_json(path, user)
+    return True
 
 
 def _atomic_replace(tmp: str, path: str) -> None:
@@ -301,7 +320,10 @@ def generate_jwt(user_id: str, username: str) -> str:
     生成 JWT（HS256，7 天过期）。
     payload 带 pwd_ver（密码版本号）：改密后旧 token 自动失效。
     """
-    user = _read_json(os.path.join(USERS_DIR, f"{user_id}.json"))
+    user_path = _user_record_path(user_id)
+    if not user_path:
+        raise ValueError("invalid user_id")
+    user = _read_json(user_path)
     pwd_ver = (user or {}).get("password_version", 1)
     now = time.time()
     payload: dict[str, Any] = {
@@ -347,13 +369,21 @@ def decode_jwt(token: str) -> dict:
         raise _JwtError("JWT missing required claims")
 
     # 无状态吊销：用户被删除 → token 失效；密码被修改 → 旧 token 失效
-    user = _read_json(os.path.join(USERS_DIR, f"{user_id}.json"))
+    user_path = _user_record_path(user_id)
+    if not user_path:
+        raise _JwtError("Token user is invalid")
+    user = _read_json(user_path)
     if user is None:
         raise _JwtError("账户不存在或已被删除，请重新登录")
     if user.get("deleted_at"):
         raise _JwtError("账户不存在或已被删除，请重新登录")
     if payload.get("pwd_ver", 1) != user.get("password_version", 1):
         raise _JwtError("密码已修改，请重新登录")
+    # 冻结必须立即生效：不能等用户下次登录才阻断既有 JWT。
+    # login_policy_check 同时处理自动冻结到期解冻；管理员冻结只能人工解冻。
+    policy, _, _ = login_policy_check(user.get("username") or payload["username"])
+    if policy == "frozen":
+        raise _JwtError("账号已冻结，请联系管理员解冻")
 
     return payload
 
@@ -364,7 +394,8 @@ CAPTCHA_ENABLED = config.CAPTCHA_ENABLED
 
 
 def _captcha_file(captcha_id: str) -> str:
-    return os.path.join(RATE_LIMITS_DIR, f"captcha_{captcha_id}.json")
+    safe_id = safe_fs.safe_component(captcha_id)
+    return os.path.join(RATE_LIMITS_DIR, f"captcha_{safe_id}.json") if safe_id else ""
 
 
 _CAPTCHA_PURGE_INTERVAL = 60.0
@@ -417,6 +448,8 @@ def verify_captcha(captcha_id: str, code: str) -> bool:
     if not captcha_id or not code:
         return False
     path = _captcha_file(captcha_id)
+    if not path:
+        return False
     record = _read_json(path)
     if not record:
         return False
@@ -492,7 +525,8 @@ def create_user(
             "password_version": 1,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        _write_json(os.path.join(USERS_DIR, f"{user_id}.json"), record)
+        if not _write_user_record(record):
+            return None, "用户标识无效"
 
         index[username_lower] = user_id
         _write_index(index)
@@ -508,7 +542,7 @@ def find_user_by_username(username: str) -> Optional[dict]:
     user_id = index.get(username.lower())
     if not user_id:
         return None
-    return _read_json(os.path.join(USERS_DIR, f"{user_id}.json"))
+    return _read_json(_user_record_path(user_id))
 
 
 def find_user_by_email(email: str) -> Optional[dict]:
@@ -549,7 +583,9 @@ def update_password(user_id: str, new_password: str) -> tuple[bool, Optional[str
     if pwd_err:
         return False, pwd_err
 
-    path = os.path.join(USERS_DIR, f"{user_id}.json")
+    path = _user_record_path(user_id)
+    if not path:
+        return False, "用户不存在"
     user = _read_json(path)
     if not user:
         return False, "用户不存在"
@@ -573,7 +609,9 @@ def delete_user(user_id: str, operator: str = "") -> bool:
     软删除用户：保留用户文件与索引，仅标记 deleted_at。
     恢复窗口内可用 restore_user 找回；期间该账号无法登录。
     """
-    path = os.path.join(USERS_DIR, f"{user_id}.json")
+    path = _user_record_path(user_id)
+    if not path:
+        return False
     user = _read_json(path)
     if not user:
         return False
@@ -646,7 +684,8 @@ def restore_user(username: str, window_days: int = DELETED_RESTORE_WINDOW_DAYS) 
         # 恢复后旧 token 全部失效，需重新登录
         user["password_version"] = user.get("password_version", 1) + 1
         user["restored_at"] = datetime.now(timezone.utc).isoformat()
-        _write_json(os.path.join(USERS_DIR, f"{user['user_id']}.json"), user)
+        if not _write_user_record(user):
+            return False, "用户记录异常，无法恢复"
 
     logger.info("[admin] user restored username=%s", username)
     return True, None
@@ -746,9 +785,10 @@ def count_users(keyword: str = "") -> int:
 
 def find_user_by_id(user_id: str) -> Optional[dict]:
     """按 user_id 查找用户。"""
-    if not user_id:
+    path = _user_record_path(user_id)
+    if not path:
         return None
-    return _read_json(os.path.join(USERS_DIR, f"{user_id}.json"))
+    return _read_json(path)
 
 
 def update_user_admin(username: str, is_admin_flag: bool, operator: str = "") -> tuple[bool, Optional[str]]:
@@ -769,7 +809,8 @@ def update_user_admin(username: str, is_admin_flag: bool, operator: str = "") ->
         if not user:
             return False, "用户不存在"
         user["is_admin"] = bool(is_admin_flag)
-        _write_json(os.path.join(USERS_DIR, f"{user['user_id']}.json"), user)
+        if not _write_user_record(user):
+            return False, "用户记录异常，无法更新"
         _rebuild_index()  # 索引本身不含 is_admin，仅确保文件状态一致
 
     logger.info(
@@ -808,7 +849,8 @@ def admin_update_email(username: str, new_email: str, operator: str = "") -> tup
             return False, "该邮箱已被其他用户使用"
         user["email"] = email_clean
         user["email_updated_at"] = datetime.now(timezone.utc).isoformat()
-        _write_json(os.path.join(USERS_DIR, f"{user['user_id']}.json"), user)
+        if not _write_user_record(user):
+            return False, "用户记录异常，无法更新"
 
     logger.info("[admin] user email updated username=%s operator=%s", username, operator or "-")
     return True, None
@@ -1009,6 +1051,7 @@ def prune_user_usage(days: int) -> int:
     return touched
 
 
+@source_drain.writer('scheduled')
 def maybe_prune() -> None:
     """懒清理入口：每日最多执行一次，同时清理审计与使用统计。"""
     if not _prune_due():
@@ -1037,7 +1080,8 @@ def delete_user_audit(operator_id: str, operator_name: str, target_username: str
 # ═══════════════════════════════════════════════════════════════════════
 
 def _usage_path(user_id: str) -> str:
-    return os.path.join(USER_USAGE_DIR, f"{user_id}.json")
+    component = safe_fs.safe_component(user_id)
+    return os.path.join(USER_USAGE_DIR, f"{component}.json") if component else ""
 
 
 def record_user_usage(user_id: str, action: str, count: int = 1) -> None:
@@ -1047,7 +1091,8 @@ def record_user_usage(user_id: str, action: str, count: int = 1) -> None:
 
     count 支持负数，用于回滚"预占"的次数（配额原子化）；计数下限为 0。
     """
-    if not user_id:
+    path = _usage_path(user_id)
+    if not path:
         return
     action = (action or "").strip()
     if action not in ("login", "analysis"):
@@ -1057,11 +1102,11 @@ def record_user_usage(user_id: str, action: str, count: int = 1) -> None:
         return
     day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with _UserLock():
-        data = _read_json(_usage_path(user_id)) or {}
+        data = _read_json(path) or {}
         entry = data.get(day) or {}
         entry[action] = max(0, int(entry.get(action, 0)) + step)
         data[day] = entry
-        _write_json(_usage_path(user_id), data)
+        _write_json(path, data)
 
 
 def get_user_usage(user_id: str, granularity: str = "day", buckets: int = 30) -> dict:
@@ -1078,8 +1123,18 @@ def get_user_usage(user_id: str, granularity: str = "day", buckets: int = 30) ->
     if granularity not in ("day", "month", "year"):
         granularity = "day"
     buckets = max(1, min(int(buckets or 30), 3660))
+    path = _usage_path(user_id)
+    if not path:
+        return {
+            "granularity": granularity,
+            "labels": [],
+            "series": {"login": [], "analysis": [], "total": []},
+            "summary": {"total": 0, "login_total": 0, "analysis_total": 0,
+                        "avg_per_bucket": 0, "peak_label": "", "peak_total": 0,
+                        "active_buckets": 0, "first_usage": "", "last_usage": ""},
+        }
     maybe_prune()  # 保留策略：懒清理过期使用统计
-    data = _read_json(_usage_path(user_id)) or {}
+    data = _read_json(path) or {}
 
     now = datetime.now(timezone.utc)
     if granularity == "year":
@@ -1201,10 +1256,10 @@ def _username_by_id(user_id: str) -> str:
 
 def delete_user_usage(user_id: str) -> None:
     """删除用户时一并清理其使用统计数据。"""
-    if not user_id:
+    path = _usage_path(user_id)
+    if not path:
         return
     with _UserLock():
-        path = _usage_path(user_id)
         if os.path.exists(path):
             try:
                 os.remove(path)
@@ -1847,7 +1902,7 @@ def create_invite_request(
             "sent_at": None,
             "reject_reason": None,
         }
-        _write_json(os.path.join(INVITE_REQUESTS_DIR, f"{request_id}.json"), record)
+        _write_json(_invite_request_path(request_id), record)
         return record, None, 200
 
 
@@ -1867,9 +1922,14 @@ def _find_invite_request_by_email_status(email: str, status: str) -> Optional[di
     return None
 
 
+def _invite_request_path(request_id: str) -> str:
+    safe_id = safe_fs.safe_component(request_id)
+    return os.path.join(INVITE_REQUESTS_DIR, f"{safe_id}.json") if safe_id else ""
+
+
 def get_invite_request(request_id: str) -> Optional[dict]:
-    path = os.path.join(INVITE_REQUESTS_DIR, f"{request_id}.json")
-    return _read_json(path)
+    path = _invite_request_path(request_id)
+    return _read_json(path) if path else None
 
 
 def list_invite_requests(status: str = "pending") -> list[dict]:
@@ -1927,7 +1987,7 @@ def approve_invite_request(request_id: str, admin_user_id: str) -> tuple[Optiona
         req["reviewed_by"] = admin_user_id
         req["reviewed_at"] = datetime.now(timezone.utc).isoformat()
         req["code_hash"] = code_hash
-        _write_json(os.path.join(INVITE_REQUESTS_DIR, f"{request_id}.json"), req)
+        _write_json(_invite_request_path(request_id), req)
         return req, code, 200
 
 
@@ -1945,7 +2005,7 @@ def reject_invite_request(
         req["reviewed_by"] = admin_user_id
         req["reviewed_at"] = datetime.now(timezone.utc).isoformat()
         req["reject_reason"] = str(reason or "").strip()[:500]
-        _write_json(os.path.join(INVITE_REQUESTS_DIR, f"{request_id}.json"), req)
+        _write_json(_invite_request_path(request_id), req)
         return req, None, 200
 
 
@@ -1956,7 +2016,10 @@ def mark_invite_request_sent(request_id: str) -> None:
         return
     req["code_sent"] = True
     req["sent_at"] = datetime.now(timezone.utc).isoformat()
-    _write_json(os.path.join(INVITE_REQUESTS_DIR, f"{request_id}.json"), req)
+    path = _invite_request_path(request_id)
+    if not path:
+        return
+    _write_json(path, req)
 
 
 def resend_invite_request(request_id: str) -> tuple[Optional[str], Optional[str], int]:
@@ -2003,7 +2066,7 @@ def _regenerate_code_for_request(
         )
         req2["code_hash"] = _invite_code_hash(code)
         req2["code_sent"] = False
-        _write_json(os.path.join(INVITE_REQUESTS_DIR, f"{request_id}.json"), req2)
+        _write_json(_invite_request_path(request_id), req2)
         return req2, code, 200
 
 
@@ -2174,7 +2237,8 @@ def reset_password_with_code(email: str, code: str, new_password: str) -> tuple[
     user["password_salt"] = salt
     user["password_version"] = user.get("password_version", 1) + 1
     user["password_updated_at"] = datetime.now(timezone.utc).isoformat()
-    _write_json(os.path.join(USERS_DIR, f"{user['user_id']}.json"), user)
+    if not _write_user_record(user):
+        return False, "用户记录异常，无法重置密码"
     return True, None
 
 
@@ -2207,7 +2271,12 @@ def require_auth() -> None:
     except _JwtError as e:
         raise _AuthError(e.message, 401) from e
 
-    user = _read_json(os.path.join(USERS_DIR, f"{payload['user_id']}.json"))
+    user_path = _user_record_path(payload.get("user_id"))
+    if not user_path:
+        raise _AuthError("Token user is invalid", 401)
+    user = _read_json(user_path)
+    if user is None:
+        raise _AuthError("账户不存在或已被删除，请重新登录", 401)
     g.auth_user = {
         "user_id": payload["user_id"],
         "username": payload["username"],
@@ -2222,7 +2291,7 @@ def require_auth() -> None:
                 "[auth] admin access denied path=%s user=%s email=%s",
                 path,
                 g.auth_user.get("username"),
-                (g.auth_user.get("email") or "") or "-",
+                (g.auth_user.get("email") and mask_email(g.auth_user.get("email"))) or "-",
             )
             raise _AuthError("无权限执行该操作。", 403)
 

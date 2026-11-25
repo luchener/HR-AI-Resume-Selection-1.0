@@ -21,6 +21,8 @@ import {
   UserRoundIcon,
 } from 'lucide-react';
 import { useAuth } from '@/components/workbench/auth-context';
+import BrandMark from '@/components/workbench/brand-mark';
+import EyeCube from '@/components/workbench/eye-cube';
 import { useDialogBehavior } from '@/components/workbench/dialog-behavior';
 import { API_URL } from '@/lib/api/config';
 import {
@@ -102,16 +104,23 @@ export default function LoginPage() {
   const [captchaInput, setCaptchaInput] = useState('');
   // 服务端未启用验证码时（GET 404）跳过前端校验，直接登录
   const [captchaUnavailable, setCaptchaUnavailable] = useState(false);
+  const [captchaLoadError, setCaptchaLoadError] = useState(false);
+  const captchaRequestRef = useRef(0);
+  const captchaLoading = !captcha && !captchaUnavailable && !captchaLoadError;
 
   const loadCaptcha = useCallback(async () => {
+    const request = ++captchaRequestRef.current;
     setCaptcha(null);
     setCaptchaInput('');
     setCaptchaUnavailable(false);
+    setCaptchaLoadError(false);
     try {
-      setCaptcha(await fetchCaptcha());
+      const data = await fetchCaptcha();
+      if (request !== captchaRequestRef.current) return;
+      setCaptcha(data);
+      setCaptchaUnavailable(data === null);
     } catch {
-      // 服务端关闭验证码 → 标记不可用，登录不校验
-      setCaptchaUnavailable(true);
+      if (request === captchaRequestRef.current) setCaptchaLoadError(true);
     }
   }, []);
 
@@ -254,7 +263,7 @@ export default function LoginPage() {
         return;
       }
       if (!captcha && !captchaUnavailable) {
-        setError('验证码加载失败，请点击验证码区域刷新后重试。');
+        setError(captchaLoading ? '验证码正在加载，请稍候。' : '验证码加载失败，请刷新后重试。');
         return;
       }
       if (captcha && !captchaInput.trim()) {
@@ -295,7 +304,7 @@ export default function LoginPage() {
       }
       if (!response.ok) {
         // 登录失败 → 累计次数提示（前端展示用；后端以服务端防爆破计数为准）
-        if (mode === 'login' && response.status !== 423) {
+        if (mode === 'login' && response.status !== 423 && !payload.detail?.includes('验证码')) {
           setLoginFailCount((count) => count + 1);
         }
         // 423 = 账号被冻结：管理员冻结 → 弹窗提示联系管理员；系统自动冻结 → 引导自助解冻
@@ -419,47 +428,114 @@ export default function LoginPage() {
   }
 
   const lockIcon =
-    'absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-sub';
+    'absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-sub';
   const inputCls =
-    'h-12 w-full rounded-md border border-line-soft bg-white pl-10 pr-4 text-sm text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20';
+    'h-[42px] w-full border border-line-strong bg-white pl-9 pr-3 text-[12.5px] text-ink outline-none transition focus:border-ink';
   const disabledInputCls =
-    'h-12 w-full cursor-not-allowed rounded-md border border-line-soft bg-soft pl-10 pr-4 text-sm text-sub outline-none';
+    'h-[42px] w-full cursor-not-allowed border border-line bg-mist pl-9 pr-3 text-[12.5px] text-sub outline-none';
   const errorInputCls =
-    'h-12 w-full rounded-md border border-bad-border bg-bad-soft pl-10 pr-4 text-sm text-ink outline-none transition focus:border-bad focus:ring-2 focus:ring-bad-border';
+    'h-[42px] w-full border border-bad-border bg-bad-soft pl-9 pr-3 text-[12.5px] text-ink outline-none transition focus:border-bad';
+  const captchaError = mode === 'login' && error.includes('验证码') ? error : '';
   const btnPrimary =
-    'flex h-12 w-full items-center justify-center gap-2 rounded-md bg-brand-deep px-5 text-sm font-semibold text-white transition-colors hover:bg-brand-hover disabled:opacity-50';
+    'flex h-[46px] w-full items-center justify-center gap-2 bg-ink px-5 text-[14px] font-medium text-white transition-colors hover:bg-brand-hover disabled:opacity-50';
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-soft px-5 py-10">
-      <div className="w-full max-w-md">
-        <div className="rounded-lg border border-line bg-white p-8 shadow-[0_24px_80px_rgba(19,31,51,0.1)] sm:p-10">
-          <div className="flex size-12 items-center justify-center rounded-lg shadow-[6px_6px_0_var(--color-nav-accent)]">
-            <Image src="/brand/resume-screening-logo.svg" alt="AI 简历智选" width={48} height={48} className="size-12" priority />
+    <div className="flex min-h-screen flex-col bg-soft">
+      <header className="flex h-[68px] shrink-0 items-center justify-between border-b border-line px-5 lg:px-11">
+        <Link href="/" className="flex min-w-0 items-center gap-3">
+          <BrandMark className="size-[30px]" />
+          <span className="min-w-0">
+            <span className="block text-[14.5px] font-semibold leading-tight tracking-[-0.01em] text-ink">AI 简历智选</span>
+            <span className="mt-0.5 block font-mono text-[10.5px] uppercase leading-none tracking-[0.18em] text-sub">
+              Screening workspace
+            </span>
+          </span>
+        </Link>
+      </header>
+
+      <main className="flex-1 lg:grid lg:grid-cols-[minmax(0,1.12fr)_minmax(0,0.88fr)]">
+        <section className="hidden flex-col justify-between border-r border-line bg-soft px-10 py-12 lg:flex lg:px-14 lg:pb-12 lg:pt-16">
+          <div>
+
+            <div className="flex items-start gap-9 xl:gap-10">
+              <div className="min-w-0">
+                <h1 className="text-[76px] font-medium leading-none tracking-[-0.045em] text-ink">AI 简历智选</h1>
+                <p className="mt-[18px] max-w-[34ch] text-[14px] leading-[1.7] text-sub">
+                  把简历、岗位描述与招聘结论放进同一张对照表。
+                </p>
+              </div>
+              <EyeCube className="mt-1 shrink-0" />
+            </div>
+
+            <div className="mt-11 max-w-[480px]">
+              <div className="relative h-px bg-line-strong">
+                <span className="absolute left-0 top-[-1px] h-[3px] bg-ink" style={{ width: '88%' }} />
+                <span className="absolute left-[60%] top-[-4px] h-[9px] w-px bg-line-strong" />
+                <span className="absolute left-[60%] -top-5 -translate-x-1/2 font-mono text-[10px] tracking-[0.06em] text-sub">60</span>
+                <span className="absolute left-[80%] top-[-4px] h-[9px] w-px bg-line-strong" />
+                <span className="absolute left-[80%] -top-5 -translate-x-1/2 font-mono text-[10px] tracking-[0.06em] text-sub">80</span>
+                <span className="absolute left-[88%] top-[-7px] h-[15px] w-px bg-ink" />
+              </div>
+              <div className="mt-3 grid grid-cols-[60fr_20fr_20fr] border-t border-line-soft pt-2 font-mono text-[10px] tracking-[0.06em] text-sub">
+                <span>淘汰 &lt; 60</span>
+                <span>储备 60–79</span>
+                <span className="text-ink">优先 80+</span>
+              </div>
+              <div className="mt-3 flex items-center justify-between font-mono text-[9px] tracking-[0.12em] text-sub">
+                <span>匹配刻度 · 0–100</span>
+                <span>示例 88</span>
+              </div>
+            </div>
+
+            <div className="mt-10 max-w-[460px] border-t border-line">
+              {[
+                ['01', '解析岗位门槛', '从 JD 抽取硬性条件'],
+                ['02', '比对履历证据', '逐条回到简历原文'],
+                ['03', '生成招聘建议', '分数与结论保持同源'],
+              ].map(([code, title, desc]) => (
+                <div key={code} className="flex items-baseline gap-3 border-b border-line-soft py-[14px] text-[13px]">
+                  <span className="w-7 font-mono text-[11px] tracking-[0.16em] text-sub">{code}</span>
+                  <span className="text-ink">{title}</span>
+                  <span className="ml-auto text-[11.5px] text-sub">{desc}</span>
+                </div>
+              ))}
+            </div>
           </div>
+
+          <div className="mt-auto flex max-w-[480px] pt-11">
+            {[
+              ['邀请制', '仅内部账号可用'],
+              ['HTTPS', '生产环境强制加密'],
+            ].map(([value, label], index) => (
+              <div key={value} className={`flex-1 ${index === 0 ? '' : 'border-l border-line pl-5'}`}>
+                <p className="text-[16px] font-medium leading-tight text-ink">{value}</p>
+                <p className="mt-1.5 font-mono text-[11px] tracking-[0.1em] text-sub">{label}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="flex min-h-[calc(100dvh-126px)] items-center justify-center bg-white px-5 py-10 lg:justify-start lg:pl-[72px] lg:pr-11">
+          <div className="w-full max-w-[380px]">
+            <h1 className="sr-only lg:hidden">AI 简历智选登录</h1>
+            <div className="mb-8 flex items-center gap-3 lg:hidden">
+              <BrandMark className="size-8" />
+              <span className="text-[14px] font-semibold text-ink">AI 简历智选</span>
+            </div>
 
           {panel === 'main' && (
             <>
-              <h1 className="mt-6 text-2xl font-semibold text-ink">AI 简历智选</h1>
-              <p className="mt-2 text-sm leading-6 text-body">
-                {mode === 'login' ? '登录后继续使用简历筛选工作台' : '注册一个新账号开始使用'}
+              <p className="font-mono text-[10.5px] font-medium uppercase tracking-[0.18em] text-sub">
+                {mode === 'login' ? 'Sign in' : 'Create account'}
+              </p>
+              <h2 className="mt-5 text-[30px] font-medium leading-[1.1] tracking-[-0.02em] text-ink">
+                {mode === 'login' ? '登录' : '注册'}
+              </h2>
+              <p className="mb-[30px] mt-[9px] text-[13.5px] text-sub">
+                {mode === 'login' ? '继续使用简历筛选工作台' : '创建账号，开始使用筛选工作台'}
               </p>
 
-              <div className="mt-6 grid grid-cols-2 gap-1 rounded-md bg-soft p-1">
-                {(['login', 'register'] as const).map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    onClick={() => switchMode(item)}
-                    className={`relative h-9 rounded-md text-sm font-medium after:absolute after:-inset-1 after:content-[''] transition-colors ${
-                      mode === item ? 'bg-white text-ink shadow-sm' : 'text-sub hover:text-body'
-                    }`}
-                  >
-                    {item === 'login' ? '登录' : '注册'}
-                  </button>
-                ))}
-              </div>
-
-              <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+              <form onSubmit={handleSubmit} className="space-y-[18px]">
                 {mode === 'register' && (
                   <div className="rounded-md border border-brand-soft bg-brand-soft p-3">
                     <p className="text-xs leading-5 text-brand-deep">
@@ -473,7 +549,7 @@ export default function LoginPage() {
 
                 {mode === 'register' && (
                   <div>
-                    <label htmlFor="login-invite" className="text-sm font-semibold text-body">邀请码</label>
+                    <label htmlFor="login-invite" className="text-[12.5px] font-medium text-body">邀请码</label>
                     <div className="mt-2 flex gap-2">
                       <div className="relative flex-1">
                         <TicketIcon className={lockIcon} />
@@ -498,7 +574,7 @@ export default function LoginPage() {
                         type="button"
                         onClick={handleCheckInvite}
                         disabled={inviteBusy || inviteChecked}
-                        className={`h-12 shrink-0 rounded-md px-4 text-sm font-semibold transition-all duration-200 ${
+                        className={`h-[42px] shrink-0 rounded-md px-4 text-sm font-semibold transition-all duration-200 ${
                           inviteChecked
                             ? 'bg-good-soft text-good-ink'
                             : 'bg-brand-deep text-white shadow-sm hover:bg-brand-hover'
@@ -529,7 +605,7 @@ export default function LoginPage() {
                 )}
 
                 <div>
-                  <label htmlFor="login-username" className="text-sm font-semibold text-body">用户名</label>
+                  <label htmlFor="login-username" className="text-[12.5px] font-medium text-body">用户名</label>
                   <div className="relative mt-2">
                     <UserRoundIcon className={lockIcon} />
                     <input
@@ -546,7 +622,7 @@ export default function LoginPage() {
                 </div>
 
                 <div>
-                  <label htmlFor="login-password" className="text-sm font-semibold text-body">密码</label>
+                  <label htmlFor="login-password" className="text-[12.5px] font-medium text-body">密码</label>
                   <div className="relative mt-2">
                     <LockKeyholeIcon className={lockIcon} />
                     <input
@@ -563,7 +639,7 @@ export default function LoginPage() {
 
                 {mode === 'register' && (
                   <div>
-                    <label htmlFor="login-confirm" className="text-sm font-semibold text-body">确认密码</label>
+                    <label htmlFor="login-confirm" className="text-[12.5px] font-medium text-body">确认密码</label>
                     <div className="relative mt-2">
                       <LockKeyholeIcon className={lockIcon} />
                       <input
@@ -581,7 +657,7 @@ export default function LoginPage() {
 
                 {mode === 'register' && (
                   <div>
-                    <label htmlFor="login-email" className="text-sm font-semibold text-body">邮箱</label>
+                    <label htmlFor="login-email" className="text-[12.5px] font-medium text-body">邮箱</label>
                     <div className="relative mt-2">
                       <MailIcon className={inviteChecked ? lockIcon : 'absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-disabled-fg'} />
                       <input
@@ -604,7 +680,7 @@ export default function LoginPage() {
 
                 {mode === 'register' && (
                   <div>
-                    <label htmlFor="login-code" className="text-sm font-semibold text-body">邮箱验证码</label>
+                    <label htmlFor="login-code" className="text-[12.5px] font-medium text-body">邮箱验证码</label>
                     <div className="mt-2 flex gap-2">
                       <div className={`relative flex-1 transition-all ${codeSent ? 'text-good-ink' : ''}`}>
                         <KeyRoundIcon
@@ -625,7 +701,7 @@ export default function LoginPage() {
                           disabled={!inviteChecked}
                           className={
                             inviteChecked
-                              ? 'h-12 w-full rounded-md border border-line-soft bg-white pl-10 pr-4 text-sm tracking-widest text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20 focus:bg-white'
+                              ? 'h-[42px] w-full rounded-md border border-line-soft bg-white pl-10 pr-4 text-sm tracking-widest text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20 focus:bg-white'
                               : disabledInputCls
                           }
                         />
@@ -634,7 +710,7 @@ export default function LoginPage() {
                         type="button"
                         onClick={handleSendCode}
                         disabled={codeBusy || codeCountdown > 0 || !inviteChecked}
-                        className={`h-12 shrink-0 rounded-md px-4 text-sm font-semibold transition-all duration-200 ${
+                        className={`h-[42px] shrink-0 rounded-md px-4 text-sm font-semibold transition-all duration-200 ${
                           !inviteChecked
                             ? 'cursor-not-allowed bg-soft text-disabled-fg'
                             : codeCountdown > 0
@@ -672,9 +748,9 @@ export default function LoginPage() {
 
                 {mode === 'login' && (
                   <div>
-                    <label htmlFor="login-captcha" className="text-sm font-semibold text-body">验证码</label>
+                    <label htmlFor="login-captcha" className="text-[12.5px] font-medium text-body">验证码</label>
                     <div className="mt-2 flex gap-2">
-                      <div className="relative flex-1">
+                      <div className="relative min-w-0 flex-1">
                         <KeyRoundIcon className={lockIcon} />
                         <input
                           id="login-captcha"
@@ -686,38 +762,35 @@ export default function LoginPage() {
                           placeholder="请输入右侧四位数字"
                           autoComplete="off"
                           spellCheck={false}
-                          aria-describedby="captcha-hint"
-                          className={inputCls}
+                          aria-describedby={captchaError ? 'captcha-hint captcha-error' : 'captcha-hint'}
+                          aria-invalid={captchaError ? true : undefined}
+                          className={captchaError ? errorInputCls : inputCls}
                         />
                       </div>
-                      <button
-                        type="button"
-                        onClick={loadCaptcha}
-                        disabled={captcha === null && !captchaUnavailable}
-                        aria-label={captcha ? '验证码，点击刷新' : '验证码加载中'}
-                        className={`h-12 w-32 shrink-0 overflow-hidden rounded-md border border-line-soft transition-colors ${
-                          captcha ? 'bg-white hover:border-line' : 'cursor-not-allowed bg-soft text-xs font-semibold text-disabled-fg'
-                        }`}
-                        title="点击刷新验证码"
-                      >
+                      <div className="flex h-[42px] w-20 shrink-0 items-center justify-center overflow-hidden border border-line-strong bg-white text-xs text-sub sm:w-24">
                         {captcha ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img src={captcha.image} alt="验证码图片" className="size-full object-contain" />
-                        ) : captchaUnavailable ? (
-                          '未启用'
-                        ) : (
-                          '加载中'
-                        )}
+                        ) : captchaUnavailable ? '未启用' : captchaLoadError ? '加载失败' : '加载中'}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => { if (!captchaLoading) void loadCaptcha(); }}
+                        aria-disabled={captchaLoading}
+                        aria-label="刷新验证码"
+                        className="flex size-[42px] shrink-0 items-center justify-center border border-control-border bg-control text-ink hover:bg-control-hover aria-disabled:cursor-wait aria-disabled:opacity-60"
+                      >
+                        <RefreshCwIcon className="size-4" aria-hidden="true" />
                       </button>
                     </div>
                     <p id="captcha-hint" className="mt-1.5 flex items-center gap-1 text-xs text-sub">
-                      <RefreshCwIcon className="size-3" />
-                      看不清？点击图片可换一张，验证码一次性使用
+                      看不清？使用右侧按钮刷新验证码。
                     </p>
+                    {captchaError && <p id="captcha-error" role="alert" className="mt-2 text-xs text-bad">{captchaError}</p>}
                   </div>
                 )}
 
-                {error && (
+                {error && !captchaError && (
                   <div role="alert" className="flex items-start gap-2 rounded-lg border border-bad-border bg-bad-soft px-3.5 py-2.5 text-sm text-bad">
                     <BanIcon className="mt-0.5 size-4 shrink-0" />
                     <div className="min-w-0 flex-1">
@@ -759,46 +832,46 @@ export default function LoginPage() {
                 </button>
               </form>
 
-              <p className="mt-6 text-center text-xs leading-5 text-sub">
+              <div className="mt-5 space-y-2 text-center text-[12.5px] text-sub">
+                <div role="group" aria-label="开通账号" className="flex flex-wrap justify-center gap-x-3">
+                  {mode === 'login' ? (
+                    <button type="button" onClick={() => switchMode('register')} className="hover:text-ink">注册账号</button>
+                  ) : (
+                    <button type="button" onClick={() => switchMode('login')} className="hover:text-ink">返回登录</button>
+                  )}
+                  <span aria-hidden="true">·</span>
+                  <button type="button" onClick={() => setPanel('apply')} className="hover:text-ink">申请邀请码</button>
+                </div>
+                <div role="group" aria-label="找回访问" className="flex flex-wrap justify-center gap-x-3">
+                  <Link href="/reset-password" className="hover:text-ink">忘记密码</Link>
+                  <span aria-hidden="true">·</span>
+                  <button type="button" onClick={() => setPanel('unfreeze')} className="hover:text-ink">账号自助解冻</button>
+                </div>
+              </div>
+              <p className="mt-7 border-t border-line-soft pt-4 text-[12px] leading-[1.7] text-sub">
                 {mode === 'login' ? (
                   <>
-                    <Link href="/reset-password" className="font-medium text-brand hover:underline">忘记密码？</Link>
-                    <span className="mx-2 text-line">|</span>
-                    还没有账号？<button type="button" onClick={() => switchMode('register')} className="font-medium text-brand hover:underline">立即注册</button>
+                    登录即表示你已阅读并同意
+                    <Link href="/terms" className="mx-1 text-ink hover:underline">《用户协议》</Link>
+                    与
+                    <Link href="/privacy" className="mx-1 text-ink hover:underline">《隐私政策》</Link>
                   </>
                 ) : (
-                  <>
-                    <button type="button" onClick={() => setPanel('apply')} className="font-medium text-brand hover:underline">申请邀请码</button>
-                    <span className="mx-2 text-line">|</span>
-                    已有账号？<button type="button" onClick={() => switchMode('login')} className="font-medium text-brand hover:underline">返回登录</button>
-                  </>
+                  '平台采用邀请制，注册需要邀请码。忘记密码可通过绑定邮箱重置；账号被冻结时请联系系统管理员。'
                 )}
               </p>
-              <p className="mt-4 text-center text-xs text-sub">
-                <button type="button" onClick={() => setPanel('unfreeze')} className="font-medium text-brand hover:underline">
-                  账号被冻结？自助解冻
-                </button>
-              </p>
-              {mode === 'login' && (
-                <p className="mt-3 text-center text-xs leading-5 text-sub">
-                  登录即表示你已阅读并同意
-                  <Link href="/terms" className="mx-1 font-medium text-brand hover:underline">《用户协议》</Link>
-                  与
-                  <Link href="/privacy" className="mx-1 font-medium text-brand hover:underline">《隐私政策》</Link>
-                </p>
-              )}
             </>
           )}
 
           {panel === 'apply' && (
             <>
-              <h1 className="mt-3 text-2xl font-semibold text-ink">申请邀请码</h1>
+              <h2 className="text-[28px] font-medium leading-tight tracking-[-0.02em] text-ink">申请邀请码</h2>
               <p className="mt-2 text-sm leading-6 text-body">
                 填写申请邮箱与使用理由，管理员审批通过后，邀请码将发送至你的邮箱。
               </p>
               <form onSubmit={handleApply} className="mt-6 space-y-4">
                 <div>
-                  <label htmlFor="apply-email" className="text-sm font-semibold text-body">申请邮箱</label>
+                  <label htmlFor="apply-email" className="text-[12.5px] font-medium text-body">申请邮箱</label>
                   <div className="relative mt-2">
                     <MailIcon className={lockIcon} />
                     <input
@@ -814,7 +887,7 @@ export default function LoginPage() {
                   </div>
                 </div>
                 <div>
-                  <label htmlFor="apply-note" className="text-sm font-semibold text-body">申请理由</label>
+                  <label htmlFor="apply-note" className="text-[12.5px] font-medium text-body">申请理由</label>
                   <div className="relative mt-2">
                     <MessageSquareTextIcon className="absolute left-3.5 top-4 size-4 text-sub" />
                     <textarea
@@ -853,7 +926,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => setPanel('main')}
-                  className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line-soft bg-white text-sm font-medium text-body transition-colors hover:bg-soft hover:border-line-soft"
+                  className="flex h-[42px] w-full items-center justify-center gap-2 rounded-md border border-line-soft bg-white text-sm font-medium text-body transition-colors hover:bg-soft hover:border-line-soft"
                 >
                   <ArrowLeftIcon className="size-4" />
                   返回登录/注册
@@ -864,7 +937,7 @@ export default function LoginPage() {
 
           {panel === 'unfreeze' && (
             <>
-              <h1 className="text-2xl font-semibold text-ink">账号自助解冻</h1>
+              <h2 className="text-[28px] font-medium leading-tight tracking-[-0.02em] text-ink">账号自助解冻</h2>
               <p className="mt-2 text-sm leading-6 text-body">
                 账号因多次登录失败被临时冻结。输入正确密码并通过绑定邮箱验证即可解冻登录。
                 {regConfig?.contact_email && (
@@ -873,7 +946,7 @@ export default function LoginPage() {
               </p>
               <form onSubmit={handleUnfreeze} className="mt-6 space-y-4">
                 <div>
-                  <label htmlFor="uf-username" className="text-sm font-semibold text-body">用户名</label>
+                  <label htmlFor="uf-username" className="text-[12.5px] font-medium text-body">用户名</label>
                   <div className="relative mt-2">
                     <UserRoundIcon className={lockIcon} />
                     <input
@@ -888,7 +961,7 @@ export default function LoginPage() {
                   </div>
                 </div>
                 <div>
-                  <label htmlFor="uf-password" className="text-sm font-semibold text-body">密码</label>
+                  <label htmlFor="uf-password" className="text-[12.5px] font-medium text-body">密码</label>
                   <div className="relative mt-2">
                     <LockKeyholeIcon className={lockIcon} />
                     <input
@@ -903,7 +976,7 @@ export default function LoginPage() {
                   </div>
                 </div>
                 <div>
-                  <label htmlFor="uf-email" className="text-sm font-semibold text-body">绑定邮箱</label>
+                  <label htmlFor="uf-email" className="text-[12.5px] font-medium text-body">绑定邮箱</label>
                   <div className="relative mt-2">
                     <MailIcon className={lockIcon} />
                     <input
@@ -919,7 +992,7 @@ export default function LoginPage() {
                   </div>
                 </div>
                 <div>
-                  <label htmlFor="uf-code" className="text-sm font-semibold text-body">邮箱验证码</label>
+                  <label htmlFor="uf-code" className="text-[12.5px] font-medium text-body">邮箱验证码</label>
                   <div className="mt-2 flex gap-2">
                     <div className="relative flex-1">
                       <KeyRoundIcon className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-sub" />
@@ -932,14 +1005,14 @@ export default function LoginPage() {
                         placeholder="6 位验证码"
                         autoComplete="one-time-code"
                         spellCheck={false}
-                        className="h-12 w-full rounded-md border border-line-soft bg-white pl-10 pr-4 text-sm tracking-widest text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
+                        className="h-[42px] w-full rounded-md border border-line-soft bg-white pl-10 pr-4 text-sm tracking-widest text-ink outline-none transition focus:border-brand focus:ring-2 focus:ring-brand/20"
                       />
                     </div>
                     <button
                       type="button"
                       onClick={handleSendUnfreezeCode}
                       disabled={ufCodeBusy || ufCountdown > 0}
-                      className={`h-12 shrink-0 rounded-md px-4 text-sm font-semibold transition-all duration-200 ${
+                      className={`h-[42px] shrink-0 rounded-md px-4 text-sm font-semibold transition-all duration-200 ${
                         ufCountdown > 0
                           ? 'cursor-not-allowed bg-soft text-sub'
                           : ufCodeSent
@@ -981,7 +1054,7 @@ export default function LoginPage() {
                 <button
                   type="button"
                   onClick={() => { setPanel('main'); setUfError(''); setUfMsg(''); }}
-                  className="flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line-soft bg-white text-sm font-medium text-body transition-colors hover:bg-soft hover:border-line-soft"
+                  className="flex h-[42px] w-full items-center justify-center gap-2 rounded-md border border-line-soft bg-white text-sm font-medium text-body transition-colors hover:bg-soft hover:border-line-soft"
                 >
                   <ArrowLeftIcon className="size-4" />
                   返回登录
@@ -989,11 +1062,21 @@ export default function LoginPage() {
               </div>
             </>
           )}
-        </div>
-        <p className="mt-5 text-center text-xs text-sub">
-          每位用户的简历与岗位数据相互隔离，请妥善保管账号。
-        </p>
-      </div>
+
+          <p className="mt-6 text-center text-[10.5px] leading-5 text-sub">
+            每位用户的简历与岗位数据相互隔离，请妥善保管账号。
+          </p>
+          </div>
+        </section>
+      </main>
+
+      <footer className="flex h-[58px] shrink-0 items-center gap-5 border-t border-line px-5 text-[12px] text-sub lg:px-11">
+        <Link href="/terms" className="transition-colors hover:text-ink">用户协议</Link>
+        <Link href="/privacy" className="transition-colors hover:text-ink">隐私政策</Link>
+        <span className="flex-1" />
+        <span>公司内部招聘筛选</span>
+        <span className="font-mono text-[9px] tracking-[0.12em]">v1.0</span>
+      </footer>
 
       {/* 管理员冻结提示弹窗（frozen_by=admin 的 423 响应） */}
       {frozenNotice && (
@@ -1033,7 +1116,7 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={() => setFrozenNotice(null)}
-              className="mt-5 flex h-12 w-full items-center justify-center rounded-lg bg-brand-deep text-sm font-semibold text-white transition hover:bg-brand-hover"
+              className="mt-5 flex h-[42px] w-full items-center justify-center rounded-lg bg-brand-deep text-sm font-semibold text-white transition hover:bg-brand-hover"
             >
               我知道了
             </button>

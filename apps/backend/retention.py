@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 import config
 import resume_original
 import safe_fs
+import source_drain
 import store
 
 logger = logging.getLogger("retention")
@@ -115,6 +116,7 @@ def scan_expired(days: int | None = None) -> dict:
     }
 
 
+@source_drain.writer('scheduled')
 def purge(days: int | None = None, dry_run: bool = False) -> dict:
     """执行清理，返回统计。dry_run=True 时只统计不落盘。"""
     found = scan_expired(days)
@@ -179,6 +181,7 @@ def _touch_sentinel() -> None:
         logger.warning("[retention] 哨兵写入失败", exc_info=True)
 
 
+@source_drain.writer('scheduled')
 def maybe_purge(now: float | None = None) -> dict | None:
     """懒清理入口。未启用 / 未到期 / 出错都静默返回，绝不影响请求。"""
     if not enabled() or not _due(now):

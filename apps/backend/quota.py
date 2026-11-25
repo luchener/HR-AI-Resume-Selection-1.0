@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 
 import config
 import mailer
+import safe_fs
 from store import _read_json as _store_read_json, _write_json as _store_write_json
 
 MAX_DAILY_LIMIT = 1000
@@ -77,12 +78,16 @@ def _user_cfg(username: str, data: dict | None = None) -> dict:
 
 
 def _usage_path(user_id: str) -> str:
-    return os.path.join(config.USER_USAGE_DIR, f"{user_id}.json")
+    component = safe_fs.safe_component(user_id)
+    return os.path.join(config.USER_USAGE_DIR, f"{component}.json") if component else ""
 
 
 def today_analysis_count(user_id: str) -> int:
     """当日已成功完成的分析次数（读 usage，与埋点同口径）。"""
-    usage = _read_json(_usage_path(user_id)) or {}
+    path = _usage_path(user_id)
+    if not path:
+        return 0
+    usage = _read_json(path) or {}
     entry = usage.get(_today_key()) or {}
     try:
         return max(0, int(entry.get("analysis", 0)))

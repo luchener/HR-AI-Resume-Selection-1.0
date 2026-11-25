@@ -9,6 +9,8 @@ const _raw = process.env.NEXT_PUBLIC_API_URL;
  * 注意 .env.sample 推荐 `NEXT_PUBLIC_API_URL=""`，所以"空串"是合法配置。
  */
 export const API_URL: string = _raw && _raw.trim() ? _raw.trim() : '';
+// Explicit rehearsal opt-in. Existing JSON production remains the default.
+export const SQL_ANALYSIS_ENABLED = process.env.NEXT_PUBLIC_ANALYSIS_BACKEND === 'sql';
 
 if (!API_URL && process.env.NODE_ENV !== 'production') {
   // 仅 dev 下提示；生产构建 tree-shake 掉

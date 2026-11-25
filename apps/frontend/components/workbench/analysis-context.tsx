@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { setCompletionHandler } from '@/lib/analysis-session';
 
 export interface EmploymentRecord {
@@ -196,6 +196,10 @@ export interface HrAnalysis {
   /** 后端给的处置说明（如"仅作风险提示，未扣分"） */
   ai_risk_note?: string;
   summary: string;
+  /** 模型给出的核心判定（证据模式仍保留，summary 可能被通用说明覆盖）。 */
+  core_verdict?: string;
+  /** 按最终分数给出的三档招聘建议，不因证据不足而隐藏。 */
+  hiring_recommendation?: string;
   basic_screening: {
     native_place: string;
     age: string;
@@ -231,7 +235,20 @@ export interface HrAnalysis {
   certificates: string[];
   bonus_items: string[];
   strengths: string[];
+  /** 结构化亮点：状态与原文分离，旧报告没有该字段时前端回退解析 strengths 前缀。 */
+  strength_evidence?: Array<{
+    requirement_id?: string;
+    status: 'met' | 'partial';
+    text: string;
+    quote?: string;
+  }>;
   weaknesses: string[];
+  weakness_evidence?: Array<{
+    requirement_id?: string;
+    status: string;
+    text: string;
+    reason?: string;
+  }>;
   risk_points: string[];
   role_specific_assessment: string[];
   deduction_reasons: string[];
@@ -263,10 +280,17 @@ export interface CandidateComparison {
 }
 
 export interface AnalysisData {
+  task_id?: string;
+  model_binding?: { binding_id: string; config_revision: string; policy_revision: string };
+  improvement_task_id?: string;
+  improvement_model_binding?: { binding_id: string; config_revision: string; policy_revision: string };
   request_id?: string;
   resume_id: string;
   job_id: string;
   candidate_name?: string;
+  job_title?: string;
+  analyzed_at?: string;
+  created_at?: string;
   analysis_result?: string;
   optimized_markdown?: string;
   hr_analysis?: HrAnalysis;
@@ -284,7 +308,7 @@ export interface AnalysisResult {
 
 interface AnalysisContextValue {
   analysisResult: AnalysisResult | null;
-  setAnalysisResult: (result: AnalysisResult) => void;
+  setAnalysisResult: Dispatch<SetStateAction<AnalysisResult | null>>;
   isHydrated: boolean;
 }
 
@@ -292,27 +316,20 @@ const STORAGE_KEY = 'resume-screening-result';
 const AnalysisContext = createContext<AnalysisContextValue | undefined>(undefined);
 
 export function AnalysisProvider({ children }: { children: ReactNode }) {
-  const [analysisResult, setAnalysisResultState] = useState<AnalysisResult | null>(null);
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
 
   // 分析任务可能在任何页面后台完成（用户切走工作台时任务仍继续）：
   // 注册全局完成回调，把结果写入 context + sessionStorage，避免结果"丢失"。
   useEffect(() => {
-    setCompletionHandler((result) => {
-      setAnalysisResultState(result);
-      try {
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(result));
-      } catch {
-        // Keep the current session usable when browser storage is unavailable.
-      }
-    });
+    setCompletionHandler(setAnalysisResult);
     return () => setCompletionHandler(null);
   }, []);
 
   useEffect(() => {
     try {
       const saved = sessionStorage.getItem(STORAGE_KEY);
-      if (saved) setAnalysisResultState(JSON.parse(saved) as AnalysisResult);
+      if (saved) setAnalysisResult(JSON.parse(saved) as AnalysisResult);
     } catch {
       try {
         sessionStorage.removeItem(STORAGE_KEY);
@@ -324,14 +341,15 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const setAnalysisResult = (result: AnalysisResult) => {
-    setAnalysisResultState(result);
+  useEffect(() => {
+    if (!isHydrated) return;
     try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(result));
+      if (analysisResult === null) sessionStorage.removeItem(STORAGE_KEY);
+      else sessionStorage.setItem(STORAGE_KEY, JSON.stringify(analysisResult));
     } catch {
       // Keep the current session usable when browser storage is unavailable.
     }
-  };
+  }, [analysisResult, isHydrated]);
 
   return (
     <AnalysisContext.Provider value={{ analysisResult, setAnalysisResult, isHydrated }}>

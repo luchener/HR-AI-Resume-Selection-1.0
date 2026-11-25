@@ -920,6 +920,28 @@ class HrAnalysisTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("HTTP", response.get_json()["detail"])
 
+    def test_ai_connection_rejects_private_and_plaintext_compatible_urls(self):
+        for base_url in (
+            "https://127.0.0.1/v1",
+            "https://10.0.0.5/v1",
+            "https://169.254.169.254/latest/meta-data",
+            "http://api.deepseek.com/v1",
+        ):
+            with self.subTest(base_url=base_url):
+                response = self.client.post(
+                    "/api/v1/ai/test",
+                    json={
+                        "ai_config": {
+                            "provider": "custom",
+                            "api_key": "sk-test",
+                            "base_url": base_url,
+                            "model": "custom-chat",
+                        }
+                    },
+                    headers=self.headers,
+                )
+                self.assertEqual(response.status_code, 422)
+
     def test_hr_cache_is_isolated_by_request_model_config(self):
         resume_id = backend.store.save_resume("Python 工程师，5 年经验", {}, self.user_id)
         job_id = backend.store.save_job(resume_id, "招聘 Python 工程师", {}, self.user_id)

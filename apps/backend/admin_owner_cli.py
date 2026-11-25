@@ -34,6 +34,7 @@ import re
 import sys
 
 import auth
+import source_drain
 import config  # noqa: F401  确保 config 先加载 .env 与目录
 import safe_fs
 
@@ -63,6 +64,43 @@ def _whitelist_admins(records, exclude_user_id=None):
         if r.get("user_id") != exclude_user_id
         and auth.is_admin_email(r.get("email") or "")
     ]
+
+
+def _write_user_changes(changes):
+    """Validate every record path before writing and restore the batch on failure."""
+    seen = set()
+    for original, updated in changes:
+        user_id = original.get("user_id") if isinstance(original, dict) else None
+        if (not isinstance(updated, dict) or not isinstance(user_id, str)
+                or safe_fs.safe_component(user_id) != user_id
+                or updated.get("user_id") != user_id or user_id in seen):
+            return False, "用户记录 ID 无效或重复，已中止修改"
+        seen.add(user_id)
+
+    attempted = []
+    try:
+        for original, updated in changes:
+            attempted.append(original)
+            if not auth._write_user_record(updated):
+                raise OSError("用户记录写入被拒绝")
+        auth._rebuild_index()
+        return True, ""
+    except Exception as exc:  # noqa: BLE001 - CLI must surface failed persistence.
+        rollback_errors = []
+        for original in reversed(attempted):
+            try:
+                if not auth._write_user_record(original):
+                    rollback_errors.append("用户记录恢复被拒绝")
+            except Exception as rollback_exc:  # noqa: BLE001
+                rollback_errors.append(type(rollback_exc).__name__)
+        try:
+            auth._rebuild_index()
+        except Exception as rollback_exc:  # noqa: BLE001
+            rollback_errors.append(type(rollback_exc).__name__)
+        detail = f"用户记录写入失败：{type(exc).__name__}"
+        if rollback_errors:
+            detail += "；恢复也未完全成功：" + ", ".join(rollback_errors)
+        return False, detail
 
 
 def _print_account(u: dict) -> None:
@@ -110,6 +148,9 @@ def cmd_rename(args) -> int:
     if not user:
         print(f"[错误] 账号 {old} 不存在", file=sys.stderr)
         return 1
+    if not isinstance(user, dict) or not isinstance(user.get("user_id"), str):
+        print("[错误] 用户记录 ID 无效，已中止修改", file=sys.stderr)
+        return 1
     if auth.find_user_by_username(new):
         print(f"[错误] 用户名 {new} 已存在（用户名大小写不敏感）", file=sys.stderr)
         return 1
@@ -119,9 +160,12 @@ def cmd_rename(args) -> int:
         if not user:
             print(f"[错误] 账号 {old} 不存在", file=sys.stderr)
             return 1
-        user["username"] = new
-        auth._write_json(os.path.join(auth.USERS_DIR, f"{user['user_id']}.json"), user)
-        auth._rebuild_index()
+        updated = dict(user)
+        updated["username"] = new
+        written, error = _write_user_changes([(user, updated)])
+        if not written:
+            print(f"[错误] {error}", file=sys.stderr)
+            return 1
 
     email = user.get("email") or ""
     print(f"[info] 已改名：{old} -> {new}")
@@ -145,6 +189,9 @@ def cmd_make_owner(args) -> int:
     if not user:
         print(f"[错误] 账号 {username} 不存在", file=sys.stderr)
         return 1
+    if not isinstance(user, dict) or not isinstance(user.get("user_id"), str):
+        print("[错误] 用户记录 ID 无效，已中止修改", file=sys.stderr)
+        return 1
     owner_email = auth.ADMIN_EMAILS[0] if auth.ADMIN_EMAILS else "luchenstudio@163.com"
 
     with auth._UserLock():
@@ -156,22 +203,24 @@ def cmd_make_owner(args) -> int:
         if not target:
             print(f"[错误] 账号 {username} 不存在", file=sys.stderr)
             return 1
-        # 1) 目标账号绑定白名单邮箱 -> 成为超级管理员
-        target["email"] = owner_email
-        auth._write_json(
-            os.path.join(auth.USERS_DIR, f"{target['user_id']}.json"), target
-        )
+        # Validate all write targets before changing any stored record.
+        updated_target = dict(target)
+        updated_target["email"] = owner_email
+        changes = [(target, updated_target)]
         # 2) 取消其他白名单邮箱账号的最高权限（清空邮箱绑定，保留账号与密码）
+        for other in others:
+            updated_other = dict(other)
+            updated_other["email"] = ""
+            changes.append((other, updated_other))
+        written, error = _write_user_changes(changes)
+        if not written:
+            print(f"[错误] {error}", file=sys.stderr)
+            return 1
         for other in others:
             print(
                 f"[info] 取消 {other.get('username')} 的最高权限：清空其邮箱绑定 "
                 f"{other.get('email') or ''}"
             )
-            other["email"] = ""
-            auth._write_json(
-                os.path.join(auth.USERS_DIR, f"{other['user_id']}.json"), other
-            )
-        auth._rebuild_index()
 
     print(f"[info] 已完成：{username} 绑定 {owner_email}，成为超级管理员（管理员 = {username}）")
     auth.record_admin_op(
@@ -189,6 +238,9 @@ def cmd_unbind_email(args) -> int:
     user = auth.find_user_by_username(username)
     if not user:
         print(f"[错误] 账号 {username} 不存在", file=sys.stderr)
+        return 1
+    if not isinstance(user, dict) or not isinstance(user.get("user_id"), str):
+        print("[错误] 用户记录 ID 无效，已中止修改", file=sys.stderr)
         return 1
     email = user.get("email") or ""
     if not email:
@@ -213,9 +265,28 @@ def cmd_unbind_email(args) -> int:
         if not user:
             print(f"[错误] 账号 {username} 不存在", file=sys.stderr)
             return 1
-        user["email"] = ""
-        auth._write_json(os.path.join(auth.USERS_DIR, f"{user['user_id']}.json"), user)
-        auth._rebuild_index()
+        records = _all_user_records()
+        others = _whitelist_admins(records, exclude_user_id=user["user_id"])
+        if not others:
+            print(
+                "[错误] 这是最后一个白名单邮箱超级管理员账号，取消后系统将没有超级管理员"
+                "（防锁死，已中止）。请先 make-owner 指定新管理员再操作。",
+                file=sys.stderr,
+            )
+            return 1
+        target = next(
+            (record for record in records if record.get("user_id") == user.get("user_id")),
+            None,
+        )
+        if not target:
+            print(f"[错误] 账号 {username} 不存在", file=sys.stderr)
+            return 1
+        updated = dict(target)
+        updated["email"] = ""
+        written, error = _write_user_changes([(target, updated)])
+        if not written:
+            print(f"[错误] {error}", file=sys.stderr)
+            return 1
 
     print(f"[info] 已取消 {username} 的最高权限（清空白名单邮箱绑定 {email}）")
     auth.record_admin_op(
@@ -228,6 +299,7 @@ def cmd_unbind_email(args) -> int:
     return 0
 
 
+@source_drain.writer('commands')
 def main():
     ap = argparse.ArgumentParser(description="管理员账号归属迁移工具（最高管理员切换为 luchen 等）")
     sub = ap.add_subparsers(dest="cmd", required=True)

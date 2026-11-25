@@ -4,39 +4,82 @@
 """
 import io
 import zipfile
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as _stdlib_et
 
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring as safe_fromstring
 from pdfminer.high_level import extract_text
+
+try:
+    import pypdfium2 as _pdfium
+except Exception:  # pragma: no cover - dependency is pinned in requirements.txt
+    _pdfium = None
 
 # DOCX 段落命名空间
 _WML_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+MAX_PDF_PAGES = 100
+MAX_EXTRACTED_TEXT_CHARS = 2 * 1024 * 1024
+MAX_DOCX_ENTRIES = 512
+MAX_DOCX_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_DOCX_ENTRY_BYTES = 16 * 1024 * 1024
+MAX_DOCX_COMPRESSION_RATIO = 200
+MAX_DOCX_XML_PARTS = 64
+
+
+class InvalidDocument(ValueError):
+    """The uploaded bytes are not a supported or well-formed document."""
+
+
+class DocumentTooLarge(ValueError):
+    """The document exceeds a parser resource limit."""
+
+    http_status = 413
+
 
 def _extract_word_xml(xml_bytes: bytes) -> str:
     """Extract text while preserving paragraphs, table cells and hard breaks."""
-    root = ET.fromstring(xml_bytes)
+    try:
+        root = safe_fromstring(xml_bytes)
+    except (DefusedXmlException, _stdlib_et.ParseError) as exc:
+        raise InvalidDocument("Invalid DOCX XML") from exc
+
     out: list[str] = []
+    total = 0
 
-    def walk(elem):
+    def append(value: str) -> None:
+        nonlocal total
+        if total >= MAX_EXTRACTED_TEXT_CHARS:
+            return
+        value = value[:MAX_EXTRACTED_TEXT_CHARS - total]
+        out.append(value)
+        total += len(value)
+
+    stack = [(root, False)]
+    while stack and total < MAX_EXTRACTED_TEXT_CHARS:
+        elem, exiting = stack.pop()
         tag = elem.tag
+        if exiting:
+            if tag == f"{_WML_NS}tc" and out and not out[-1].endswith(("\t", "\n")):
+                append("\t")
+            elif tag == f"{_WML_NS}p" and out and not out[-1].endswith("\n"):
+                append("\n")
+            continue
+
         if tag == f"{_WML_NS}t" and elem.text:
-            out.append(elem.text)
+            append(elem.text)
         elif tag == f"{_WML_NS}tab":
-            out.append("\t")
+            append("\t")
         elif tag in (f"{_WML_NS}br", f"{_WML_NS}cr"):
-            out.append("\n")
+            append("\n")
         elif tag == f"{_WML_NS}noBreakHyphen":
-            out.append("-")
+            append("-")
 
-        for child in elem:
-            walk(child)
+        stack.append((elem, True))
+        for child in reversed(list(elem)):
+            stack.append((child, False))
 
-        if tag == f"{_WML_NS}tc" and out and not out[-1].endswith(("\t", "\n")):
-            out.append("\t")
-        elif tag == f"{_WML_NS}p" and out and not out[-1].endswith("\n"):
-            out.append("\n")
-
-    walk(root)
     return "".join(out)
 
 
@@ -55,9 +98,65 @@ def _normalize_extracted_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _pdf_page_count(file_bytes: bytes) -> int:
+    if _pdfium is None:
+        raise InvalidDocument("PDF parser is unavailable")
+    try:
+        document = _pdfium.PdfDocument(file_bytes)
+    except Exception as exc:
+        raise InvalidDocument("Invalid PDF file") from exc
+    try:
+        return int(len(document))
+    except Exception as exc:
+        raise InvalidDocument("Invalid PDF file") from exc
+    finally:
+        try:
+            document.close()
+        except Exception:
+            pass
+
+
 def extract_pdf(file_bytes: bytes) -> str:
-    """用 pdfminer 提取 PDF 文本。"""
-    return extract_text(io.BytesIO(file_bytes))
+    """Extract at most MAX_PDF_PAGES pages from a structurally valid PDF."""
+    pages = _pdf_page_count(file_bytes)
+    if pages < 1:
+        raise InvalidDocument("Invalid PDF file")
+    if pages > MAX_PDF_PAGES:
+        raise DocumentTooLarge("PDF page limit exceeded")
+    try:
+        return extract_text(io.BytesIO(file_bytes), maxpages=MAX_PDF_PAGES)
+    except Exception as exc:
+        raise InvalidDocument("Invalid PDF file") from exc
+
+
+def _validate_docx_member(info: zipfile.ZipInfo) -> None:
+    if info.flag_bits & 0x1:
+        raise InvalidDocument("Encrypted DOCX is not supported")
+    if info.file_size < 0 or info.compress_size < 0:
+        raise InvalidDocument("Invalid DOCX file")
+    if info.file_size > MAX_DOCX_ENTRY_BYTES:
+        raise DocumentTooLarge("DOCX entry limit exceeded")
+    if info.file_size:
+        if not info.compress_size:
+            raise DocumentTooLarge("Invalid DOCX compression sizes")
+        if info.file_size / info.compress_size > MAX_DOCX_COMPRESSION_RATIO:
+            raise DocumentTooLarge("DOCX compression ratio limit exceeded")
+
+
+def _read_docx_member(docx: zipfile.ZipFile, name: str, total: int) -> tuple[bytes, int]:
+    try:
+        info = docx.getinfo(name)
+    except KeyError as exc:
+        raise InvalidDocument("Invalid DOCX file: missing required XML part") from exc
+    _validate_docx_member(info)
+    with docx.open(info) as handle:
+        data = handle.read(MAX_DOCX_ENTRY_BYTES + 1)
+    if len(data) > MAX_DOCX_ENTRY_BYTES:
+        raise DocumentTooLarge("DOCX entry limit exceeded")
+    total += len(data)
+    if total > MAX_DOCX_TOTAL_BYTES:
+        raise DocumentTooLarge("DOCX expanded size limit exceeded")
+    return data, total
 
 
 def extract_docx(file_bytes: bytes) -> str:
@@ -68,16 +167,28 @@ def extract_docx(file_bytes: bytes) -> str:
     """
     try:
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as docx:
-            parts = [docx.read("word/document.xml")]
+            members = docx.infolist()
+            if len(members) > MAX_DOCX_ENTRIES:
+                raise DocumentTooLarge("DOCX entry count limit exceeded")
+            if sum(info.file_size for info in members) > MAX_DOCX_TOTAL_BYTES:
+                raise DocumentTooLarge("DOCX expanded size limit exceeded")
+            for info in members:
+                _validate_docx_member(info)
+
+            total = 0
+            document, total = _read_docx_member(docx, "word/document.xml", total)
             supplemental = sorted(
                 name for name in docx.namelist()
                 if name.startswith(("word/header", "word/footer")) and name.endswith(".xml")
             )
-            parts.extend(docx.read(name) for name in supplemental)
-    except KeyError as e:
-        raise ValueError("Invalid DOCX file: missing word/document.xml") from e
-    except zipfile.BadZipFile as e:
-        raise ValueError("Invalid DOCX file") from e
+            if len(supplemental) + 1 > MAX_DOCX_XML_PARTS:
+                raise DocumentTooLarge("DOCX XML part limit exceeded")
+            parts = [document]
+            for name in supplemental:
+                part, total = _read_docx_member(docx, name, total)
+                parts.append(part)
+    except zipfile.BadZipFile as exc:
+        raise InvalidDocument("Invalid DOCX file") from exc
 
     return _normalize_extracted_text("\n".join(_extract_word_xml(part) for part in parts))
 
@@ -89,16 +200,22 @@ def extract_text_from_file(file_bytes: bytes, content_type: str) -> str:
     content_type: application/pdf 或
                   application/vnd.openxmlformats-officedocument.wordprocessingml.document
     """
+    if type(file_bytes) is not bytes or not file_bytes:
+        raise InvalidDocument("No file content provided")
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise DocumentTooLarge("Uploaded file exceeds the 30 MB limit")
+
     if content_type == "application/pdf":
         text = extract_pdf(file_bytes)
     elif content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         text = extract_docx(file_bytes)
     else:
-        raise ValueError("Unsupported file type")
+        raise InvalidDocument("Unsupported file type")
 
+    text = text[:MAX_EXTRACTED_TEXT_CHARS]
     text = _normalize_extracted_text(text)
     if not text:
-        raise ValueError("No text could be extracted from the uploaded file")
+        raise InvalidDocument("No text could be extracted from the uploaded file")
     return text
 
 

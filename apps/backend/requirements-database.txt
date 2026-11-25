@@ -1,0 +1,4 @@
+SQLAlchemy==2.0.54
+psycopg[binary]==3.2.13
+Alembic==1.14.1
+cryptography==46.0.7

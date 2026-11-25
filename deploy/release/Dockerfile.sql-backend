@@ -1,0 +1,16 @@
+# 正式发布镜像：SQL 后端（派生自已验证的依赖基镜）
+# 基镜 78f0e5ce… 由 apps/backend/Dockerfile.sql-preview 按 33d7d0f 的 requirements 构建，
+# 依赖文件自 33d7d0f 起未变更；本文件只覆盖应用源码，不重新安装依赖，降低供应链漂移。
+# 构建：git archive HEAD apps/backend 后与本文件一起作为上下文。
+FROM resume-sql-preview-backend@sha256:78f0e5cea386eae0872384b88d8e090d16523e9838916bc2d99ee8f5adb754b6
+WORKDIR /app
+COPY apps/backend/*.py ./
+COPY apps/backend/school_tiers.json ./
+COPY apps/backend/tools/ ./tools/
+COPY apps/backend/migrations/ ./migrations/
+COPY apps/backend/alembic.ini ./
+ENV DOTENV_DISABLED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+USER 1000:1000
+EXPOSE 8000
+# 正式入口：不挂载 candidate_app.py，不读取 CANDIDATE_* 开关。
+CMD ["gunicorn", "-c", "python:gunicorn_sql_preview", "db_deployment:wsgi()"]

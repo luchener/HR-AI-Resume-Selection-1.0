@@ -20,6 +20,8 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV XDG_CONFIG_HOME=/tmp XDG_CACHE_HOME=/tmp
+RUN apk add --no-cache chromium font-noto-cjk
 
 # 创建非root用户
 RUN addgroup --system --gid 1001 nodejs && \

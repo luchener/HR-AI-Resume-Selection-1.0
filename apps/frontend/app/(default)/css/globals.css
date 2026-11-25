@@ -106,7 +106,6 @@
 }
 
 :root {
-  --font-mono: "Geist Mono", monospace;
   --font-sans: "Geist", sans-serif;
   --radius: 0.5rem;
   --background: #f3f6fa;
@@ -215,5 +214,290 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .announcement-overlay, .announcement-enter, .announcement-leave { animation: none !important; }
+}
+
+/* ============================================================
+   黑白极简 v2：中性灰、墨黑结构、0 圆角、极少量语义色
+   覆盖旧品牌蓝令牌，保留原有 token 名称，避免逐页改类名。
+   ============================================================ */
+@theme {
+  --color-ink: #111111;
+  --color-body: #383838;
+  --color-sub: #545454;
+  --color-line: #d8d8d8;
+  --color-line-strong: #b5b5b5;
+  --color-control: #e5e5e5;
+  --color-control-hover: #d7d7d7;
+  --color-control-border: #c6c6c6;
+  --color-score-tick: #949494;
+  --color-good-on-ink: #61c490;
+  --color-warn-on-ink: #e6b058;
+  --color-bad-on-ink: #f1888d;
+  --color-line-soft: #e8e8e8;
+  --color-soft: #efefef;
+  --color-mist: #f8f8f8;
+
+  --color-brand: #111111;
+  --color-brand-soft: #f2f2f2;
+  --color-brand-deep: #111111;
+  --color-brand-hover: #2a2a2a;
+  --color-brand-hover-soft: #2a2a2a;
+
+  --color-navy: #111111;
+  --color-navy-hover: #2a2a2a;
+  --color-nav-active-bg: #111111;
+  --color-nav-active-border: #111111;
+  --color-nav-accent: #111111;
+  --color-nav-accent-fg: #ffffff;
+  --color-nav-ring: rgba(17, 17, 17, 0.25);
+  --color-check-accent: #111111;
+  --color-disabled-bg: #e5e5e5;
+  --color-disabled-fg: #6b6b6b;
+
+  --color-good: #1b6b45;
+  --color-good-soft: #eaf3ee;
+  --color-good-deep: #155c3a;
+  --color-good-ink: #1b6b45;
+  --color-good-border: #cfe3d8;
+  --color-good-border-soft: #dcebe3;
+
+  --color-bad: #a12b32;
+  --color-bad-soft: #f9ecec;
+  --color-bad-border: #e4c7c9;
+  --color-bad-hover: #8a2329;
+  --color-bad-hover-soft: #f3dcdd;
+
+  --color-warn: #8a5a12;
+  --color-warn-soft: #faf1df;
+  --color-warn-border: #e6d3ae;
+  --color-warn-border-soft: #eadfc8;
+  --color-warn-border-faint: #f0e6d2;
+  --color-warn-panel: #fdf8ee;
+  --color-warn-ink: #8a5a12;
+  --color-warn-ink-deep: #6f470c;
+  --color-warn-strong: #553608;
+  --color-warn-divider: #eadfc8;
+  --color-warn-btn-border: #d9c9a4;
+  --color-warn-btn-hover: #fdf6e7;
+
+  --color-violet: #545454;
+
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+}
+
+:root {
+  --background: #efefef;
+  --foreground: #111111;
+  --card: #ffffff;
+  --card-foreground: #111111;
+  --popover: #ffffff;
+  --popover-foreground: #111111;
+  --primary: #111111;
+  --primary-foreground: #ffffff;
+  --secondary: #f2f2f2;
+  --secondary-foreground: #111111;
+  --muted: #f2f2f2;
+  --muted-foreground: #545454;
+  --accent: #f2f2f2;
+  --accent-foreground: #111111;
+  --destructive: #a12b32;
+  --border: #d8d8d8;
+  --input: #d8d8d8;
+  --ring: #111111;
+  --radius: 0rem;
+  caret-color: #111111;
+}
+
+@layer base {
+  html {
+    background: #efefef;
+  }
+
+  body {
+    background: #efefef;
+    color: #111111;
+    font-family: var(--font-geist), "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.62;
+  }
+
+  * {
+    border-color: var(--color-line);
+  }
+
+  *:focus-visible {
+    outline: 2px solid #111111;
+    outline-offset: 2px;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #6b6b6b;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #c6c6c6 transparent;
+  }
+}
+
+::selection {
+  background: #111111;
+  color: #ffffff;
+}
+
+/* 去掉旧稿的投影；v2 只用 1px 线分区。 */
+.shadow-sm,
+.shadow,
+.shadow-md,
+.shadow-lg,
+.shadow-xl,
+.shadow-2xl {
+  box-shadow: none !important;
+}
+
+/* 登录页眼睛方块：v2 唯一允许圆角的元素。 */
+.eye-cube {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 88px;
+  height: 88px;
+  flex: none;
+  background: #ffffff;
+  border: 1px solid #d8d8d8;
+  border-radius: 20px;
+  user-select: none;
+}
+
+.eye-cube__eye {
+  display: block;
+  width: 11px;
+  height: 18px;
+  transform: translate(var(--ex, 0px), var(--ey, 0px));
+  will-change: transform;
+}
+
+.eye-cube__dot {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #111111;
+  border-radius: 50%;
+  transition: transform 140ms ease;
+}
+
+.eye-cube__eye.is-blinking .eye-cube__dot {
+  transform: scaleY(0.12);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eye-cube__eye {
+    transform: none;
+  }
+
+  .eye-cube__dot {
+    transition: none;
+  }
+}
+
+/* ============================================================
+   报告页：导出复印机
+   ============================================================ */
+:root {
+  --ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+}
+
+body {
+  --font-mono: var(--font-space-grotesk), var(--font-geist), "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+  --label: var(--font-mono);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* Resume selection: a file is received into the draft, with no simulated upload progress. */
+.resume-dropzone-prompt,
+.resume-dropzone-icon {
+  transition: transform 240ms cubic-bezier(.22, 1.35, .36, 1), opacity 160ms ease-out;
+}
+
+.resume-dropzone[data-dragging] .resume-dropzone-prompt {
+  transform: scale(1.025);
+}
+
+.resume-dropzone[data-dragging] .resume-dropzone-icon {
+  transform: translateY(-8px) scale(1.12);
+}
+
+.resume-dropzone[data-receipt] .resume-dropzone-prompt {
+  opacity: 0;
+  transform: scale(.96);
+}
+
+.resume-dropzone-feedback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.resume-dropzone-flight,
+.resume-dropzone-receipt {
+  grid-area: 1 / 1;
+  display: flex;
+  align-items: center;
+  background: white;
+  border: 1px solid var(--color-line-strong);
+  color: var(--color-ink);
+}
+
+.resume-dropzone-flight {
+  justify-content: center;
+  width: 54px;
+  height: 62px;
+  animation: resume-drop-flight 340ms cubic-bezier(.54, .05, .84, .35) both;
+}
+
+.resume-dropzone-receipt {
+  width: min(300px, calc(100% - 32px));
+  gap: 12px;
+  padding: 12px;
+  animation: resume-drop-receive 370ms cubic-bezier(.2, 1.3, .4, 1) 255ms both;
+}
+
+@keyframes resume-drop-flight {
+  0% { transform: translate(var(--drop-x), var(--drop-y)) rotate(-8deg) scale(1.15); opacity: 1; }
+  70% { opacity: 1; }
+  100% { transform: translate(0, 0) scale(.16, .38); opacity: 0; }
+}
+
+@keyframes resume-drop-receive {
+  0% { transform: scale(1.15, .84); opacity: 0; }
+  60% { transform: scale(.98, 1.03); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .resume-dropzone-prompt,
+  .resume-dropzone-icon { transition: none; }
+  .resume-dropzone[data-dragging] .resume-dropzone-prompt,
+  .resume-dropzone[data-dragging] .resume-dropzone-icon,
+  .resume-dropzone[data-receipt] .resume-dropzone-prompt { transform: none; }
+  .resume-dropzone-flight { display: none; }
+  .resume-dropzone-receipt { animation: none; }
 }
 

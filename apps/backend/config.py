@@ -2,11 +2,13 @@
 极简配置。用 os.getenv + python-dotenv，不要 pydantic-settings。
 所有默认值都保证：没有 .env 也能跑（零配置）。
 """
+import ipaddress
 import logging
 import os
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+import source_drain
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,11 @@ def _strip_quotes(value):
 # 项目根目录（apps/backend/），数据/日志用绝对路径，宝塔下不会散落
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(BASE_DIR, ".env")
-load_dotenv(dotenv_path=ENV_FILE)
+DOTENV_DISABLED = _strip_quotes(os.getenv("DOTENV_DISABLED", "")).lower() in {
+    "1", "true", "yes", "on",
+}
+if not DOTENV_DISABLED:
+    load_dotenv(dotenv_path=ENV_FILE)
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LOG_DIR = _strip_quotes(os.getenv("LOG_DIR")) or os.path.join(BASE_DIR, "logs")
 
@@ -77,6 +83,14 @@ else:
     ALLOWED_ORIGINS = [
         f"http://localhost:{p}" for p in (3000, 3001, 3002)
     ] + [f"http://127.0.0.1:{p}" for p in (3000, 3001, 3002)]
+
+# CSRF 可信外部 Origin（逗号分隔的绝对源，如 https://workbench.example.invalid）。
+# 与 CORS 的 ALLOWED_ORIGINS 分开：CORS 决定"谁能读取响应"，这里决定"写请求的 Origin 是否可信"。
+# 反向代理与 Next.js rewrite（changeOrigin）会把上游 Host 改成后端地址，因此不能用
+# request.host 或 X-Forwarded-Host 推断同源，只能显式配置。未配置时写请求一律拒绝（fail closed）。
+_csrf_raw = (_strip_quotes(os.getenv("CSRF_TRUSTED_ORIGINS", ""))
+             or _strip_quotes(os.getenv("TRUSTED_ORIGINS", "")) or "")
+CSRF_TRUSTED_ORIGINS = [item.strip() for item in _csrf_raw.split(",") if item.strip()]
 
 # ── SMTP 邮件配置（忘记密码重置）───────────────────────────────────
 # 未配置时重置接口返回 503，提示管理员配置邮件服务。
@@ -251,6 +265,32 @@ try:
 except (TypeError, ValueError):
     TRUSTED_PROXY_COUNT = 1
 
+_DEFAULT_TRUSTED_PROXY_CIDRS = (
+    "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7"
+)
+
+
+def _network_list(value: str) -> tuple:
+    networks = []
+    for item in str(value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            logger.warning("忽略非法 TRUSTED_PROXY_CIDRS 项: %r", item)
+    return tuple(networks)
+
+
+# 只有 TCP 直连对端落在这些网段时，才允许读取 X-Forwarded-For。仅配置跳数不够：
+# 若后端被绕过代理直连，攻击者可以自己提供整个头部并把右数第一项写成任意 IP。
+TRUSTED_PROXY_NETWORKS = _network_list(
+    _strip_quotes(
+        os.getenv("TRUSTED_PROXY_CIDRS", _DEFAULT_TRUSTED_PROXY_CIDRS)
+    )
+)
+
 
 # 子目录（启动时自动创建）
 RESUMES_DIR = os.path.join(DATA_DIR, "resumes")
@@ -307,27 +347,30 @@ except (TypeError, ValueError):
     RETENTION_DAYS = 30
 
 PRUNE_TOUCH_FILE = os.path.join(DATA_DIR, ".last_prune")  # 懒清理哨兵：每日最多清理一次
-for _d in (
-    DATA_DIR,
-    RESUMES_DIR,
-    JOBS_DIR,
-    ARCHIVES_DIR,
-    INVITE_REQUESTS_DIR,
-    INVITE_CODES_DIR,
-    INVITE_CODES_AUDIT_DIR,
-    LOGIN_FAILURES_DIR,
-    RATE_LIMITS_DIR,
-    ADMIN_OPS_DIR,
-    USER_USAGE_DIR,
-    ANNOUNCEMENTS_DIR,
-    ANNOUNCEMENT_READS_DIR,
-    EMAIL_IMAGES_DIR,
-    EMAIL_LOGS_DIR,
-    SYSTEM_CONFIG_DIR,
-    QUOTA_DIR,
-    LOG_DIR,
-):
-    os.makedirs(_d, exist_ok=True)
+# Imports by new CLI/scheduler processes can create directories too. Admit this
+# initialization before touching the source, even if their main() is guarded.
+with source_drain.activity('commands'):
+    for _d in (
+        DATA_DIR,
+        RESUMES_DIR,
+        JOBS_DIR,
+        ARCHIVES_DIR,
+        INVITE_REQUESTS_DIR,
+        INVITE_CODES_DIR,
+        INVITE_CODES_AUDIT_DIR,
+        LOGIN_FAILURES_DIR,
+        RATE_LIMITS_DIR,
+        ADMIN_OPS_DIR,
+        USER_USAGE_DIR,
+        ANNOUNCEMENTS_DIR,
+        ANNOUNCEMENT_READS_DIR,
+        EMAIL_IMAGES_DIR,
+        EMAIL_LOGS_DIR,
+        SYSTEM_CONFIG_DIR,
+        QUOTA_DIR,
+        LOG_DIR,
+    ):
+        os.makedirs(_d, exist_ok=True)
 
 
 # ── 简历文案核验（防“文案骗人”）────────────────────────────────────
@@ -425,4 +468,9 @@ def check_production():
                 "[config] ENV=production 时必须在 .env 中显式配置 ADMIN_EMAILS"
                 "（超级管理员白名单邮箱，逗号分隔）。\n"
                 "不能依赖源码默认值：默认值在公开仓库里，照默认部署的环境带有公开超管身份。"
+            )
+        if TRUSTED_PROXY_COUNT > 0 and not TRUSTED_PROXY_NETWORKS:
+            raise SystemExit(
+                "[config] TRUSTED_PROXY_COUNT > 0 时必须配置有效的 TRUSTED_PROXY_CIDRS，"
+                "否则所有 X-Forwarded-For 都会被拒绝。"
             )

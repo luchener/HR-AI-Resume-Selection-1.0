@@ -396,6 +396,8 @@ POST /api/v1/auth/login (body: {username, password, captcha_id, captcha_code})
 | `LOGIN_FREEZE_THRESHOLD` | 6 | 窗口内失败达到该次数 → 冻结账号 |
 | `LOGIN_MAX_FAIL_PER_IP_10MIN` | 10 | 单 IP 10 分钟失败上限 |
 | `LOGIN_IP_LOCK_MINUTES` | 10 | IP 锁定时长（分钟） |
+| `TRUSTED_PROXY_COUNT` | 1 | 可信反代为 X-Forwarded-For 追加的真实跳数；直连设为 0 |
+| `TRUSTED_PROXY_CIDRS` | 本机/私有网段 | 只有 TCP 对端属于这些 CIDR 时才接受 X-Forwarded-For |
 | `LOGIN_UNFREEZE_VIA_EMAIL` | on | 冻结账号是否允许邮箱自助解冻 |
 | `LOGIN_FREEZE_AUTO_UNFREEZE_HOURS` | 0 | 冻结后自动解冻小时数（0=不自动解冻） |
 
@@ -859,9 +861,9 @@ npx tsc --noEmit -p tsconfig.json
 
 ```bash
 cd /opt/resume-matcher-agent-cn
-docker compose up -d --build
-docker compose ps
-docker compose logs -f backend
+docker compose -f docker-compose.secure.yml up -d --build
+docker compose -f docker-compose.secure.yml ps
+docker compose -f docker-compose.secure.yml logs -f backend
 ```
 
 ### 6.2 后端构建注意事项
@@ -976,8 +978,8 @@ tar -xvf deploy.tar -C AIResumeSmartSelection1.0-CloudDeploymentVersion
 cd AIResumeSmartSelection1.0-CloudDeploymentVersion
 ```
 
-> ⚠️ 打包会把本地 `apps/backend/.env`（含密钥）一起带上，部署方便；但**不要外传这个 tar 包**。
-> 如果解压后没有 `.env`，按 Step 4 在服务器上重建。
+> ⚠️ 交付包必须排除 `apps/backend/.env`。真实密钥只在服务器本地创建，权限设为 `600`；
+> 打包后用 `tar -tf deploy.tar | grep -E '(^|/)\.env$'` 验证无输出。
 
 **方式 ②：手动上传到 /opt（WinSCP / FinalShell / scp）**
 
@@ -993,9 +995,10 @@ cd AIResumeSmartSelection1.0-CloudDeploymentVersion
 **需要上传的内容**（保持目录结构一致）：
 
 ```
-apps/backend/               # 后端源码 + Dockerfile + .env
+apps/backend/               # 后端源码 + Dockerfile（不含 .env）
 apps/frontend/              # 前端源码 + Dockerfile
 docker-compose.yml
+docker-compose.secure.yml
 package.json
 .dockerignore
 .gitignore
@@ -1011,9 +1014,9 @@ ls /opt/AIResumeSmartSelection1.0-CloudDeploymentVersion
 ### Step 4：配置 .env（关键）
 ```bash
 cd /opt/AIResumeSmartSelection1.0-CloudDeploymentVersion
-ls apps/backend/.env          # 确认 .env 已随上传带上来
-# 如果没有 .env（打包/上传时漏了），则：
-# cp apps/backend/.env.sample apps/backend/.env
+test ! -e apps/backend/.env   # 不应随源码上传
+cp apps/backend/.env.sample apps/backend/.env
+chmod 600 apps/backend/.env
 nano apps/backend/.env
 ```
 必改 3 项：`ENV="production"`、`LLM_API_KEY="sk-..."`（DeepSeek）、随机 `SESSION_SECRET_KEY`/`JWT_SECRET_KEY`（用 `python3 -c "import secrets; print(secrets.token_urlsafe(48))"` 生成）。
@@ -1021,8 +1024,8 @@ nano apps/backend/.env
 ### Step 5：构建启动
 ```bash
 cd /opt/AIResumeSmartSelection1.0-CloudDeploymentVersion
-docker compose up -d --build      # 首次 5-15 分钟
-docker compose ps                 # 两个容器 healthy
+docker compose -f docker-compose.secure.yml up -d --build   # 首次 5-15 分钟
+docker compose -f docker-compose.secure.yml ps              # 两个容器 healthy
 curl http://127.0.0.1:8000/ping   # → {"database":"reachable","message":"pong"}
 ```
 > ⚠️ **踩坑点**：如果 `docker compose ps` 只有 backend 没有 frontend，或报 `Conflict. The container name ... is already in use`：
@@ -1214,16 +1217,16 @@ LLM 只输出分项依据，**不计算最终得分**；服务端按固定公式
 
    分项缺失（LLM 未输出完整五项）时回退 `job_fit_score`；五项齐全时以分项之和为准（`_validate_report` 要求总和与 `job_fit_score` 一致，不一致触发重试）。
 
-2. **AI 美化扣分** `deduction`：按 `ai_risk` 档位钳制（`_AI_RISK_RULES`）：
+2. **AI 美化风险** `ai_risk` / `ai_deduction`：按 `ai_risk` 档位钳制（`_AI_RISK_RULES`）：
 
-   | ai_risk | 扣分范围 |
+   | ai_risk | 扣分范围（旧 `enforce` 模式） |
    |---|---|
    | none | 0 |
    | light（轻微） | 5–10 |
    | medium（中度） | 15–20 |
    | high（重度/模板） | 30（固定） |
 
-   LLM 建议的 `ai_deduction` 会被钳到对应档位区间；`final_score = max(0, base_score − deduction)`。
+   LLM 建议的 `ai_deduction` 会被钳到对应档位区间。**默认 `AI_RISK_DEDUCTION_MODE=readonly`：这一项不参与扣分**（`deduction` 恒为 0），只作为"疑似 AI 包装"风险提示留在报告里，模型建议分记在 `ai_deduction_suggested`，判断权交回 HR —— 理由是风格印象没有可核对的对象，而实测同一份简历连跑三次扣分 5/15/5、足以跨过 60 分线改变最终动作（见 `docs/简历筛选判定机制.md` §10 第十一轮）。设 `AI_RISK_DEDUCTION_MODE=enforce` 可恢复上表行为。
 
 3. **硬门槛确定性扣分** `hard_gate_deduction`（服务端确定性兜底，不依赖 LLM 自觉）：
    从 `requirements_checklist` 读取 `status == "not_met"` 的硬性要求（见 8.8 前置判定）：
@@ -1278,7 +1281,7 @@ LLM 只输出分项依据，**不计算最终得分**；服务端按固定公式
 | **打印 PDF** | 隐藏 iframe `doc.write` + `win.print()` | 用户选"另存为 PDF"；替代 `window.open`（不被弹窗拦截） |
 | **导出 Word** | 同一 HTML + `xmlns:w` Office 命名空间 + `.doc` 扩展名 | Word 打开即可编辑 |
 
-**导出内容**：评估总览 → 核心判定 → Agent 校验（始终输出，通过时绿色一行）→ 基础信息 → 教育经历（全段，无 `[:8]` 截断）→ 工作履历 + 经历明细 → 匹配亮点 → 短板与风险 → 专业技能 → 竞争力加分项 → 岗位定制判断 → 美化程度判断依据 → 简历标记要点表。
+**导出内容**：评估总览 → 核心判定 → Agent 校验（始终输出，通过时绿色一行）→ 基础信息 → 教育经历（全段，无 `[:8]` 截断）→ 工作履历 + 经历明细 → 匹配亮点 → 短板与风险 → 专业技能 → 竞争力加分项 → 岗位定制判断 → 美化程度判断依据 → **岗位要求逐条判定 + 系统不判定项** → **真实性核验（`credibility` 存在时；含定性说明、三级分级、证据与"面试该问"）** → 简历标记要点表。
 
 **注意**：导出不包含评分构成（裸分数无参考价值）和候选人排名（单份报告不需要交叉对比，批量场景中排名在页面查看）。
 
@@ -1403,6 +1406,20 @@ URL.createObjectURL + <a download> → 浏览器下载 JPEG
 
 **分数一致性（关键约束）**：LLM **不允许重新打分**——Prompt 明确排名中的 `score` 仅是占位示例，服务端在后处理（`score_by_name` 映射）用系统 `final_score` **覆盖**每个排名的分数：先精确匹配姓名，再空白不敏感包含匹配兜底；未匹配到 → 0 分；随后按分数降序排序并重新编号 1..N。报告页「候选人排名」得分单元格优先读取 `hr_analysis.final_score`（系统分数），保证排名与报告头部、右侧面板完全一致，杜绝 LLM 自评分造成的显示不一致。
 
+### 8.10 表述核验层（只读防欺骗）
+
+**位置**：`apps/backend/deception_check.py`，由 `app._normalize_hr_analysis()` 调用，结论挂在 `hr_analysis.credibility`。
+
+| 项 | 当前口径 |
+|---|---|
+| 规则 | **13 条**（4 条只看简历原文 + 9 条对账 LLM 报告），口径版本 `deception-check-v3`；单次最多展示 12 条 |
+| 只读 | 不参与 `final_score`、等级、排序与扣分；`on` 与 `shadow` 下分数逐字节一致（有单测守着） |
+| 三态开关 | `config.DECEPTION_CHECK_MODE`：`off`（不跑）/ `shadow`（只写日志，不上界面）/ `on`（进报告与导出）。代码默认 `shadow`，本项目 `.env` 为 `on` |
+| 呈现 | 报告页 `#sec-credibility`「表述核验与待核实项」（`credibility-panel.tsx`）：默认整体收起（一行计数 45px），展开后每条一行标题 + 一行「问：…」，说明/证据/完整问法进单条「依据」；0 命中一行绿色；导出件全量不收纳 |
+| 缓存联动 | 判定口径变更必须同时改 `_HR_ANALYSIS_VERSION`（缓存 key 含它）；规则集变更改 `CREDIBILITY_VERSION`，否则会继续展示旧口径结果 |
+| 文案纪律 | 面板与导出都是**纯文本渲染**：文案里不许出现 markdown（`**加粗**` 会被原样显示）；字段名说人话（`summary` → 总体评价、`risk_points` → 风险提示），不把 `work_history.employment_records` 这类路径甩给 HR；**「面试该问」必须是 HR 能照着念的问法**（用『』包住），报告侧问题则明确写"这条不用问候选人"；证据若是模型自己写断的半句话，必须标注出来。四条通属性用例守着这些（`test_deception_check.FindingWordingTests`） |
+| 验收视口 | 面板高度是验收指标之一（收起 ≤80px、展开 ≤420px），**量之前必须确认视口是桌面宽度**：本项目用的 Edge `--headless=new` 不支持 `Emulation.setDeviceMetricsOverride`，会让页面悄悄跑在 360px 窄屏下、把面板挤成多行（qa4/qa6 已把「视口 ≥1200」做成硬断言） |
+
 **容错**：LLM 调用失败（无 key / 超时 / 网络异常）时返回 `None` 并记日志，批量响应不受影响（对比只是增强能力）。前端在切换候选人时保留 `comparison` 字段，避免「候选人排名」消失。
 
 **前端展示**：dashboard 页面「候选人排名」模块，展示排名表格 + 差异对比 + 优先面试建议。排名在页面始终显示（批量模式），**导出报告中不包含**（单份决策报告无需交叉对比）。
@@ -1421,7 +1438,7 @@ URL.createObjectURL + <a download> → 浏览器下载 JPEG
 | `apps/backend/.env` / `.env.sample` | production 配置 + JWT 密钥 |
 | `apps/backend/Dockerfile` | 复制 auth.py；gunicorn 4 workers |
 | `apps/frontend/...` | 登录页、auth-context、API 鉴权头、移除模型配置、登出 |
-| `docker-compose.yml` | 端口 0.0.0.0；ENV 从 .env 读取 |
+| `docker-compose.yml` | 前后端均只监听 `127.0.0.1`；生产使用 `docker-compose.secure.yml`，ENV 从服务器本地 .env 读取 |
 | `package.json` / `.gitignore` | 构建脚本、忽略测试临时目录 |
 | `docs/ARCHITECTURE.md` | 📄 架构与部署文档 |
 
@@ -1437,7 +1454,9 @@ URL.createObjectURL + <a download> → 浏览器下载 JPEG
 | `apps/frontend/components/workbench/resume-review-panel.tsx` | 🆕 简历重点标记面板（高亮渲染 + 三种导出） |
 | `apps/frontend/lib/api/screening.ts` | 新增 `fetchResumeReviewMarkers` / `fetchResumeView` API |
 | `apps/frontend/components/workbench/analysis-context.tsx` | `HrAnalysis` 类型：新增 `education_history` / `agent_validation`；新增 `CandidateComparison` |
-| `apps/frontend/app/(default)/dashboard/page.tsx` | 报告页：指标卡 → 导出中心 → 排名 → 核心判定 → Agent 校验（始终可见）→ 基础信息 → 教育经历 → 工作履历 → 亮点/短板/风险 → 技能/加分 → 岗位定制/美化依据；右侧 sticky 决策摘要 + 页内导航（scroll-spy）|
+| `apps/frontend/app/(default)/dashboard/page.tsx` | 报告页：指标卡 → 导出中心 → 排名 → 核心判定 → Agent 校验（始终可见）→ 基础信息 → 教育经历 → 工作履历 → 亮点/短板/风险 → 技能/加分 → 岗位定制/美化依据；**岗位要求逐条判定（`#sec-requirements`）与真实性核验（`#sec-credibility`，仅 `on` 模式）两个分区插在亮点与风险之前**；右侧 sticky 决策摘要 + 页内导航（scroll-spy）|
+| `apps/frontend/components/workbench/requirements-checklist.tsx` | 报告页「岗位要求逐条判定」：默认只列需人工判断的条目 + 计数常显 + 档位/依据/未判定项 |
+| `apps/frontend/components/workbench/credibility-panel.tsx` | 报告页「表述核验与待核实项」（只读）：**默认整体收起**（常显计数 + 展开开关，本体 45px），展开后每条一行标题 + 一行「问：…」，依据逐条展开；空态一行绿色；`credibility` 缺省时返回 `null` |
 | `apps/frontend/components/workbench/report-export.tsx` | 🆕 统一导出中心：单 HTML 模型 × 3 格式（JPEG/PDF/Word），懒加载标记数据；另导出 `captureReportPng` / `downloadReportImage` 供归档实时导出 |
 | `.dockerignore` | 排除 `test_*.py` / `smoke_test_*.py` / `*.log`（不进生产镜像） |
 | `apps/backend/Dockerfile` | `COPY apps/backend/*.py ./`（通配符，新模块自动包含） |

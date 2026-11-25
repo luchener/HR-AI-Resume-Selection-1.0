@@ -11,6 +11,34 @@
 from __future__ import annotations
 
 import os
+import re
+
+
+_SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", "CLOCK$"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def safe_component(value: str, *, max_length: int = 128) -> str:
+    """Return a single safe path component, or empty for traversal/device names.
+
+    Resource identifiers are generated as UUIDs or simple test IDs.  Path
+    separators, dots, control characters, ADS colons and overlong values are
+    never needed and must not reach os.path.join on Windows.
+    """
+    text = str(value or "")
+    device_name = text.split(".", 1)[0].upper()
+    if (
+        not text
+        or len(text) > max_length
+        or not _SAFE_COMPONENT.fullmatch(text)
+        or device_name in _WINDOWS_RESERVED_NAMES
+    ):
+        return ""
+    return text
 
 
 def listdir(directory: str) -> list[str]:

@@ -1,9 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ArchiveIcon,
   ArchiveRestoreIcon,
+  ChevronDownIcon,
   CheckCircle2Icon,
   DownloadIcon,
   FileSearch2Icon,
@@ -15,6 +15,7 @@ import {
   XIcon,
 } from 'lucide-react';
 import AppShell from '@/components/workbench/app-shell';
+import { ArchiveArrival, archiveRowId } from '@/components/workbench/archive-arrival';
 import ConfirmDialog from '@/components/workbench/confirm-dialog';
 import { useDialogBehavior } from '@/components/workbench/dialog-behavior';
 import {
@@ -60,7 +61,7 @@ function ScoreBadge({ score }: { score: number }) {
 }
 
 function rankMedal(rank: number): string {
-  return String(rank);
+  return String(rank).padStart(2, '0');
 }
 
 function timeLabel(iso?: string | null): string {
@@ -81,6 +82,8 @@ export default function ArchivesPage() {
   const [sort, setSort] = useState<'score' | 'created'>('score');
   /** 只看"能力分够高、却被硬门槛卡住"的候选人——这批人最容易被分数排序埋掉 */
   const [overrideOnly, setOverrideOnly] = useState(false);
+  const activeFilters = [nameQuery.trim() && `姓名：${nameQuery.trim()}`, categoryFilter, tagFilter, overrideOnly && '建议破格复核'].filter(Boolean);
+  const [listRevision, setListRevision] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ArchiveRecord | null>(null);
@@ -91,7 +94,7 @@ export default function ArchivesPage() {
   const [error, setError] = useState('');
   /** 待确认的高风险操作（P1-2：替代原生 window.confirm） */
   const [pendingAction, setPendingAction] = useState<{ kind: 'trash' | 'delete' | 'empty' | 'purge-source'; record?: ArchiveRecord } | null>(null);
-  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previousQuery = useRef(nameQuery);
 
   // 详情抽屉：统一弹窗行为（Esc 关闭 / 焦点恢复 / Tab 陷阱）——P1-3
   const drawerPanelRef = useRef<HTMLDivElement>(null);
@@ -101,23 +104,25 @@ export default function ArchivesPage() {
     panelRef: drawerPanelRef,
   });
 
-  const loadActive = useCallback(async (query = nameQuery) => {
+  const listRequestRef = useRef(0);
+  const loadActive = useCallback(async (query: string) => {
+    const request = ++listRequestRef.current;
     setLoading(true);
     try {
       const data = await fetchArchives({
-        name: query || undefined,
+        name: query.trim() || undefined,
         category: categoryFilter || undefined,
         tag: tagFilter || undefined,
         sort,
       });
+      if (request !== listRequestRef.current) return;
       setArchives(data.archives);
       setCategories(data.meta.categories || []);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : '归档列表读取失败。');
+      if (request === listRequestRef.current) setError(caught instanceof Error ? caught.message : '归档列表读取失败。');
     } finally {
-      setLoading(false);
+      if (request === listRequestRef.current) setLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [categoryFilter, tagFilter, sort]);
 
   const loadTrash = useCallback(async () => {
@@ -130,19 +135,19 @@ export default function ArchivesPage() {
   }, []);
 
   useEffect(() => {
-    if (tab === 'active') loadActive();
-    else loadTrash();
-  }, [tab, loadActive, loadTrash]);
+    if (tab === 'trash') void loadTrash();
+  }, [tab, loadTrash]);
 
   // 姓名查询防抖
   useEffect(() => {
     if (tab !== 'active') return;
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => loadActive(nameQuery), 300);
-    return () => {
-      if (searchTimer.current) clearTimeout(searchTimer.current);
-    };
-  }, [nameQuery, tab, loadActive]);
+    listRequestRef.current += 1;
+    setLoading(true);
+    const queryChanged = nameQuery !== previousQuery.current;
+    previousQuery.current = nameQuery;
+    const timer = window.setTimeout(() => { void loadActive(nameQuery); }, queryChanged ? 300 : 0);
+    return () => window.clearTimeout(timer);
+  }, [nameQuery, tab, listRevision, loadActive]);
 
   const ranked = useMemo(() => {
     // 动态排名：对当前筛选结果按 final_score 降序，同分并列取相同名次
@@ -195,7 +200,7 @@ export default function ArchivesPage() {
     try {
       await restoreArchive(record.archive_id);
       setTrash((prev) => prev.filter((a) => a.archive_id !== record.archive_id));
-      await loadActive();
+      setListRevision((revision) => revision + 1);
       showNotice(`「${record.candidate_name}」已恢复到人才库`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '恢复失败。');
@@ -222,7 +227,7 @@ export default function ArchivesPage() {
     setBusyId(record.archive_id);
     try {
       const { archivedToTrash } = await deleteResumeSource(record.resume_id);
-      await loadActive();
+      setListRevision((revision) => revision + 1);
       await loadTrash();
       showNotice(
         archivedToTrash > 0
@@ -281,7 +286,7 @@ export default function ArchivesPage() {
       const updated = await updateArchiveCategory(detail.archive_id, category);
       setDetail(updated);
       setArchives((prev) => prev.map((a) => (a.archive_id === updated.archive_id ? updated : a)));
-      await loadActive();
+      setListRevision((revision) => revision + 1);
       showNotice('岗位分类已更新');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '分类更新失败。');
@@ -309,30 +314,31 @@ export default function ArchivesPage() {
 
   return (
     <AppShell active="archives">
-      <div className="mx-auto w-full max-w-[1500px] px-5 py-8 sm:px-8 lg:px-10 lg:py-10 xl:px-14">
+      <Suspense fallback={null}><ArchiveArrival ready={tab === 'active' && !loading} /></Suspense>
+      <div className="mx-auto w-full max-w-[1300px] px-5 py-8 sm:px-8 lg:px-12 lg:py-10">
         {/* 头部 */}
-        <header className="flex flex-col gap-4 border-b border-line pb-7 xl:flex-row xl:items-end xl:justify-between">
+        <header className="flex flex-col gap-6 border-b border-line pb-6 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <p className="text-xs font-semibold uppercase text-sub">Archive Pool</p>
-            <h1 className="mt-2 text-3xl font-semibold text-ink sm:text-4xl">候选人才库</h1>
-            <p className="mt-3 text-sm text-sub">归档已通过 AI 筛选的候选人，支持按姓名查询、岗位分类与分数排名</p>
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-sub">03 / Archive</p>
+            <h1 className="mt-4 text-[42px] font-medium leading-[1.06] tracking-[-0.028em] text-ink">候选人才库</h1>
+            <p className="mt-3 max-w-[62ch] text-sm leading-6 text-sub">归档已通过 AI 筛选的候选人，支持按姓名查询、岗位分类与分数排名。</p>
           </div>
-          <div className="flex items-center gap-1 rounded-md border border-line bg-white p-1">
+          <div className="flex items-center gap-0.5 border border-line bg-mist p-0.5">
             <button
               type="button"
               onClick={() => setTab('active')}
-              className={`inline-flex h-9 items-center gap-2 rounded px-4 text-sm font-medium transition-colors ${tab === 'active' ? 'bg-brand-deep text-white' : 'text-body hover:bg-mist'}`}
+              className={`inline-flex h-9 items-center gap-2 px-3 text-[12px] font-medium transition-colors ${tab === 'active' ? 'bg-ink text-white' : 'text-sub hover:text-ink'}`}
             >
-              <ArchiveIcon className="size-4" /> 在库人才
-              <span className="rounded bg-black/10 px-1.5 text-xs">{archives.length}</span>
+              在库人才
+              <span className={`font-mono text-[9px] ${tab === 'active' ? 'text-white/60' : 'text-sub'}`}>{archives.length}</span>
             </button>
             <button
               type="button"
               onClick={() => setTab('trash')}
-              className={`inline-flex h-9 items-center gap-2 rounded px-4 text-sm font-medium transition-colors ${tab === 'trash' ? 'bg-brand-deep text-white' : 'text-body hover:bg-mist'}`}
+              className={`inline-flex h-9 items-center gap-2 px-3 text-[12px] font-medium transition-colors ${tab === 'trash' ? 'bg-ink text-white' : 'text-sub hover:text-ink'}`}
             >
-              <Trash2Icon className="size-4" /> 回收站
-              <span className="rounded bg-black/10 px-1.5 text-xs">{trash.length}</span>
+              回收站
+              <span className={`font-mono text-[9px] ${tab === 'trash' ? 'text-white/60' : 'text-sub'}`}>{trash.length}</span>
             </button>
           </div>
         </header>
@@ -352,21 +358,23 @@ export default function ArchivesPage() {
         {tab === 'active' ? (
           <>
             {/* 筛选区 */}
-            <div className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-line bg-white p-4">
+            <div className="mt-6 flex flex-wrap items-center gap-2 border-y border-line py-3">
               <div className="relative min-w-56 flex-1">
-                <SearchIcon className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-sub" />
+                <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-sub" />
                 <input
                   type="text"
                   value={nameQuery}
                   onChange={(e) => setNameQuery(e.target.value)}
                   placeholder="按候选人姓名查询…"
-                  className="w-full rounded-md border border-line-soft py-2 pl-9 pr-3 text-sm outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+                  aria-label="按候选人姓名查询"
+                  className="h-9 w-full border border-line-strong bg-white pl-8 pr-3 text-[12px] text-ink outline-none focus:border-ink"
                 />
               </div>
               <select
                 value={categoryFilter}
                 onChange={(e) => setCategoryFilter(e.target.value)}
-                className="rounded-md border border-line-soft bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand"
+                aria-label="按岗位分类筛选"
+                className="h-9 border border-line-strong bg-white px-2.5 text-[12px] text-ink outline-none focus:border-ink"
               >
                 <option value="">全部分类</option>
                 {[...new Set([...ARCHIVE_PRESET_CATEGORIES, ...categories])].map((c) => <option key={c} value={c}>{c}</option>)}
@@ -374,7 +382,8 @@ export default function ArchivesPage() {
               <select
                 value={tagFilter}
                 onChange={(e) => setTagFilter(e.target.value)}
-                className="rounded-md border border-line-soft bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand"
+                aria-label="按标签筛选"
+                className="h-9 border border-line-strong bg-white px-2.5 text-[12px] text-ink outline-none focus:border-ink"
               >
                 <option value="">全部标签</option>
                 {availableTags.map((t) => <option key={t} value={t}>{t}</option>)}
@@ -382,7 +391,8 @@ export default function ArchivesPage() {
               <select
                 value={sort}
                 onChange={(e) => setSort(e.target.value as 'score' | 'created')}
-                className="rounded-md border border-line-soft bg-white px-3 py-2 text-sm text-ink outline-none focus:border-brand"
+                aria-label="排序方式"
+                className="h-9 border border-line-strong bg-white px-2.5 text-[12px] text-ink outline-none focus:border-ink"
               >
                 <option value="score">按得分排名</option>
                 <option value="created">按归档时间</option>
@@ -391,16 +401,36 @@ export default function ArchivesPage() {
                 <button
                   type="button"
                   onClick={() => setOverrideOnly((v) => !v)}
+                  aria-pressed={overrideOnly}
                   title="工作经历/技能匹配度 ≥80，只是被硬门槛（学历层级、院校层次、证书等）封顶到 60 以下。系统不假装他们达标，但值得人工看一眼。"
-                  className={`inline-flex h-9 items-center gap-2 rounded-md border px-3 text-sm font-medium transition-colors ${
+                  className={`inline-flex h-9 items-center gap-2 border px-3 text-[12px] font-medium transition-colors ${
                     overrideOnly
-                      ? 'border-warn/50 bg-warn-soft text-warn'
-                      : 'border-line-soft bg-white text-body hover:bg-mist'
+                      ? 'border-warn bg-warn-soft text-warn'
+                      : 'border-line-strong bg-white text-sub hover:text-ink'
                   }`}
                 >
-                  <ShieldAlertIcon className="size-4" />
+                  <ShieldAlertIcon className="size-3.5" />
                   建议破格复核
-                  <span className="rounded bg-black/10 px-1.5 text-xs">{overrideCount}</span>
+                  <span className="font-mono text-[9px]">{overrideCount}</span>
+                </button>
+              )}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-sub">
+              {activeFilters.map((label, index) => <span key={index} className="border border-line bg-white px-2 py-1">{label}</span>)}
+              <span role="status">{loading ? '正在读取归档…' : `共 ${ranked.length} 名候选人`}</span>
+              {activeFilters.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNameQuery('');
+                    setCategoryFilter('');
+                    setTagFilter('');
+                    setOverrideOnly(false);
+                  }}
+                  className="px-2 py-1 text-ink underline underline-offset-2"
+                >
+                  清除筛选
                 </button>
               )}
             </div>
@@ -410,15 +440,15 @@ export default function ArchivesPage() {
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-mist">
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">排名</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">候选人</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">岗位分类</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">最终得分</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">适配等级</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">招聘建议</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">标签</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">归档时间</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-right text-xs font-semibold text-sub">操作</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">排名</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">候选人</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">岗位分类</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">最终得分</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">适配等级</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">招聘建议</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">标签</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">归档时间</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -430,11 +460,11 @@ export default function ArchivesPage() {
                       <p className="mt-3 text-sm text-sub">暂无符合条件的归档。去分析报告页点击「归档到人才库」。</p>
                     </td></tr>
                   ) : ranked.map((a) => (
-                    <tr key={a.archive_id} className="border-b border-line-soft last:border-b-0 hover:bg-soft/60">
+                    <tr key={a.archive_id} id={archiveRowId(a.archive_id)} tabIndex={-1} className="border-b border-line-soft last:border-b-0 hover:bg-soft/60">
                       <td className="px-4 py-3 font-semibold text-ink">{rankMedal(a.rank)}</td>
                       <td className="px-4 py-3">
                         <button type="button" onClick={() => openDetail(a)} className="flex items-center gap-2 text-left font-medium text-ink hover:text-brand">
-                          <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-brand-soft text-xs font-bold text-brand">
+                          <span data-archive-file className="flex size-7 shrink-0 items-center justify-center border border-line-strong bg-mist text-[11px] font-semibold text-ink">
                             {(a.candidate_name || '?').slice(0, 1)}
                           </span>
                           <span className="break-words">{a.candidate_name || '未提供'}</span>
@@ -482,30 +512,37 @@ export default function ArchivesPage() {
                       </td>
                       <td className="px-4 py-3 text-sub">{timeLabel(a.created_at)}</td>
                       <td className="px-4 py-3">
-                        <div className="flex justify-end gap-1.5">
+                        <div className="flex min-w-32 items-start justify-end gap-1.5">
                           <button
                             type="button"
                             disabled={busyId === a.archive_id}
                             onClick={() => openDetail(a)}
                             className="relative rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-ink after:absolute after:-inset-1.5 after:content-[''] hover:bg-mist disabled:opacity-50"
-                          >详情</button>
-                          <button
-                            type="button"
-                            disabled={busyId === a.archive_id}
-                            onClick={() => setPendingAction({ kind: 'trash', record: a })}
-                            className="relative rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-bad after:absolute after:-inset-1.5 after:content-[''] hover:bg-bad-soft disabled:opacity-50"
-                          >
-                            {busyId === a.archive_id ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : '移入回收站'}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busyId === a.archive_id || a.source_purged}
-                            onClick={() => setPendingAction({ kind: 'purge-source', record: a })}
-                            title={a.source_purged ? '简历原文已过保留期清除' : '永久删除该简历原文（归档移入回收站，可恢复）'}
-                            className="relative inline-flex items-center gap-1 rounded border border-line-soft px-2.5 py-1 text-xs font-medium text-bad after:absolute after:-inset-1.5 after:content-[''] hover:bg-bad-soft disabled:cursor-not-allowed disabled:opacity-40"
-                          >
-                            <FileX2Icon className="size-3.5" /> 删除原文
-                          </button>
+                          >查看报告</button>
+                          <details className="group">
+                            <summary className="flex cursor-pointer list-none items-center gap-1 border border-line px-2 py-1 text-xs text-sub hover:bg-mist [&::-webkit-details-marker]:hidden">
+                              更多 <ChevronDownIcon className="size-3 group-open:rotate-180" aria-hidden="true" />
+                            </summary>
+                            <div className="mt-1 grid gap-1">
+                              <button
+                                type="button"
+                                disabled={busyId === a.archive_id}
+                                onClick={() => setPendingAction({ kind: 'trash', record: a })}
+                                className="relative rounded border border-line-soft px-2.5 py-1 whitespace-nowrap text-xs font-medium text-bad hover:bg-bad-soft disabled:opacity-50"
+                              >
+                                {busyId === a.archive_id ? <LoaderCircleIcon className="size-3.5 animate-spin" /> : '移入回收站'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busyId === a.archive_id || a.source_purged}
+                                onClick={() => setPendingAction({ kind: 'purge-source', record: a })}
+                                title={a.source_purged ? '简历原文已过保留期清除' : '永久删除该简历原文（归档移入回收站，可恢复）'}
+                                className="relative inline-flex items-center gap-1 rounded border border-line-soft px-2.5 py-1 whitespace-nowrap text-xs font-medium text-bad hover:bg-bad-soft disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                <FileX2Icon className="size-3.5" /> 删除原文
+                              </button>
+                            </div>
+                          </details>
                         </div>
                       </td>
                     </tr>
@@ -531,11 +568,11 @@ export default function ArchivesPage() {
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-mist">
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">候选人</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">岗位分类</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">最终得分</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">回收时间</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-right text-xs font-semibold text-sub">操作</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">候选人</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">岗位分类</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">最终得分</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">回收时间</th>
+                    <th className="border-b border-line-soft px-4 py-2.5 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">操作</th>
                   </tr>
                 </thead>
                 <tbody>

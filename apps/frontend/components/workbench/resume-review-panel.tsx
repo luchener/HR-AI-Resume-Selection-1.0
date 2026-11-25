@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import html2canvas from 'html2canvas';
+import { downloadReportPdf } from '@/lib/api/report-pdf';
+import { REVIEW_EXPORT_STYLE } from '@/lib/report-export-styles';
 import {
   CameraIcon,
   DownloadIcon,
@@ -47,7 +49,7 @@ function buildHighlightedSegments(
   return segments;
 }
 
-// ── 导出辅助：纯 HTML 块（foreignObject 嵌入 / Word .doc / PDF 打印共用） ──
+// ── 导出辅助：Word 与 PDF 共用 HTML ──
 
 function buildExportHtml(review: ResumeReviewData, rawContent: string, name: string): string {
   const escapeHtml = (s: string) =>
@@ -81,15 +83,7 @@ function buildExportHtml(review: ResumeReviewData, rawContent: string, name: str
   }).join('<br>');
 
   return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>简历重点标记·${escapeHtml(name)}</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}body{font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;font-size:14px;line-height:1.8;color:#2c394f;padding:32px 36px;background:#fff;width:780px;margin:0 auto}
-h1{font-size:20px;color:#253249;margin-bottom:4px}h2{font-size:15px;color:#3e6fd3;margin:18px 0 6px;border-bottom:1px solid #dce2eb;padding-bottom:4px}
-.meta{display:flex;gap:18px;flex-wrap:wrap;margin:8px 0 16px;font-size:13px;color:#65738a}.meta span b{color:#1d7f5c;font-size:22px;margin-right:3px}
-table{border-collapse:collapse;width:100%;margin:6px 0 16px;font-size:13px}th,td{border:1px solid #dce2eb;padding:6px 10px;text-align:left;vertical-align:top}th{background:#eaf0fb;color:#3e6fd3;font-weight:600;font-size:12px}
-.resume{white-space:pre-wrap;word-break:break-word;background:#fbfcfe;border:1px solid #e5e9ef;border-radius:6px;padding:14px;margin-top:6px;font-size:13px;line-height:1.9}
-.notice{margin-top:16px;font-size:11px;color:#8190a4}
-@media print{body{padding:12px 16px;width:auto}}
-</style></head><body>
+<style>${REVIEW_EXPORT_STYLE}</style></head><body>
 <h1>简历重点标记 · ${escapeHtml(name)}</h1>
 <div class="meta">
   <span>综合得分：<b>${review.summary.final_score}</b></span>
@@ -174,9 +168,11 @@ export default function ResumeReviewPanel({
   const [rawContent, setRawContent] = useState('');
   const [review, setReview] = useState<ResumeReviewData | null>(null);
   const [error, setError] = useState('');
+  const [exportError, setExportError] = useState('');
+  const [exportingPdf, setExportingPdf] = useState(false);
   const exportRef = useRef<HTMLDivElement>(null);
 
-  function loadReview() {
+  const loadReview = useCallback(() => {
     setLoading(true);
     setError('');
     Promise.all([
@@ -193,11 +189,11 @@ export default function ResumeReviewPanel({
         setError(message.includes('404') ? '简历原文已不可用（可能已删除，或超过保留期已自动清除）。' : message || '简历重点标记加载失败。');
       })
       .finally(() => setLoading(false));
-  }
+  }, [resumeId, analysis, candidateName]);
 
   useEffect(() => {
     loadReview();
-  }, []);
+  }, [loadReview]);
 
   const segments = review ? buildHighlightedSegments(rawContent, review.annotations) : [];
   const name = review ? (review.candidate_name || candidateName || '候选人') : '候选人';
@@ -223,11 +219,11 @@ export default function ResumeReviewPanel({
       }, 'image/png');
     }).catch(() => {
       // 截图失败回退到 print 对话框
-      exportPdf();
+      printReview();
     });
   }
 
-  function exportPdf() {
+  function printReview() {
     if (!review) return;
     const html = buildExportHtml(review, rawContent, name);
     const win = window.open('', '_blank', 'width=900,height=720');
@@ -236,6 +232,19 @@ export default function ResumeReviewPanel({
       win.document.close();
       win.focus();
       setTimeout(() => win.print(), 600);
+    }
+  }
+
+  async function exportPdf() {
+    if (!review || exportingPdf) return;
+    setExportingPdf(true);
+    setExportError('');
+    try {
+      await downloadReportPdf(buildExportHtml(review, rawContent, name), `简历重点标记-${name}`, 'review');
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'PDF 导出失败，请稍后重试。');
+    } finally {
+      setExportingPdf(false);
     }
   }
 
@@ -325,19 +334,20 @@ export default function ResumeReviewPanel({
               <div className="grid grid-cols-3 gap-1.5">
                 <button
                   type="button"
-                  onClick={exportPng}
-                  className="inline-flex items-center justify-center gap-1 rounded-md bg-[#3e6fd3] px-2 py-1.5 text-[11px] font-medium text-white hover:bg-[#2f5cb8]"
+                  onClick={exportPdf}
+                  disabled={exportingPdf}
+                  className="inline-flex items-center justify-center gap-1 rounded-md bg-[#3e6fd3] px-2 py-1.5 text-[11px] font-medium text-white hover:bg-[#2f5cb8] disabled:opacity-50"
                 >
-                  <CameraIcon className="size-3" />
-                  导出图片
+                  {exportingPdf ? <LoaderCircleIcon className="size-3 animate-spin" /> : <FileTextIcon className="size-3" />}
+                  {exportingPdf ? '正在导出…' : '导出 PDF'}
                 </button>
                 <button
                   type="button"
-                  onClick={exportPdf}
+                  onClick={exportPng}
                   className="inline-flex items-center justify-center gap-1 rounded-md border border-[#d5dde9] bg-white px-2 py-1.5 text-[11px] font-medium text-[#2c394f] hover:bg-[#f3f4f6]"
                 >
-                  <DownloadIcon className="size-3" />
-                  打印 PDF
+                  <CameraIcon className="size-3" />
+                  导出图片
                 </button>
                 <button
                   type="button"
@@ -348,9 +358,7 @@ export default function ResumeReviewPanel({
                   导出 Word
                 </button>
               </div>
-              <p className="text-[10px] text-[#8190a4] leading-4">
-                PDF 通过浏览器打印对话框导出，请选择「另存为 PDF」。
-              </p>
+              {exportError && <p role="alert" className="text-xs text-[#b23b4e]">{exportError}</p>}
             </aside>
           </div>
         </div>

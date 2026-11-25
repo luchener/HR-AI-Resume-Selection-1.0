@@ -19,6 +19,7 @@ import secrets
 import sys
 
 import auth
+import source_drain
 import config  # noqa: F401  确保 config 先加载 .env 与目录
 
 
@@ -28,6 +29,7 @@ def _gen_temp_password() -> str:
     return "".join(secrets.choice(alphabet) for _ in range(10)) + "9"
 
 
+@source_drain.writer('commands')
 def main():
     ap = argparse.ArgumentParser(description="管理员紧急重置用户密码")
     ap.add_argument("username", help="要重置密码的用户名（大小写不敏感）")

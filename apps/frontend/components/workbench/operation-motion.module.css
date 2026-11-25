@@ -1,0 +1,187 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: rgb(22 24 21 / 52%);
+  animation: scrimIn 180ms ease-out both;
+}
+
+.panel {
+  width: min(100%, 34rem);
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  background: var(--color-white, #fff);
+  border: 1px solid var(--color-line-strong, #d5d5ce);
+  color: var(--color-ink, #191a17);
+  box-shadow: 0 22px 56px rgb(17 19 17 / 19%);
+  transform-origin: top left;
+}
+
+.motionPanel { animation: panelIn 250ms cubic-bezier(.22, .8, .25, 1) both; }
+.header, .footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+}
+.header { align-items: flex-start; }
+.header h2 { margin-top: .4rem; font-size: 1.25rem; font-weight: 650; line-height: 1.3; }
+.eyebrow, .machineLabel {
+  font-family: var(--font-geist-mono, ui-monospace), monospace;
+  letter-spacing: .15em;
+}
+.eyebrow { font-size: .67rem; color: var(--color-sub, #5f625b); }
+.stage {
+  display: grid;
+  place-items: center;
+  height: clamp(12rem, 47dvh, 21rem);
+  border-block: 1px solid #dedfd4;
+  background: #edede4;
+  overflow: hidden;
+}
+.machine { width: 100%; height: 100%; min-height: 0; display: block; }
+.footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; min-height: 4.75rem; }
+.status { display: flex; align-items: flex-start; gap: .65rem; min-width: 0; }
+.footerAction { display: flex; justify-content: flex-end; }
+.actionSpace { display: block; min-height: 2.4rem; }
+.actionSpace, .footerAction > a { min-width: 8.75rem; }
+.footerAction > a { animation: actionIn 200ms ease-out both; }
+.statusMark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border: 1px solid #dddcd2;
+  background: #f0efe7;
+  color: #534c3d;
+  transition: background-color 180ms, border-color 180ms, color 180ms;
+}
+.statusMark > span { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.status[data-phase='pending'] .statusMark > span { animation: statusPulse 1.1s ease-in-out infinite alternate; }
+.status[data-phase='success'] .statusMark { background: #e6efe6; color: #1e664a; border-color: #c9dfcf; }
+.status[data-phase='error'] .statusMark { background: #f9ebe7; color: #9b3c32; border-color: #ebcbc3; }
+.statusTitle { font-size: .875rem; font-weight: 650; line-height: 1.4; }
+.detail { margin-top: .2rem; color: var(--color-sub, #5f625b); font-size: .75rem; line-height: 1.55; overflow-wrap: anywhere; }
+.button, .primary, .close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .45rem;
+  padding: .5rem .75rem;
+  min-height: 2.4rem;
+  border: 1px solid var(--color-line-strong, #d5d5ce);
+  font-size: .8rem;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.button:hover, .close:hover { background: var(--color-mist, #efefe9); }
+.primary { background: #215b43; border-color: #215b43; color: #fff; }
+.primary:hover { background: #194834; border-color: #194834; }
+.close { padding: 0; width: 2.4rem; flex: none; border-color: transparent; }
+.button:focus-visible, .primary:focus-visible, .close:focus-visible { outline: 2px solid #287355; outline-offset: 3px; }
+
+.machine { --drawer-offset: translate(65px, 57px); }
+.drawerTravel { transform: var(--drawer-offset); }
+.machine[data-drawer='initial'] .drawerTravel,
+.machine[data-drawer='reopening'] :is(.drawerTravel, .storedCard) {
+  animation: drawerOpen 500ms cubic-bezier(.3, .6, .24, 1) both;
+}
+.machine:is([data-drawer='closing'], [data-drawer='closed']) :is(.drawerTravel, .storedCard) {
+  transform: var(--drawer-closed, none);
+}
+.machine[data-drawer='closing'] :is(.drawerTravel, .storedCard) {
+  animation: drawerClose 440ms cubic-bezier(.44, .06, .29, 1) 70ms both;
+}
+.storedCard { --drawer-offset: none; --drawer-closed: translate(-65px, -57px); }
+.machine[data-drawer='closed'][data-phase='pending'] .storedCard { visibility: hidden; }
+.archiveApproach {
+  transform: translate(-20px, -105px);
+  animation: archiveCue 460ms cubic-bezier(.22, .69, .29, 1) 85ms both;
+}
+.machine[data-phase='success'] .archiveCard { transform: translate(20px, 115px); animation: archiveInsert 430ms both; }
+.machine[data-phase='error'] .archiveCard { opacity: .45; transition: opacity 200ms ease-out; }
+.machine[data-drawer='extracting'] .cardDeparture { animation: archiveDepart 370ms cubic-bezier(.36, .15, .3, 1) both; }
+.drawerLamp { fill: #b0845c; transition: fill 190ms ease-out; }
+.machine[data-drawer='closed'] .drawerLamp,
+.machine[data-drawer='reopening'] .drawerLamp,
+.machine[data-drawer='extracting'] .drawerLamp { fill: #8cdaa6; }
+.machine[data-phase='error'] .drawerLamp { fill: #dc7c64; }
+
+.printerLid {
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  transform: translateY(-72px) scaleY(.39) skewX(-4deg);
+  animation: lidOpen 320ms cubic-bezier(.24, .72, .26, 1) both;
+}
+.printerSource { animation: feedPaper 455ms cubic-bezier(.26, .70, .27, 1) 105ms both; }
+.scanBeam { opacity: 0; animation: scanPaper 520ms linear 530ms both; }
+.printOutput { transform: translateY(-64px); }
+.machine[data-phase='success'] .printOutput { transform: none; animation: printPaper 540ms cubic-bezier(.28, .53, .26, 1) 155ms both; }
+.machine[data-phase='success'] .printerLid { transform: none; animation: lidClose 420ms cubic-bezier(.38, .04, .25, 1) both; }
+.machine[data-phase='error'] .scanBeam { visibility: hidden; }
+
+.arrivingRow { animation: rowArrival 2.6s ease-out both; }
+.arrivalFile { animation: fileArrival 540ms cubic-bezier(.18, .85, .27, 1) both; }
+.arrivingRow .arrivalFile { border-left: 3px solid #277354; background: #f6f4ec; color: #215b43; }
+
+@keyframes scrimIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes panelIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes actionIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@keyframes statusPulse { to { opacity: .3; } }
+@keyframes drawerOpen { from { transform: var(--drawer-closed, none); } to { transform: var(--drawer-offset); } }
+@keyframes drawerClose { from { transform: var(--drawer-offset); } to { transform: var(--drawer-closed, none); } }
+@keyframes archiveCue {
+  from { opacity: 0; transform: translate(-47px, -150px) rotate(-6deg); }
+  25% { opacity: 1; }
+  to { opacity: 1; transform: translate(-20px, -105px); }
+}
+@keyframes archiveInsert {
+  from { transform: none; animation-timing-function: cubic-bezier(.38, .1, .26, 1); }
+  84% { transform: translate(20px, 118px); animation-timing-function: ease-out; }
+  to { transform: translate(20px, 115px); }
+}
+@keyframes archiveDepart {
+  from { opacity: 1; transform: none; }
+  50% { opacity: 1; }
+  to { opacity: 0; transform: translate(12px, -115px); }
+}
+@keyframes lidOpen { from { transform: none; } }
+@keyframes lidClose { from { transform: translateY(-72px) scaleY(.39) skewX(-4deg); } }
+@keyframes feedPaper {
+  0% { opacity: 0; transform: translate(-13px, -91px) rotate(-5deg); }
+  20% { opacity: 1; }
+  100% { opacity: 1; transform: none; }
+}
+@keyframes scanPaper {
+  from { opacity: 0; transform: translateX(-20px); }
+  12%, 85% { opacity: 1; }
+  to { opacity: 0; transform: translateX(225px); }
+}
+@keyframes printPaper { from { transform: translateY(-64px); } }
+@keyframes rowArrival { from { background: transparent; } 14%, 38% { background: #e5efe5; } to { background: transparent; } }
+@keyframes fileArrival { from { opacity: .15; transform: translateY(-10px) scale(.88); } to { opacity: 1; transform: none; } }
+
+@media (max-width: 30rem) {
+  .footer { grid-template-columns: 1fr; grid-template-rows: minmax(2.25rem, auto) 2.4rem; gap: .55rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay::before, .motionPanel, .footerAction > a, .status[data-phase='pending'] .statusMark > span,
+  .machine[data-drawer] :is(.drawerTravel, .storedCard, .cardDeparture, .drawerLamp),
+  .archiveApproach, .machine[data-phase] .archiveCard,
+  .machine[data-phase] .printerLid, .machine[data-phase] .printerSource,
+  .machine[data-phase] .scanBeam, .machine[data-phase] .printOutput,
+  .arrivalFile { animation: none; transition: none; }
+}

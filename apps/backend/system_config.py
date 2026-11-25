@@ -33,10 +33,13 @@ import logging
 import os
 import socket
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 
 import config
+import httpcore
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +59,7 @@ _MASK = "\u2022" * 8                  # 掩码固定 8 个圆点，不泄露原�
 _CACHE: dict = {}
 
 
-class ConfigError(ValueError):
-    """配置字段非法（由接口层转成 422）。"""
+from config_rules import ConfigError, _now_iso, _clean_text, _clean_slot, merge_mail
 
 
 def _dir() -> str:
@@ -79,8 +81,6 @@ def _ensure_dir() -> str:
     return directory
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _read(name: str = NAME) -> tuple:
@@ -148,60 +148,8 @@ def _write(name: str, data: dict) -> None:
 
 # ── 校验 ────────────────────────────────────────────────────────────────────
 
-def _clean_text(value, field: str) -> str:
-    text = str(value if value is not None else "").strip()
-    if len(text) > _MAX_LEN[field]:
-        raise ConfigError(f"{field} 过长（上限 {_MAX_LEN[field]} 字符）")
-    if "\r" in text or "\n" in text:
-        raise ConfigError(f"{field} 不能包含换行符")
-    return text
 
 
-def _clean_slot(slot: str, incoming: dict, base: dict) -> dict:
-    """校验并合并单个槽位。password 为空 = 保持不变。"""
-    if not isinstance(incoming, dict):
-        raise ConfigError("槽位内容必须是对象")
-
-    merged = dict(base or {})
-
-    for field in ("host", "username", "from_address", "from_name"):
-        if field in incoming:
-            merged[field] = _clean_text(incoming.get(field), field)
-
-    if "port" in incoming:
-        try:
-            port = int(incoming.get("port"))
-        except (TypeError, ValueError):
-            raise ConfigError("端口必须是 1-65535 的整数")
-        if not 1 <= port <= 65535:
-            raise ConfigError("端口必须是 1-65535 的整数")
-        merged["port"] = port
-
-    if "security" in incoming:
-        security = str(incoming.get("security") or "").strip().lower()
-        if security not in SECURITY_MODES:
-            raise ConfigError("加密方式只支持 ssl / starttls / plain")
-        merged["security"] = security
-
-    if "enabled" in incoming:
-        merged["enabled"] = bool(incoming.get("enabled"))
-
-    # 密码/授权码：空串或未提供 = 用原值（前端拿到的是掩码，不能回传覆盖）
-    password = incoming.get("password")
-    if isinstance(password, str) and password.strip():
-        if len(password) > 512:
-            raise ConfigError("密码/授权码过长")
-        merged["password"] = password.strip()
-
-    merged.setdefault("host", "")
-    merged.setdefault("port", 465)
-    merged.setdefault("security", "ssl")
-    merged.setdefault("username", "")
-    merged.setdefault("password", "")
-    merged.setdefault("from_address", "")
-    merged.setdefault("from_name", "AI 简历智选")
-    merged.setdefault("enabled", True)
-    return merged
 
 
 # ── 解析（界面 > .env）──────────────────────────────────────────────────────
@@ -298,34 +246,11 @@ def public_mail() -> dict:
     }
 
 
+
+
 def save_mail(payload: dict, operator: str = "") -> dict:
     """保存界面配置。只写传入的槽位；password 留空表示沿用旧值。"""
-    if not isinstance(payload, dict):
-        raise ConfigError("请求体必须是对象")
-
-    incoming = payload.get("slots")
-    if not isinstance(incoming, dict) or not incoming:
-        raise ConfigError("没有需要保存的内容")
-
-    data = raw(NAME)
-    slots = dict(data.get("slots") or {})
-
-    cleaned = {}
-    for slot in SLOTS:
-        if slot not in incoming:
-            continue
-        cleaned[slot] = _clean_slot(slot, incoming.get(slot) or {}, slots.get(slot) or {})
-    if not cleaned:
-        raise ConfigError("槽位名称不合法")
-
-    slots.update(cleaned)
-    data.update({
-        "version": 1,
-        "slots": slots,
-        "updated_at": _now_iso(),
-        "updated_by": operator or "",
-    })
-    _write(NAME, data)
+    _write(NAME, merge_mail(raw(NAME), payload, operator))
     return public_mail()
 
 
@@ -363,6 +288,50 @@ NAME_LLM = "llm"
 _LLM_MAX = {"base_url": 500, "model": 200, "api_key": 4096}
 _LLM_TIMEOUT_RANGE = (1, 3600)
 _METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal", "100.100.100.200"}
+_METADATA_IPS = frozenset(ipaddress.ip_address(host) for host in (
+    "169.254.169.254", "100.100.100.200", "fd00:ec2::254"))
+_NAT64_WELL_KNOWN_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+
+
+@dataclass(frozen=True)
+class ResolvedAIEndpoint:
+    url: str
+    hostname: str
+    port: int
+    addresses: tuple[str, ...]
+
+
+class _PinnedNetworkBackend(httpcore.SyncBackend):
+    def __init__(self, hostname: str, addresses: tuple[str, ...]):
+        self.hostname = hostname
+        self.addresses = addresses
+
+    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        normalized_host = host.rstrip(".").lower()
+        if normalized_host != self.hostname:
+            raise httpcore.ConnectError("AI connection host differs from validated endpoint")
+
+        last_error = None
+        for address in self.addresses:
+            try:
+                return super().connect_tcp(
+                    address, port, timeout=timeout, local_address=local_address,
+                    socket_options=socket_options)
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as exc:
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise httpcore.ConnectError("No validated AI endpoint address is available")
+
+
+class _PinnedHTTPTransport(httpx.HTTPTransport):
+    def __init__(self, endpoint: ResolvedAIEndpoint):
+        super().__init__(trust_env=False, retries=0)
+        pool = getattr(self, "_pool", None)
+        if pool is None or not hasattr(pool, "_network_backend"):
+            self.close()
+            raise RuntimeError("Unsupported HTTP transport; pinned DNS is unavailable")
+        pool._network_backend = _PinnedNetworkBackend(endpoint.hostname, endpoint.addresses)
 
 
 def _allow_private_base_url() -> bool:
@@ -372,62 +341,146 @@ def _allow_private_base_url() -> bool:
     生产保持关闭：自定义接口地址本身就是 SSRF 面，默认只放行公网 https。
     本地要连自建模型服务时，显式设置 LLM_ALLOW_PRIVATE_BASE_URL=1。
     """
+    if str(config.ENV or "").strip().lower() == "production":
+        return False
     flag = str(os.environ.get("LLM_ALLOW_PRIVATE_BASE_URL") or "").strip().lower()
     return flag in ("1", "true", "yes", "on")
 
 
-def _is_private_host(host: str) -> bool:
-    """主机是否指向内网/回环/保留地址。域名先解析成 IP 再判断。"""
-    host = (host or "").strip().strip("[]").lower()
-    if not host:
+def _is_multicast_address(value: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if value.is_multicast:
         return True
-    if host in _METADATA_HOSTS:
-        return True
-
-    candidates = []
-    try:
-        candidates.append(ipaddress.ip_address(host))
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, None)
-        except OSError:
-            # 解析不了就放行：这种地址本身也连不上，交给真正出网时报错更准确。
-            # DNS 重绑定是无法在此根除的 TOCTOU，靠"调用前再校验一次"收敛。
-            logger.warning("base_url 主机 %s 解析失败，放行到出网时再报错", host)
-            return False
-        for info in infos:
-            try:
-                candidates.append(ipaddress.ip_address(info[4][0]))
-            except ValueError:
-                continue
-
-    if not candidates:
-        return False
-    for ip in candidates:
-        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
-                or ip.is_multicast or ip.is_unspecified):
-            return True
+    if isinstance(value, ipaddress.IPv6Address):
+        if value.ipv4_mapped is not None:
+            return _is_multicast_address(value.ipv4_mapped)
+        if value.sixtofour is not None:
+            return _is_multicast_address(value.sixtofour)
+        if value.teredo is not None:
+            return _is_multicast_address(value.teredo[1])
+        if value in _NAT64_WELL_KNOWN_PREFIX:
+            return _is_multicast_address(ipaddress.IPv4Address(int(value) & 0xffffffff))
     return False
 
 
-def validate_base_url(value: str) -> str:
-    """校验并归一化 base_url；非法抛 ConfigError（接口层转 422）。"""
+def _is_public_address(value: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if _is_multicast_address(value):
+        return False
+    if isinstance(value, ipaddress.IPv6Address):
+        if value.ipv4_mapped is not None:
+            return _is_public_address(value.ipv4_mapped)
+        if value.sixtofour is not None:
+            return _is_public_address(value.sixtofour)
+        if value.teredo is not None:
+            return _is_public_address(value.teredo[1])
+        if value in _NAT64_WELL_KNOWN_PREFIX:
+            return _is_public_address(ipaddress.IPv4Address(int(value) & 0xffffffff))
+    return value.is_global and value not in _METADATA_IPS
+
+
+def _resolve_host_addresses(hostname: str, port: int) -> tuple[str, ...]:
+    try:
+        literal = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            answers = socket.getaddrinfo(
+                hostname, port, type=socket.SOCK_STREAM)
+        except OSError:
+            raise ConfigError("接口地址主机名解析失败") from None
+        addresses = []
+        for answer in answers:
+            try:
+                address = ipaddress.ip_address(answer[4][0])
+            except (IndexError, TypeError, ValueError):
+                continue
+            normalized = address.compressed
+            if normalized not in addresses:
+                addresses.append(normalized)
+    else:
+        addresses = [literal.compressed]
+
+    if not addresses:
+        raise ConfigError("接口地址主机名没有可用地址")
+    return tuple(addresses)
+
+
+def _resolve_ai_endpoint(value: str) -> ResolvedAIEndpoint:
     text = _clean_text(value, "base_url")
     if not text:
         raise ConfigError("接口地址不能为空")
+    if any(ord(char) < 0x20 or ord(char) == 0x7f for char in text):
+        raise ConfigError("接口地址包含非法控制字符")
+    if "?" in text or "#" in text:
+        raise ConfigError("接口地址不能包含查询参数或锚点")
 
-    parsed = urlparse(text)
+    parsed = urlsplit(text)
     if parsed.scheme not in ("https", "http"):
-        raise ConfigError("接口地址必须以 https:// 开头")
+        raise ConfigError("接口地址必须使用 https://")
     if parsed.username or parsed.password:
         raise ConfigError("接口地址不能包含用户名或密码")
     if not parsed.hostname:
         raise ConfigError("接口地址缺少主机名")
-    if parsed.scheme == "http" and not _allow_private_base_url():
+    if "%" in parsed.hostname:
+        raise ConfigError("接口地址不能包含带作用域的主机名")
+    try:
+        explicit_port = parsed.port
+    except ValueError:
+        raise ConfigError("接口地址端口无效") from None
+    port = explicit_port if explicit_port is not None else (443 if parsed.scheme == "https" else 80)
+    if not 1 <= port <= 65535:
+        raise ConfigError("接口地址端口无效")
+
+    raw_hostname = parsed.hostname.rstrip(".").lower()
+    if not raw_hostname or raw_hostname in _METADATA_HOSTS:
+        raise ConfigError("接口地址不能指向云元数据服务")
+    literal = None
+    try:
+        literal = ipaddress.ip_address(raw_hostname)
+    except ValueError:
+        try:
+            hostname = raw_hostname.encode("idna").decode("ascii").lower()
+        except UnicodeError:
+            raise ConfigError("接口地址主机名无效") from None
+        if len(hostname) > 253 or not hostname:
+            raise ConfigError("接口地址主机名无效")
+    else:
+        hostname = literal.compressed
+
+    allow_private = _allow_private_base_url()
+    if parsed.scheme == "http" and not allow_private:
         raise ConfigError("接口地址必须使用 https://")
-    if _is_private_host(parsed.hostname) and not _allow_private_base_url():
-        raise ConfigError("接口地址不能指向内网 / 回环 / 保留地址")
-    return text.rstrip("/")
+
+    addresses = _resolve_host_addresses(hostname, port)
+    parsed_addresses = tuple(ipaddress.ip_address(address) for address in addresses)
+    if any(_is_multicast_address(address) for address in parsed_addresses):
+        raise ConfigError("接口地址不能指向组播地址")
+    if any(address in _METADATA_IPS for address in parsed_addresses):
+        raise ConfigError("接口地址不能指向云元数据服务")
+    if not allow_private and any(
+            not _is_public_address(address) for address in parsed_addresses):
+        raise ConfigError("接口地址必须解析到公网地址")
+
+    if literal is not None:
+        url_hostname = f"[{hostname}]" if literal.version == 6 else hostname
+    else:
+        url_hostname = hostname
+    netloc = url_hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{port}"
+    normalized_url = urlunsplit((parsed.scheme, netloc, parsed.path.rstrip("/"), "", ""))
+    return ResolvedAIEndpoint(normalized_url, hostname, port, addresses)
+
+
+def validate_base_url(value: str) -> str:
+    """Resolve and validate the URL; the connection factory pins these answers."""
+    return _resolve_ai_endpoint(value).url
+
+
+def create_ai_http_client(base_url: str, *, timeout: float | int = 300) -> httpx.Client:
+    """Build a redirect-free client whose TCP connections use validated DNS answers."""
+    endpoint = _resolve_ai_endpoint(base_url)
+    transport = _PinnedHTTPTransport(endpoint)
+    return httpx.Client(transport=transport, trust_env=False, follow_redirects=False,
+                        timeout=timeout)
 
 
 def _env_llm() -> dict:
@@ -503,53 +556,14 @@ def public_llm() -> dict:
     }
 
 
+def merge_llm(current: dict, payload: dict, operator: str = "", *, default_model=None) -> dict:
+    from config_rules import merge_llm as merge
+    return merge(current, payload, operator, default_model=default_model, validate_base_url=validate_base_url)
+
+
 def save_llm(payload: dict, operator: str = "") -> dict:
-    """保存界面配置。api_key 为空串/缺省 = 保持原值（前端拿到的是掩码）。"""
-    if not isinstance(payload, dict):
-        raise ConfigError("请求体必须是对象")
-
-    merged = dict(raw(NAME_LLM))
-
-    if "base_url" in payload:
-        merged["base_url"] = validate_base_url(payload.get("base_url"))
-    if "model" in payload:
-        model = _clean_text(payload.get("model"), "model")
-        if not model:
-            raise ConfigError("默认模型不能为空")
-        merged["model"] = model
-    if "timeout" in payload:
-        try:
-            timeout = int(payload.get("timeout"))
-        except (TypeError, ValueError):
-            raise ConfigError("超时必须是 1-3600 的整数")
-        if not _LLM_TIMEOUT_RANGE[0] <= timeout <= _LLM_TIMEOUT_RANGE[1]:
-            raise ConfigError("超时必须是 1-3600 的整数")
-        merged["timeout"] = timeout
-    if "enabled" in payload:
-        merged["enabled"] = bool(payload.get("enabled"))
-
-    api_key = payload.get("api_key")
-    if isinstance(api_key, str) and api_key.strip():
-        text = api_key.strip()
-        if len(text) > _LLM_MAX["api_key"]:
-            raise ConfigError("API Key 过长")
-        if "\r" in text or "\n" in text:
-            raise ConfigError("API Key 不能包含换行符")
-        merged["api_key"] = text
-
-    if not merged.get("api_key"):
-        raise ConfigError("尚未配置 API Key，请先填写")
-    if not merged.get("base_url"):
-        raise ConfigError("尚未配置接口地址，请先填写")
-    if not merged.get("model"):
-        merged["model"] = config.LL_MODEL or "deepseek-chat"
-
-    merged.update({
-        "version": 1,
-        "updated_at": _now_iso(),
-        "updated_by": operator or "",
-    })
-    _write(NAME_LLM, merged)
+    """保存界面配置。API Key 留空或缺省时沿用旧值。"""
+    _write(NAME_LLM, merge_llm(raw(NAME_LLM), payload, operator, default_model=config.LL_MODEL))
     return public_llm()
 
 

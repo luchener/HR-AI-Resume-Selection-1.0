@@ -102,7 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!token) return;
     (async () => {
       const fresh = await refreshProfile();
-      if (fresh) {
+      if (fresh && getStoredToken() === token) {
         window.localStorage.setItem(USER_KEY, JSON.stringify(fresh));
         setUser(fresh);
       }
@@ -131,6 +131,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [isHydrated, isPublicPage, router]);
 
   const login = useCallback((token: string, authUser: AuthUser) => {
+    resetSession();
     // 写入 localStorage：持久登录态（关闭浏览器后仍保持）
     window.localStorage.setItem(TOKEN_KEY, token);
     window.localStorage.setItem(USER_KEY, JSON.stringify(authUser));
@@ -138,7 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // 异步刷新管理员标记（登录响应不含 email/is_admin）
     (async () => {
       const fresh = await refreshProfile();
-      if (fresh) {
+      if (fresh && getStoredToken() === token) {
         window.localStorage.setItem(USER_KEY, JSON.stringify(fresh));
         setUser(fresh);
       }
@@ -157,6 +158,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
     router.replace('/login');
   }, [router]);
+
+  useEffect(() => {
+    const changed = (event: StorageEvent) => {
+      if (event.key !== TOKEN_KEY && event.key !== null) return;
+      resetSession();
+      try { window.sessionStorage.removeItem('resume-screening-result'); } catch { /* unavailable storage */ }
+      setUser(getStoredToken() ? getStoredUser() : null);
+    };
+    window.addEventListener('storage', changed);
+    return () => window.removeEventListener('storage', changed);
+  }, []);
 
   const value: AuthContextValue = {
     user,

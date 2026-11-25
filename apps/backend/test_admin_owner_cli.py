@@ -13,7 +13,9 @@ import json
 import os
 import shutil
 import unittest
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
+from unittest import mock
 
 # ── 必须在 import auth / admin_owner_cli 之前重定向数据目录 ────────────
 _TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-tmp-owner-cli")
@@ -130,6 +132,74 @@ class OwnerCliTests(unittest.TestCase):
         with redirect_stdout(out), redirect_stderr(err):
             rc = admin_owner_cli.cmd_rename(_Args(old="admin", new="a"))
         self.assertEqual(rc, 1)
+
+    def test_cli_rejects_unsafe_record_ids_before_any_path_write(self):
+        marker_name = "path-traversal-" + uuid.uuid4().hex
+        marker_path = os.path.join(os.path.dirname(auth.USERS_DIR), marker_name + ".json")
+        sentinel = '{"sentinel":"must remain unchanged"}'
+        with open(marker_path, "w", encoding="utf-8") as marker:
+            marker.write(sentinel)
+        bad_id = "../" + marker_name
+        bad_record = {
+            "user_id": bad_id, "username": "admin", "email": OWNER_EMAIL,
+        }
+        other_owner = {
+            "user_id": "safe-other-owner", "username": "other",
+            "email": OWNER_EMAIL,
+        }
+        try:
+            cases = (
+                (
+                    lambda: admin_owner_cli.cmd_rename(_Args(old="admin", new="renamed")),
+                    lambda name: None if name == "renamed" else bad_record,
+                    [bad_record],
+                ),
+                (
+                    lambda: admin_owner_cli.cmd_make_owner(_Args(username="admin")),
+                    lambda _name: bad_record,
+                    [bad_record],
+                ),
+                (
+                    lambda: admin_owner_cli.cmd_unbind_email(_Args(username="admin")),
+                    lambda _name: bad_record,
+                    [bad_record, other_owner],
+                ),
+            )
+            for invoke, lookup, records in cases:
+                with self.subTest(command=invoke), \
+                     mock.patch.object(auth, "find_user_by_username", side_effect=lookup), \
+                     mock.patch.object(admin_owner_cli, "_all_user_records", return_value=records), \
+                     mock.patch.object(auth, "_write_user_record") as write_record:
+                    out, err = io.StringIO(), io.StringIO()
+                    with redirect_stdout(out), redirect_stderr(err):
+                        self.assertEqual(invoke(), 1)
+                    write_record.assert_not_called()
+                    self.assertIn("ID 无效", err.getvalue())
+                with open(marker_path, encoding="utf-8") as marker:
+                    self.assertEqual(marker.read(), sentinel)
+        finally:
+            os.remove(marker_path)
+
+    def test_make_owner_rolls_back_partial_batch_when_record_write_fails(self):
+        original_writer = auth._write_user_record
+        calls = 0
+
+        def fail_second_write(record):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                return False
+            return original_writer(record)
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(auth, "_write_user_record", side_effect=fail_second_write), \
+             redirect_stdout(out), redirect_stderr(err):
+            result = admin_owner_cli.cmd_make_owner(_Args(username="user_plain"))
+
+        self.assertEqual(result, 1)
+        self.assertIn("写入失败", err.getvalue())
+        self.assertEqual(auth.find_user_by_username("user_plain").get("email"), "plain@example.com")
+        self.assertEqual((auth.find_user_by_username("admin").get("email") or "").lower(), OWNER_EMAIL)
 
     # ── make-owner ───────────────────────────────────────────────────
     def test_make_owner_binds_email_and_demotes_others(self):

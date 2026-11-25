@@ -6,7 +6,9 @@
 
 import { useSyncExternalStore } from 'react';
 import type { AnalysisResult } from '@/components/workbench/analysis-context';
-import { analyzeResumesStream, uploadJobDescription, uploadResume } from '@/lib/api/screening';
+import { analyzeResumesStream, uploadJobDescription, uploadResume, resetSqlImprovementRequests, SqlAnalysisConnectionError, type SqlAnalysisCheckpoint } from '@/lib/api/screening';
+import { getStoredToken } from '@/components/workbench/auth-context';
+import { SQL_ANALYSIS_ENABLED } from '@/lib/api/config';
 
 export type WorkbenchPhase = 'idle' | 'uploading' | 'job' | 'analyzing';
 
@@ -37,6 +39,7 @@ export interface AnalysisSessionState {
   running: boolean;
   /** 任务完成后的结果。 */
   result: AnalysisResult | null;
+  recoverable: boolean;
 }
 
 const initialState: AnalysisSessionState = {
@@ -51,16 +54,20 @@ const initialState: AnalysisSessionState = {
   candidateCount: 0,
   running: false,
   result: null,
+  recoverable: false,
 };
 
 let state: AnalysisSessionState = initialState;
+let generation = 0;
+let controller: AbortController | null = null;
+let pendingSql: { resumeIds: string[]; jobId: string; checkpoint: SqlAnalysisCheckpoint; token: string; webSearch: boolean } | null = null;
 const listeners = new Set<() => void>();
 
 /** 任务完成时的全局回调（由 AnalysisProvider 注册，把结果写入 context + sessionStorage，
  *  保证任务在后台完成时任何页面都能拿到结果）。 */
-let completionHandler: ((result: AnalysisResult) => void) | null = null;
+let completionHandler: ((result: AnalysisResult | null) => void) | null = null;
 
-export function setCompletionHandler(handler: ((result: AnalysisResult) => void) | null): void {
+export function setCompletionHandler(handler: ((result: AnalysisResult | null) => void) | null): void {
   completionHandler = handler;
 }
 
@@ -87,7 +94,60 @@ function getServerSnapshot(): AnalysisSessionState {
 
 /** 清空会话（含草稿与任务）。 */
 export function resetSession(): void {
+  generation += 1;
+  resetSqlImprovementRequests();
+  controller?.abort();
+  controller = null;
+  pendingSql = null;
   setState({ ...initialState });
+  completionHandler?.(null);
+}
+
+interface Run { id: number; token: string; control: AbortController }
+function beginRun(): Run {
+  controller?.abort();
+  controller = new AbortController();
+  return { id: ++generation, token: getStoredToken(), control: controller };
+}
+function update(run: Run, patch: Partial<AnalysisSessionState>): void {
+  if (run.id !== generation || run.control.signal.aborted || getStoredToken() !== run.token) {
+    throw new DOMException('分析会话已停止。', 'AbortError');
+  }
+  setState(patch);
+}
+function failed(run: Run, caught: unknown): void {
+  if (run.id !== generation) return;
+  if (getStoredToken() !== run.token || run.control.signal.aborted) { resetSession(); return; }
+  const recoverable = caught instanceof SqlAnalysisConnectionError && pendingSql !== null;
+  if (!recoverable) pendingSql = null;
+  const message = caught instanceof Error ? caught.message : '';
+  setState({ phase: 'idle', running: false, recoverable,
+    error: message === 'Failed to fetch' ? '无法连接分析服务，请确认服务可用后重试。' : message || '分析未完成，请稍后重试。' });
+}
+async function analyze(run: Run, resumeIds: string[], jobId: string, webSearch: boolean, checkpoint?: SqlAnalysisCheckpoint): Promise<void> {
+  update(run, { phase: 'analyzing', running: true, recoverable: false, error: '' });
+  const result = await analyzeResumesStream(resumeIds, jobId, { web_search: webSearch },
+    (status, message, index, total) => update(run, status === 'candidate' ? {
+      candidateProgress: (total ?? 0) > 1 ? `正在分析候选人 ${index ?? ''}/${total ?? ''}` : '', progress: '',
+    } : { progress: message }), run.control.signal,
+    SQL_ANALYSIS_ENABLED ? { checkpoint, onCheckpoint: saved => {
+      if (run.id !== generation || run.control.signal.aborted || getStoredToken() !== run.token) {
+        throw new DOMException('分析会话已停止。', 'AbortError');
+      }
+      pendingSql = { resumeIds: [...resumeIds], jobId, checkpoint: saved, token: run.token, webSearch };
+    } } : undefined);
+  update(run, { phase: 'idle', result, running: false, recoverable: false, progress: '', candidateProgress: '' });
+  pendingSql = null;
+  completionHandler?.(result);
+}
+
+/** Resume the same durable task/request without re-uploading files or a new key. */
+export function resumeAnalysisTask(): void {
+  if (state.running || !state.recoverable || !pendingSql) return;
+  const saved = pendingSql;
+  if (saved.token !== getStoredToken()) { resetSession(); return; }
+  const run = beginRun();
+  void analyze(run, saved.resumeIds, saved.jobId, saved.webSearch, saved.checkpoint).catch(error => failed(run, error));
 }
 
 /** 由工作台在编辑草稿时写入（文件/真实 File 引用/JD/联网选项），切页回来可恢复。 */
@@ -112,6 +172,9 @@ export function startAnalysisTask(input: {
   webSearch: boolean;
 }): void {
   if (state.running) return; // 已有一个任务在跑，忽略重复启动
+  if (state.recoverable && pendingSql) { resumeAnalysisTask(); return; }
+  const run = beginRun();
+  pendingSql = null;
   setState({
     phase: 'uploading',
     files: input.files,
@@ -124,13 +187,14 @@ export function startAnalysisTask(input: {
     progress: '',
     candidateProgress: '',
     result: null,
+    recoverable: false,
   });
 
   void (async () => {
     try {
       // 1. 上传简历（fileObjects 与 files 按顺序一一对应）
       const uploaded = await Promise.allSettled(
-        input.files.map((item, index) => uploadResume(input.fileObjects[index])),
+        input.files.map((item, index) => uploadResume(input.fileObjects[index], run.control.signal)),
       );
       const successfulIds: string[] = [];
       const nextFiles = input.files.map((item, index) => {
@@ -141,42 +205,17 @@ export function startAnalysisTask(input: {
         }
         return { ...item, status: 'failed' as const, error: outcome.reason instanceof Error ? outcome.reason.message : '上传或解析失败。' };
       });
-      setState({ files: nextFiles });
+      update(run, { files: nextFiles });
       if (successfulIds.length === 0) throw new Error('所有简历上传失败，请检查文件后重试。');
 
       // 2. 上传 JD
-      setState({ phase: 'job', progress: '正在解析岗位要求' });
-      const jobId = await uploadJobDescription(input.jobDescription.trim(), successfulIds[0]);
+      update(run, { phase: 'job', progress: '正在解析岗位要求' });
+      const jobId = await uploadJobDescription(input.jobDescription.trim(), successfulIds[0], run.control.signal);
 
       // 3. 流式分析
-      setState({ phase: 'analyzing' });
-      const result = await analyzeResumesStream(
-        successfulIds,
-        jobId,
-        { web_search: input.webSearch },
-        (status, message, index, total) => {
-          if (status === 'candidate') {
-            setState({
-              candidateProgress: (total ?? 0) > 1 ? `正在分析候选人 ${index ?? ''}/${total ?? ''}` : '',
-              progress: '',
-            });
-          } else {
-            setState({ progress: message ?? '' });
-          }
-        },
-      );
-      setState({ phase: 'idle', result, running: false, progress: '', candidateProgress: '' });
-      completionHandler?.(result); // 通知全局（写入 analysisContext），任何页面可继续跳转
+      await analyze(run, successfulIds, jobId, input.webSearch);
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : '';
-      setState({
-        phase: 'idle',
-        running: false,
-        error:
-          message === 'Failed to fetch'
-            ? '无法连接分析服务，请确认后端服务已启动后重试。'
-            : message || '分析未完成，请稍后重试。',
-      });
+      failed(run, caught);
     }
   })();
 }

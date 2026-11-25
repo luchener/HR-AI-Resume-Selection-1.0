@@ -120,7 +120,8 @@ def compute_schedule(
 
 
 def _announcement_path(announcement_id: str) -> str:
-    return os.path.join(config.ANNOUNCEMENTS_DIR, f"{announcement_id}.json")
+    safe_id = safe_fs.safe_component(announcement_id)
+    return os.path.join(config.ANNOUNCEMENTS_DIR, f"{safe_id}.json") if safe_id else ""
 
 
 def effective_status(rec: dict, now: datetime | None = None) -> str:
@@ -189,7 +190,8 @@ def create_announcement(
 
 
 def get_announcement(announcement_id: str) -> dict | None:
-    rec = _read_json(_announcement_path(announcement_id))
+    path = _announcement_path(announcement_id)
+    rec = _read_json(path) if path else None
     return rec
 
 
@@ -251,11 +253,13 @@ def delete_announcement(announcement_id: str) -> bool:
 
 # ── 用户端：未读公告 / 关闭 ──────────────────────────────────────────
 def _reads_path(user_id: str) -> str:
-    return os.path.join(config.ANNOUNCEMENT_READS_DIR, f"{user_id}.json")
+    safe_id = safe_fs.safe_component(user_id)
+    return os.path.join(config.ANNOUNCEMENT_READS_DIR, f"{safe_id}.json") if safe_id else ""
 
 
 def _dismissed_ids(user_id: str) -> set[str]:
-    rec = _read_json(_reads_path(user_id)) or {}
+    path = _reads_path(user_id)
+    rec = (_read_json(path) if path else None) or {}
     return set(rec.get("dismissed") or [])
 
 
@@ -286,13 +290,16 @@ def dismiss_announcement(user_id: str, announcement_id: str) -> bool:
     rec = get_announcement(announcement_id)
     if not rec:
         return False
-    data = _read_json(_reads_path(user_id)) or {}
+    reads_path = _reads_path(user_id)
+    if not reads_path:
+        return False
+    data = _read_json(reads_path) or {}
     dismissed = list(data.get("dismissed") or [])
     if announcement_id not in dismissed:
         dismissed.append(announcement_id)
     data["dismissed"] = dismissed
     data["updated_at"] = _now_iso()
-    _write_json(_reads_path(user_id), data)
+    _write_json(reads_path, data)
     return True
 
 
@@ -324,12 +331,13 @@ def _detect_magic(data: bytes, ext: str) -> bool:
 
 def _image_path(image_id: str) -> str:
     # 文件名 <image_id>.<ext>；从目录中按 id 前缀定位
-    if not image_id or not image_id.replace("-", "").isalnum() or "-" not in image_id:
+    safe_id = safe_fs.safe_component(image_id)
+    if not safe_id or "-" not in safe_id:
         return ""
     if os.path.isdir(config.EMAIL_IMAGES_DIR):
         for name in safe_fs.listdir(config.EMAIL_IMAGES_DIR):
             stem, dot, _ext = name.rpartition(".")
-            if dot and stem == image_id:
+            if dot and stem == safe_id:
                 return os.path.join(config.EMAIL_IMAGES_DIR, name)
     return ""
 
@@ -670,9 +678,10 @@ def list_email_logs(limit: int = 50) -> list[dict]:
 
 def get_email_log_detail(log_id: str) -> dict | None:
     """历史邮件详情：日志记录 + 按快照重新渲染的 HTML（图片 data URI 内联，被删图片跳过）。"""
-    if not log_id or not log_id.replace("-", "").isalnum():
+    safe_id = safe_fs.safe_component(log_id)
+    if not safe_id:
         return None
-    rec = _read_json(os.path.join(config.EMAIL_LOGS_DIR, f"{log_id}.json"))
+    rec = _read_json(os.path.join(config.EMAIL_LOGS_DIR, f"{safe_id}.json"))
     if not rec:
         return None
     snap = rec.get("compose_snapshot") or {}

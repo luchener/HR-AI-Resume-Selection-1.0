@@ -7,6 +7,7 @@ import ConfirmDialog from './confirm-dialog';
 import {
   deleteAdminResume,
   fetchAdminResumeDetail,
+  fetchAdminResumeOriginalContent,
   fetchAdminResumeOriginalPage,
   fetchAdminResumes,
   type AdminResumeDetail,
@@ -56,31 +57,54 @@ export default function AdminResumeLibrary() {
   const [originalPages, setOriginalPages] = useState<Record<number, string>>({});
   const [originalLoading, setOriginalLoading] = useState(false);
   const [originalError, setOriginalError] = useState('');
+  const [docxHtml, setDocxHtml] = useState('');
+  const [docxLoading, setDocxLoading] = useState(false);
+  const [docxError, setDocxError] = useState('');
   const pageUrlsRef = useRef<string[]>([]);
+  const detailRequestRef = useRef<AbortController | null>(null);
+  const listRequestRef = useRef<AbortController | null>(null);
 
   const [pendingDelete, setPendingDelete] = useState<AdminResumeItem | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   /** 拉取列表：分页参数显式传入，避免闭包读到旧的分页状态 */
   const load = useCallback(async (nextKeyword: string, nextPage: number, nextSize: number) => {
+    listRequestRef.current?.abort();
+    const controller = new AbortController();
+    listRequestRef.current = controller;
     setLoading(true);
     setError('');
     try {
-      const data = await fetchAdminResumes(nextKeyword, '', nextPage, nextSize);
+      const data = await fetchAdminResumes(nextKeyword, '', nextPage, nextSize, controller.signal);
+      if (controller.signal.aborted) return;
       setItems(data.items);
       setTotal(data.total);
       setPage(data.page);
       setSize(data.size);
     } catch (err) {
+      if (controller.signal.aborted) return;
       setItems([]);
       setTotal(0);
       setError(err instanceof Error ? err.message : '简历列表读取失败。');
     } finally {
-      setLoading(false);
+      if (listRequestRef.current === controller) {
+        listRequestRef.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
-  useEffect(() => { void load('', 1, DEFAULT_SIZE); }, [load]);
+  useEffect(() => {
+    void load('', 1, DEFAULT_SIZE);
+    return () => {
+      listRequestRef.current?.abort();
+      listRequestRef.current = null;
+    };
+  }, [load]);
+  useEffect(() => () => {
+    detailRequestRef.current?.abort();
+    pageUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+  }, []);
 
   const pageCount = Math.max(1, Math.ceil(total / (size || DEFAULT_SIZE)));
 
@@ -94,28 +118,58 @@ export default function AdminResumeLibrary() {
     pageUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
     pageUrlsRef.current = [];
     setOriginalPages({});
+    setOriginalLoading(false);
   }
 
   /** 拉取原件某一页并转成 objectURL（fetch 带鉴权头，<img> 拿不到鉴权头） */
   async function loadOriginalPage(resumeId: string, page: number) {
+    const signal = detailRequestRef.current?.signal;
+    if (!signal || signal.aborted) return;
     setOriginalLoading(true);
     setOriginalError('');
     try {
-      const blob = await fetchAdminResumeOriginalPage(resumeId, page);
+      const blob = await fetchAdminResumeOriginalPage(resumeId, page, signal);
+      if (signal.aborted) return;
       const url = URL.createObjectURL(blob);
       pageUrlsRef.current.push(url);
       setOriginalPages((prev) => ({ ...prev, [page]: url }));
     } catch (err) {
-      setOriginalError(err instanceof Error ? err.message : '原件页面读取失败。');
+      if (!signal.aborted) setOriginalError(err instanceof Error ? err.message : '原件页面读取失败。');
     } finally {
-      setOriginalLoading(false);
+      if (!signal.aborted) setOriginalLoading(false);
     }
+  }
+
+  /** DOCX：服务端转为安全 HTML，在“原始文件”页签内直接展示文档内容。 */
+  async function loadDocxPreview(resumeId: string) {
+    const signal = detailRequestRef.current?.signal;
+    if (!signal || signal.aborted) return;
+    setDocxLoading(true);
+    setDocxError('');
+    try {
+      const result = await fetchAdminResumeOriginalContent(resumeId, signal);
+      if (!signal.aborted) setDocxHtml(result.html);
+    } catch (err) {
+      if (!signal.aborted) setDocxError(err instanceof Error ? err.message : '文件预览读取失败。');
+    } finally {
+      if (!signal.aborted) setDocxLoading(false);
+    }
+  }
+
+  function resetDocx() {
+    setDocxHtml('');
+    setDocxError('');
+    setDocxLoading(false);
   }
 
   function switchDetailView(next: 'text' | 'original') {
     setDetailView(next);
-    if (next === 'original' && detail && !originalPages[originalPage]) {
-      void loadOriginalPage(detail.resume_id, originalPage);
+    if (next === 'original' && detail?.original?.available) {
+      if (detail.original.ext === 'docx') {
+        if (!docxHtml && !docxLoading) void loadDocxPreview(detail.resume_id);
+      } else if (detail.original.renderable && !originalPages[originalPage] && !originalLoading) {
+        void loadOriginalPage(detail.resume_id, originalPage);
+      }
     }
   }
 
@@ -128,30 +182,38 @@ export default function AdminResumeLibrary() {
 
   /** 打开只读原文面板：详情接口才返回 content 与归档数 */
   async function openDetail(item: AdminResumeItem) {
+    detailRequestRef.current?.abort();
+    const controller = new AbortController();
+    detailRequestRef.current = controller;
     setDetailTarget(item);
     setDetail(null);
     setDetailError('');
     setDetailView('text');
     setOriginalPage(1);
     setOriginalError('');
+    resetDocx();
     resetPageUrls();
     setDetailLoading(true);
     try {
-      setDetail(await fetchAdminResumeDetail(item.resume_id));
+      const result = await fetchAdminResumeDetail(item.resume_id, controller.signal);
+      if (!controller.signal.aborted) setDetail(result);
     } catch (err) {
-      setDetailError(err instanceof Error ? err.message : '简历详情读取失败。');
+      if (!controller.signal.aborted) setDetailError(err instanceof Error ? err.message : '简历详情读取失败。');
     } finally {
-      setDetailLoading(false);
+      if (!controller.signal.aborted) setDetailLoading(false);
     }
   }
 
   function closeDetail() {
+    detailRequestRef.current?.abort();
+    detailRequestRef.current = null;
     setDetailTarget(null);
     setDetail(null);
     setDetailError('');
     setDetailView('text');
     setOriginalPage(1);
     setOriginalError('');
+    resetDocx();
     resetPageUrls();
   }
 
@@ -401,10 +463,38 @@ export default function AdminResumeLibrary() {
                 </button>
               </div>
             </div>
+          ) : detailView === 'original' && detail?.original?.available && detail.original.ext === 'docx' ? (
+            <div className="mt-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-sub">
+                <span>原始文件：<span className="text-ink">{detail.original.name}</span> · DOCX · {fmtNum(detail.original.bytes)} 字节</span>
+                <span className="rounded bg-mist px-2 py-0.5">文档预览</span>
+              </div>
+              <div className="mt-2 max-h-[55vh] overflow-y-auto rounded-md border border-line-soft bg-mist p-2">
+                <div className="mx-auto min-h-40 w-full max-w-2xl rounded border border-line-soft bg-white px-8 py-7">
+                  {docxLoading ? (
+                    <div className="flex items-center justify-center py-16 text-sm text-sub">
+                      <LoaderCircleIcon className="mr-2 size-4 animate-spin" /> 文档渲染中…
+                    </div>
+                  ) : docxError ? (
+                    <p className="py-10 text-center text-sm text-bad">{docxError}</p>
+                  ) : docxHtml ? (
+                    <div
+                      className="docx-preview text-sm leading-7 text-ink [&_h1]:mb-3 [&_h1]:text-2xl [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:mt-5 [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:mt-4 [&_h3]:font-semibold [&_p]:my-2 [&_p]:leading-7 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-6 [&_li]:my-1 [&_table]:my-3 [&_table]:w-full [&_table]:border-collapse [&_td]:border [&_td]:border-line-soft [&_td]:p-2 [&_td]:align-top [&_td]:text-xs [&_td]:leading-5"
+                      dangerouslySetInnerHTML={{ __html: docxHtml }}
+                    />
+                  ) : (
+                    <p className="py-10 text-center text-sm text-sub">该文档没有可展示的文本内容。</p>
+                  )}
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-sub">
+                <span>仅可在线查看：不提供下载 / 导出 / 另存 / 打印入口，查看行为均记入审计。</span>
+              </div>
+            </div>
           ) : detailView === 'original' ? (
             <div className="mt-3 rounded-md border border-line-soft bg-mist px-4 py-3 text-sm text-sub">
               {detail?.original?.available
-                ? `该简历留存的是 ${detail.original.ext.toUpperCase() || 'DOCX'} 原文件，当前仅支持 PDF 逐页查看；解析文本可靠性高，请切换「文本原文」查阅。`
+                ? '该原文件类型暂不支持在线预览。'
                 : '该简历未留存原始文件（原件留存功能上线前上传的历史简历）。'}
             </div>
           ) : (

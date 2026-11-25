@@ -8,6 +8,7 @@ services:
     image: hr-ai-resume-selection-backend:1.0.0
     container_name: hr-ai-resume-selection-backend
     restart: unless-stopped
+    stop_grace_period: 1250s
     env_file:
       - path: apps/backend/.env
         required: false  # 新 clone 时如未 cp .env.sample .env，仍可启动（ENV 默认 local）
@@ -43,7 +44,9 @@ services:
     environment:
       BACKEND_INTERNAL_URL: http://backend:8000
     ports:
-      - "0.0.0.0:3000:3000"
+      # 开发/默认编排也只监听回环；外部访问必须经过 nginx 等可信反代。
+      # 这样不能绕过反代直连 Next 并伪造 X-Forwarded-For。
+      - "127.0.0.1:3000:3000"
     depends_on:
       backend:
         condition: service_healthy

@@ -14,11 +14,15 @@
 （本模块与其它模块各自独立跑，因为它会重定向 *_DIR 到临时目录）
 """
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import os
+import socket
 import sys
 import time
 import unittest
 import uuid
+from threading import Thread
 from types import SimpleNamespace
 from unittest import mock
 
@@ -72,10 +76,15 @@ class _FakeOpenAI:
     model_ids = ["deepseek-chat", "deepseek-reasoner", "deepseek-chat"]
     reply = "pong"
 
-    def __init__(self, api_key=None, base_url=None, timeout=None):
+    def __init__(self, api_key=None, base_url=None, timeout=None, http_client=None):
         _FakeOpenAI.built.append({"api_key": api_key, "base_url": base_url, "timeout": timeout})
+        self.http_client = http_client
         self.models = SimpleNamespace(list=self._list)
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    def close(self):
+        if self.http_client is not None:
+            self.http_client.close()
 
     def _list(self):
         if _FakeOpenAI.error:
@@ -143,10 +152,31 @@ class LlmConfigUnitTests(unittest.TestCase):
     def setUp(self):
         _clear_dir(os.path.join(_TMP, "system_config"))
         system_config._CACHE.clear()
+
+        def synthetic_dns(host, port, *_args, **_kwargs):
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                address = ipaddress.ip_address(
+                    "127.0.0.1" if host == "localhost" else "93.184.216.34")
+            family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+            sockaddr = ((address.compressed, port, 0, 0) if address.version == 6
+                        else (address.compressed, port))
+            return [(family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)]
+
+        dns = mock.patch(
+            "system_config.socket.getaddrinfo",
+            side_effect=synthetic_dns)
+        dns.start()
+        self.addCleanup(dns.stop)
         os.environ.pop("LLM_ALLOW_PRIVATE_BASE_URL", None)
         for key in _ENV_KEYS:
             setattr(config, key, "")
         config.LLM_BASE_URL = ""
+        if llm._client is not None:
+            close = getattr(llm._client, "close", None)
+            if callable(close):
+                close()
         llm._client = None
         llm._client_fingerprint = ""
         _FakeOpenAI.reset()
@@ -212,10 +242,156 @@ class LlmConfigUnitTests(unittest.TestCase):
     def test_rejects_internal_and_metadata_addresses(self):
         for bad in ("https://127.0.0.1", "https://localhost/v1", "https://10.0.0.5",
                     "https://192.168.1.10:8080", "https://169.254.169.254/latest/meta-data",
-                    "https://[::1]:9000", "https://0.0.0.0"):
+                    "https://[::1]:9000", "https://0.0.0.0", "https://100.64.12.4",
+                    "https://[::ffff:127.0.0.1]", "https://[64:ff9b::a9fe:a9fe]"):
             with self.subTest(base_url=bad):
                 with self.assertRaises(system_config.ConfigError):
                     system_config.validate_base_url(bad)
+
+    def test_dns_failure_fails_closed(self):
+        with mock.patch("system_config.socket.getaddrinfo", side_effect=socket.gaierror):
+            with self.assertRaises(system_config.ConfigError):
+                system_config.validate_base_url("https://unresolvable.example.test/v1")
+
+    def test_mixed_public_and_private_dns_answers_are_rejected(self):
+        answers = [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("100.64.0.10", 443)),
+        ]
+        with mock.patch("system_config.socket.getaddrinfo", return_value=answers):
+            with self.assertRaises(system_config.ConfigError):
+                system_config.validate_base_url("https://mixed.example.test/v1")
+
+    def test_rejects_ipv4_and_ipv6_multicast_ai_endpoints(self):
+        for env, allow_private in (("production", "1"), ("local", "1")):
+            with mock.patch.object(system_config.config, "ENV", env), \
+                 mock.patch.dict(os.environ, {"LLM_ALLOW_PRIVATE_BASE_URL": allow_private}):
+                for bad in (
+                    "https://224.0.0.1",
+                    "https://239.255.255.250",
+                    "https://[ff02::1]",
+                    "https://[::ffff:224.0.0.1]",
+                    "https://[64:ff9b::e000:1]",
+                ):
+                    with self.subTest(env=env, base_url=bad), \
+                         self.assertRaises(system_config.ConfigError):
+                        system_config.validate_base_url(bad)
+
+    def test_mixed_public_and_multicast_dns_answers_are_rejected(self):
+        variants = (
+            (
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443)),
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("224.0.0.1", 443)),
+            ),
+            (
+                (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("93.184.216.34", 443)),
+                (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("ff02::1", 443, 0, 0)),
+            ),
+        )
+        with mock.patch.object(system_config.config, "ENV", "production"), \
+             mock.patch("system_config.socket.create_connection") as connect:
+            for answers in variants:
+                with self.subTest(multicast=answers[1][4][0]), \
+                     mock.patch("system_config.socket.getaddrinfo", return_value=answers), \
+                     self.assertRaises(system_config.ConfigError):
+                    system_config.validate_base_url("https://mixed-multicast.example.test/v1")
+            connect.assert_not_called()
+
+    def test_pinned_backend_dials_the_validated_ip_without_resolving_again(self):
+        endpoint = system_config._resolve_ai_endpoint("https://rebind.example.test/v1")
+        backend = system_config._PinnedNetworkBackend(endpoint.hostname, endpoint.addresses)
+
+        class FakeSocket:
+            def setsockopt(self, *_args):
+                pass
+
+            def close(self):
+                pass
+
+        sock = FakeSocket()
+        with mock.patch("system_config.socket.create_connection", return_value=sock) as connect, \
+             mock.patch("system_config.socket.getaddrinfo", side_effect=AssertionError("DNS re-resolution")):
+            result = backend.connect_tcp(endpoint.hostname, endpoint.port, timeout=1)
+        self.assertEqual(connect.call_args.args[0], ("93.184.216.34", 443))
+        self.assertIs(result.get_extra_info("socket"), sock)
+
+    def test_pinned_client_disables_environment_proxy_and_redirects(self):
+        client = system_config.create_ai_http_client(_GOOD_URL, timeout=4)
+        try:
+            self.assertFalse(client.follow_redirects)
+            self.assertFalse(client._trust_env)
+            backend = client._transport._pool._network_backend
+            self.assertIsInstance(backend, system_config._PinnedNetworkBackend)
+            self.assertEqual(backend.addresses, ("93.184.216.34",))
+        finally:
+            client.close()
+
+    def test_redirect_response_does_not_make_a_second_request(self):
+        class Handler(BaseHTTPRequestHandler):
+            target_hits = 0
+
+            def do_GET(self):
+                if self.path == "/start":
+                    self.send_response(302)
+                    self.send_header("Location", "/target")
+                    self.end_headers()
+                    return
+                type(self).target_hits += 1
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        client = None
+        try:
+            port = server.server_address[1]
+            with mock.patch.dict(os.environ, {"LLM_ALLOW_PRIVATE_BASE_URL": "1"}):
+                endpoint = system_config._resolve_ai_endpoint(
+                    f"http://127.0.0.1:{port}")
+                client = system_config.create_ai_http_client(endpoint.url, timeout=2)
+                response = client.get(endpoint.url + "/start")
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(Handler.target_hits, 0)
+        finally:
+            if client is not None:
+                client.close()
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+
+    def test_openai_client_uses_pinned_transport(self):
+        client = llm._new_openai_client(_GOOD_KEY, _GOOD_URL, 4)
+        try:
+            self.assertFalse(client._client.follow_redirects)
+            self.assertIsInstance(
+                client._client._transport, system_config._PinnedHTTPTransport)
+        finally:
+            client.close()
+
+    def test_server_client_reload_closes_previous_pinned_pool(self):
+        first = {"base_url": "https://first.example.test/v1", "model": "first",
+                 "timeout": 300, "api_key": "first-key"}
+        second = {"base_url": "https://second.example.test/v1", "model": "second",
+                  "timeout": 300, "api_key": "second-key"}
+        previous = mock.Mock()
+        replacement = mock.Mock()
+        original_client = llm._client
+        original_fingerprint = llm._client_fingerprint
+        try:
+            llm._client = None
+            llm._client_fingerprint = ""
+            with mock.patch.object(llm, "_server_settings", side_effect=(first, second)), \
+                 mock.patch.object(llm, "_get_client", side_effect=(previous, replacement)):
+                self.assertIs(llm._client_singleton(), previous)
+                self.assertIs(llm._client_singleton(), replacement)
+            previous.close.assert_called_once_with()
+        finally:
+            llm._client = original_client
+            llm._client_fingerprint = original_fingerprint
 
     def test_allows_http_private_only_with_dev_flag(self):
         with mock.patch.dict(os.environ, {"LLM_ALLOW_PRIVATE_BASE_URL": "1"}):
@@ -224,6 +400,18 @@ class LlmConfigUnitTests(unittest.TestCase):
                 "http://127.0.0.1:9002/v1")
         with self.assertRaises(system_config.ConfigError):
             system_config.validate_base_url("http://127.0.0.1:9002/v1")
+
+    def test_private_override_cannot_be_enabled_in_production(self):
+        original_env = config.ENV
+        config.ENV = "production"
+        try:
+            with mock.patch.dict(os.environ, {"LLM_ALLOW_PRIVATE_BASE_URL": "1"}):
+                for value in ("http://127.0.0.1:9002/v1", "https://10.0.0.8/v1",
+                              "https://[fd00:ec2::254]/latest/meta-data"):
+                    with self.subTest(base_url=value), self.assertRaises(system_config.ConfigError):
+                        system_config.validate_base_url(value)
+        finally:
+            config.ENV = original_env
 
     def test_normalizes_trailing_slash(self):
         self.assertEqual(
@@ -353,10 +541,23 @@ class LlmAdminApiTests(unittest.TestCase):
         _clear_dir(os.path.join(_TMP, "system_config"))
         _clear_dir(os.path.join(_TMP, "admin_ops"))
         system_config._CACHE.clear()
+
+        def synthetic_dns(host, port, **_kwargs):
+            address = "127.0.0.1" if host == "localhost" else "93.184.216.34"
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", (address, port))]
+
+        dns = mock.patch("system_config.socket.getaddrinfo", side_effect=synthetic_dns)
+        dns.start()
+        self.addCleanup(dns.stop)
         os.environ.pop("LLM_ALLOW_PRIVATE_BASE_URL", None)
         for key in _ENV_KEYS:
             setattr(config, key, "")
         config.LLM_BASE_URL = ""
+        if llm._client is not None:
+            close = getattr(llm._client, "close", None)
+            if callable(close):
+                close()
         llm._client = None
         llm._client_fingerprint = ""
         _FakeOpenAI.reset()

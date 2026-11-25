@@ -18,6 +18,7 @@ import argparse
 import sys
 
 import auth
+import source_drain
 import config  # noqa: F401  确保 config 先加载 .env 与目录
 import mailer
 
@@ -161,6 +162,7 @@ def cmd_resend(args) -> int:
     return 0
 
 
+@source_drain.writer('commands')
 def main():
     ap = argparse.ArgumentParser(description="管理员邀请码命令行工具")
     sub = ap.add_subparsers(dest="cmd", required=True)

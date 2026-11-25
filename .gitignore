@@ -5,6 +5,7 @@
 .env.*
 !.env.sample
 !.env.example
+!.env.database.example
 apps/backend/.env
 apps/backend/.env.*
 !apps/backend/.env.sample
@@ -37,6 +38,11 @@ htmlcov/
 *.db-shm
 *.db-wal
 apps/backend/app.db
+
+# 本地数据库验收产物（含数据/镜像层，不入库）
+/.local-review.dump
+/.migration-tool-image.tar
+/.test-tmp/
 
 # 简历/JD 运行时数据（含个人信息）
 apps/backend/data/

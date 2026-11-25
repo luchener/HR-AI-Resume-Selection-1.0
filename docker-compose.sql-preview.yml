@@ -1,0 +1,86 @@
+# Standalone cloud preview only. Never merge with the production Compose stack.
+name: resume-sql-preview
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: ${SQL_PREVIEW_PRIVATE_DIR:?Set the dedicated private directory}/postgres.env
+    ports:
+      - "127.0.0.1:15442:5432"
+    volumes:
+      - sql-preview-postgres:/var/lib/postgresql/data
+      - ./scripts/database-init.sh:/docker-entrypoint-initdb.d/10-database-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resume_bootstrap_admin -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 192m
+    cpus: 0.5
+    security_opt: ["no-new-privileges:true"]
+  migrate:
+    image: resume-sql-preview-backend:${SQL_PREVIEW_RELEASE}
+    profiles: ["tools"]
+    env_file: ${SQL_PREVIEW_PRIVATE_DIR}/migration.env
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m"]
+    mem_limit: 256m
+    cpus: 0.5
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile.sql-preview
+    image: resume-sql-preview-backend:${SQL_PREVIEW_RELEASE:?Set release identity}
+    restart: "no"
+    stop_grace_period: 1250s
+    environment:
+      SQL_DEPLOYMENT_FILE: /run/secrets/sql-deployment.json
+      # 浏览器经 Next.js rewrite 访问后端时，上游 Host 会被改写成 backend:8000，
+      # 因此跨站校验只认显式列出的可信源。唯一持久来源是挂载进来的
+      # deployment.json 的 trusted_origins 字段（由 scripts/sql-preview-cloud.py
+      # prepare 写入）；不在此处用空值覆盖，也不依赖每次 up 时的临时环境变量。
+    volumes:
+      - ${SQL_PREVIEW_PRIVATE_DIR}/deployment.json:/run/secrets/sql-deployment.json:ro
+      - ${SQL_PREVIEW_PRIVATE_DIR}/originals:/app/sql-originals
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    ports:
+      - "127.0.0.1:18010:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready',timeout=5).close()"]
+      interval: 15s
+      timeout: 7s
+      retries: 5
+    mem_limit: 384m
+    cpus: 1.0
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ""
+        NEXT_PUBLIC_ANALYSIS_BACKEND: sql
+        BACKEND_INTERNAL_URL: http://backend:8000
+    image: resume-sql-preview-frontend:${SQL_PREVIEW_RELEASE}
+    restart: "no"
+    environment:
+      BACKEND_INTERNAL_URL: http://backend:8000
+    ports:
+      - "127.0.0.1:13010:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    mem_limit: 192m
+    cpus: 0.5
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+volumes:
+  sql-preview-postgres:

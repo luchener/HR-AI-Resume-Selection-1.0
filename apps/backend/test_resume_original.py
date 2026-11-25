@@ -106,6 +106,20 @@ class ResumeOriginalTests(unittest.TestCase):
         self.assertFalse(info["available"])
         self.assertFalse(resume_original.exists("no-such-resume"))
 
+    def test_resume_ids_cannot_escape_data_dirs(self):
+        marker = os.path.join(os.path.dirname(store.RESUMES_DIR), "marker.json")
+        with open(marker, "w", encoding="utf-8") as handle:
+            handle.write('{"marker": true}')
+        self.addCleanup(lambda: os.path.exists(marker) and os.remove(marker))
+        for resume_id in ("..\\marker", "../marker", "..\\..\\marker"):
+            self.assertIsNone(store.get_resume(resume_id), resume_id)
+            self.assertFalse(store.delete_resume(resume_id), resume_id)
+            self.assertFalse(store.set_resume_original(resume_id, {"name": "x"}), resume_id)
+            self.assertEqual(resume_original.save(resume_id, b"x", "x.pdf"), {}, resume_id)
+            self.assertFalse(resume_original.exists(resume_id), resume_id)
+            self.assertFalse(resume_original.delete(resume_id), resume_id)
+        self.assertTrue(os.path.exists(marker), "穿越路径不得删除数据目录外文件")
+
     def test_store_delete_removes_original(self):
         resume_id = store.save_resume(content="张三", processed={}, user_id="u1")
         self.assertTrue(resume_original.save(resume_id, b"pdf-bytes", "resume.pdf"))

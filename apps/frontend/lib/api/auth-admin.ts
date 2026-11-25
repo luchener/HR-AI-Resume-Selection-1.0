@@ -322,8 +322,9 @@ export interface CaptchaData {
   ttl_seconds: number;
 }
 
-export async function fetchCaptcha(): Promise<CaptchaData> {
+export async function fetchCaptcha(): Promise<CaptchaData | null> {
   const response = await fetch(`${API_URL}/api/v1/auth/captcha`, { method: 'GET' });
+  if (response.status === 404) return null;
   if (!response.ok) throw new Error((await errorDetail(response)) || '验证码获取失败。');
   const payload = (await response.json()) as { data?: CaptchaData };
   if (!payload.data?.captcha_id || !payload.data?.image) throw new Error('验证码服务未返回有效数据。');
@@ -551,13 +552,14 @@ export interface AdminResumeList {
   size: number;
 }
 
-export async function fetchAdminResumes(keyword: string = '', userId: string = '', page: number = 1, size: number = 50): Promise<AdminResumeList> {
+export async function fetchAdminResumes(keyword: string = '', userId: string = '', page: number = 1, size: number = 50, signal?: AbortSignal): Promise<AdminResumeList> {
   const params = new URLSearchParams();
   if (keyword.trim()) params.set('keyword', keyword.trim());
   if (userId.trim()) params.set('user_id', userId.trim());
   params.set('page', String(page));
   params.set('size', String(size));
-  const response = await fetch(`${API_URL}/api/v1/admin/resumes?${params.toString()}`, { method: 'GET', headers: authHeaders() });
+  const response = await fetch(`${API_URL}/api/v1/admin/resumes?${params.toString()}`, { method: 'GET', headers: authHeaders(), signal });
+  signal?.throwIfAborted();
   if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '简历列表读取失败。'); }
   const payload = (await response.json()) as { data?: Partial<AdminResumeList> };
   return {
@@ -587,8 +589,8 @@ function mapAdminResumeOriginal(raw?: Partial<AdminResumeOriginal> | null): Admi
   };
 }
 
-export async function fetchAdminResumeDetail(resumeId: string): Promise<AdminResumeDetail> {
-  const response = await fetch(`${API_URL}/api/v1/admin/resumes/${encodeURIComponent(resumeId)}`, { method: 'GET', headers: authHeaders() });
+export async function fetchAdminResumeDetail(resumeId: string, signal?: AbortSignal): Promise<AdminResumeDetail> {
+  const response = await fetch(`${API_URL}/api/v1/admin/resumes/${encodeURIComponent(resumeId)}`, { method: 'GET', headers: authHeaders(), signal });
   if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '简历详情读取失败。'); }
   const payload = (await response.json()) as { data?: Partial<AdminResumeDetail> };
   return {
@@ -614,10 +616,18 @@ export async function fetchAdminResumeDetail(resumeId: string): Promise<AdminRes
  * 用 fetch 带 Authorization 头取 Blob 再交给 <img>：<img src> 无法携带鉴权头，
  * 这样原件也不会暴露成一个可直接打开的 URL。没有任何下载/导出入口。
  */
-export async function fetchAdminResumeOriginalPage(resumeId: string, page: number): Promise<Blob> {
-  const response = await fetch(`${API_URL}/api/v1/admin/resumes/${encodeURIComponent(resumeId)}/original/pages/${page}`, { method: 'GET', headers: authHeaders() });
+export async function fetchAdminResumeOriginalPage(resumeId: string, page: number, signal?: AbortSignal): Promise<Blob> {
+  const response = await fetch(`${API_URL}/api/v1/admin/resumes/${encodeURIComponent(resumeId)}/original/pages/${page}`, { method: 'GET', headers: authHeaders(), signal });
   if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '原件页面读取失败。'); }
   return await response.blob();
+}
+
+/** DOCX 原件预览：服务端只输出安全的文本/表格 HTML，不暴露下载地址。 */
+export async function fetchAdminResumeOriginalContent(resumeId: string, signal?: AbortSignal): Promise<{ html: string; name: string }> {
+  const response = await fetch(`${API_URL}/api/v1/admin/resumes/${encodeURIComponent(resumeId)}/original/content`, { method: 'GET', headers: authHeaders(), signal });
+  if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '文件预览读取失败。'); }
+  const payload = (await response.json()) as { data?: { html?: string; name?: string } };
+  return { html: payload.data?.html || '', name: payload.data?.name || '' };
 }
 
 export async function deleteAdminResume(resumeId: string): Promise<string> {

@@ -14,7 +14,9 @@
 
 运行：python -m unittest test_security_fixes -v
 """
+import io
 import json
+import logging
 import os
 import shutil
 import unittest
@@ -47,9 +49,11 @@ def tearDownModule():
 
 import app as backend  # noqa: E402
 import auth as auth_mod  # noqa: E402
+import notifications as notify_mod  # noqa: E402
 import quota as quota_mod  # noqa: E402
 import safe_fs  # noqa: E402
 import store as store_mod  # noqa: E402
+import log_redaction  # noqa: E402
 
 
 def _limits(**kw):
@@ -222,6 +226,14 @@ class SecurityFixTests(unittest.TestCase):
                 environ_base={"REMOTE_ADDR": "10.0.0.1"},
             ):
                 self.assertEqual(backend._client_ip(), "1.2.3.4")
+
+            C.TRUSTED_PROXY_COUNT = 1
+            with backend.app.test_request_context(
+                headers={"X-Forwarded-For": "9.9.9.9"},
+                environ_base={"REMOTE_ADDR": "203.0.113.5"},
+            ):
+                # 非可信直连对端：整个 XFF 都不可信，只能使用 TCP 对端地址。
+                self.assertEqual(backend._client_ip(), "203.0.113.5")
         finally:
             C.TRUSTED_PROXY_COUNT = saved
 
@@ -238,6 +250,283 @@ class SecurityFixTests(unittest.TestCase):
             self.assertEqual(auth_mod._ip_hash(backend._client_ip()), h1)
 
     # ── 5. 上传校验 ──────────────────────────────────────────────────
+    def test_resume_parser_failures_use_generic_messages_and_status(self):
+        for error, expected in (
+            (backend.doc_parser.InvalidDocument("PRIVATE_PATH=C:\\secret"), 400),
+            (backend.doc_parser.DocumentTooLarge("PRIVATE_INTERNAL_LIMIT"), 413),
+            (RuntimeError("PRIVATE_STACK_DETAIL"), 400),
+        ):
+            with self.subTest(error=type(error).__name__), mock.patch.object(
+                backend.doc_parser, "extract_text_from_file", side_effect=error
+            ):
+                response = self.client.post(
+                    "/api/v1/resumes/upload",
+                    data={"file": (io.BytesIO(b"%PDF-1.7"), "resume.pdf", "application/pdf")},
+                    headers=self.hdr(self.victim_token),
+                )
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, expected, body)
+            self.assertNotIn("PRIVATE_", body)
+            self.assertNotIn("Traceback", body)
+
+    def test_register_log_does_not_include_invite_code(self):
+        secret = "INVITE-SECRET-9Z"
+        user = {"user_id": "probe-user", "username": "probe_user"}
+        with (
+            mock.patch.object(auth_mod, "register_with_email_code", return_value=(user, "", "")),
+            mock.patch.object(auth_mod, "generate_jwt", return_value="probe-token"),
+            mock.patch.object(backend.logger, "info") as log_info,
+        ):
+            response = self.client.post(
+                "/api/v1/auth/register",
+                json={
+                    "username": "probe_user",
+                    "password": "Probe1pass",
+                    "email": "probe@example.com",
+                    "code": "123456",
+                    "invite_code": secret,
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        rendered = " ".join(str(call) for call in log_info.call_args_list)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("probe@example.com", rendered)
+        self.assertIn("p***@example.com", rendered)
+
+    def test_email_redaction_helpers(self):
+        cases = {
+            "probe@example.com": "p***@example.com",
+            "a@example.com": "***@example.com",
+            '"synthetic-private-local"@example.test': '"***"@example.test',
+            "用户@例子.中国": "用***@例子.中国",
+            "": "<redacted>",
+            "not-an-email": "<redacted>",
+            " probe@example.com": "<redacted>",
+            "probe@example.com ": "<redacted>",
+            "probe@example.com.": "<redacted>",
+            "probe@example": "<redacted>",
+            "probe@example@example.com": "<redacted>",
+            None: "<redacted>",
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                self.assertEqual(log_redaction.mask_email(value), expected)
+
+        message = "SMTP 550 rejected probe@example.com. cc: 用户@例子.中国; retry later"
+        self.assertEqual(
+            log_redaction.redact_email_addresses(message),
+            "SMTP 550 rejected p***@example.com. cc: 用***@例子.中国; retry later",
+        )
+        quoted = '"synthetic-private-local"@example.test'
+        self.assertEqual(
+            log_redaction.redact_email_addresses(f"mailbox={quoted}; retry later"),
+            "m***@example.test; retry later",
+        )
+
+    def test_redacting_formatter_masks_exception_text(self):
+        try:
+            raise RuntimeError("SMTP rejected applicant@example.com.")
+        except RuntimeError as exc:
+            record = logging.LogRecord(
+                "probe",
+                logging.ERROR,
+                __file__,
+                1,
+                "delivery failed for recipient@example.com; owner 用户@例子.中国",
+                (),
+                (type(exc), exc, exc.__traceback__),
+            )
+        rendered = log_redaction.RedactingFormatter("%(message)s").format(record)
+        self.assertNotIn("applicant@example.com", rendered)
+        self.assertNotIn("recipient@example.com", rendered)
+        self.assertNotIn("用户@例子.中国", rendered)
+        self.assertIn("a***@example.com", rendered)
+        self.assertIn("r***@example.com", rendered)
+        self.assertIn("用***@例子.中国", rendered)
+
+    def test_quoted_email_is_redacted_from_subject_and_exception_output(self):
+        quoted = '"synthetic-private-local"@example.test'
+        try:
+            raise RuntimeError(f"SMTP rejected {quoted}")
+        except RuntimeError as exc:
+            record = logging.LogRecord(
+                "probe", logging.ERROR, __file__, 1, "subject: %s", (quoted,),
+                (type(exc), exc, exc.__traceback__),
+            )
+        rendered = log_redaction.RedactingFormatter("%(message)s").format(record)
+        self.assertNotIn(quoted, rendered)
+        self.assertNotIn("synthetic-private-local", rendered)
+        self.assertIn('"***"@example.test', rendered)
+
+    def test_invite_approval_log_masks_applicant_email(self):
+        email = "applicant@example.com"
+        request_record = {"request_id": "probe-request", "email": email}
+        with (
+            mock.patch.object(
+                auth_mod,
+                "approve_invite_request",
+                return_value=(request_record, "INVITE-CODE", 200),
+            ),
+            mock.patch.object(backend.mailer_mod, "smtp_available", return_value=True),
+            mock.patch.object(backend.mailer_mod, "send_invite_code_email") as send_email,
+            mock.patch.object(auth_mod, "mark_invite_request_sent"),
+            mock.patch.object(backend.logger, "info") as log_info,
+        ):
+            response = self.client.post(
+                "/api/v1/admin/invite-requests/probe-request/approve",
+                headers=self.hdr(self.admin_token),
+            )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        send_email.assert_called_once()
+        rendered = " ".join(str(call) for call in log_info.call_args_list)
+        self.assertNotIn(email, rendered)
+        self.assertIn("a***@example.com", rendered)
+
+    def test_invite_approval_failure_log_masks_applicant_email(self):
+        email = "applicant@example.com"
+        request_record = {"request_id": "probe-request", "email": email}
+        with (
+            mock.patch.object(
+                auth_mod,
+                "approve_invite_request",
+                return_value=(request_record, "INVITE-CODE", 200),
+            ),
+            mock.patch.object(backend.mailer_mod, "smtp_available", return_value=True),
+            mock.patch.object(
+                backend.mailer_mod,
+                "send_invite_code_email",
+                side_effect=RuntimeError("SMTP rejected applicant@example.com"),
+            ),
+            mock.patch.object(backend.logger, "error") as log_error,
+        ):
+            response = self.client.post(
+                "/api/v1/admin/invite-requests/probe-request/approve",
+                headers=self.hdr(self.admin_token),
+            )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        rendered = " ".join(str(call) for call in log_error.call_args_list)
+        self.assertNotIn(email, rendered)
+        self.assertIn("a***@example.com", rendered)
+
+    def test_admin_denial_log_masks_user_email(self):
+        email = self.victim_user["email"]
+        with mock.patch.object(auth_mod.logger, "warning") as log_warning:
+            response = self.client.get(
+                "/api/v1/admin/invite-requests",
+                headers=self.hdr(self.victim_token),
+            )
+        self.assertEqual(response.status_code, 403, response.get_data(as_text=True))
+        rendered = " ".join(str(call) for call in log_warning.call_args_list)
+        self.assertNotIn(email, rendered)
+        self.assertIn("v***@example.com", rendered)
+
+    def test_mailer_delivery_logs_mask_recipient(self):
+        email = "recipient@example.com"
+        cfg = {
+            "from_address": "sender@example.com",
+            "from_name": "Probe",
+            "username": "sender@example.com",
+        }
+        server = mock.Mock()
+        with (
+            mock.patch.object(backend.mailer_mod, "_mail_config", return_value=cfg),
+            mock.patch.object(backend.mailer_mod, "_connect", return_value=server),
+            mock.patch.object(backend.mailer_mod.logger, "info") as log_info,
+        ):
+            backend.mailer_mod._send(email, "probe", "plain", "<p>probe</p>")
+        rendered = " ".join(str(call) for call in log_info.call_args_list)
+        self.assertNotIn(email, rendered)
+        self.assertIn("r***@example.com", rendered)
+
+        server.sendmail.side_effect = RuntimeError("550 rejected recipient@example.com")
+        with (
+            mock.patch.object(backend.mailer_mod, "_mail_config", return_value=cfg),
+            mock.patch.object(backend.mailer_mod, "_connect", return_value=server),
+            mock.patch.object(backend.mailer_mod.logger, "exception") as log_exception,
+            self.assertRaises(RuntimeError),
+        ):
+            backend.mailer_mod._send(email, "probe", "plain", "<p>probe</p>")
+        rendered = " ".join(str(call) for call in log_exception.call_args_list)
+        self.assertNotIn(email, rendered)
+        self.assertIn("r***@example.com", rendered)
+
+    def test_broadcast_mailer_logs_mask_recipient(self):
+        email = "recipient@example.com"
+        cfg = {
+            "from_address": "sender@example.com",
+            "from_name": "Probe",
+            "username": "sender@example.com",
+        }
+        server = mock.Mock()
+        with (
+            mock.patch.object(backend.mailer_mod, "_mail_config", return_value=cfg),
+            mock.patch.object(backend.mailer_mod, "_connect", return_value=server),
+            mock.patch.object(backend.mailer_mod.logger, "info") as log_info,
+        ):
+            backend.mailer_mod.send_broadcast_email(email, "probe", "plain", "<p>probe</p>")
+        rendered = " ".join(str(call) for call in log_info.call_args_list)
+        self.assertNotIn(email, rendered)
+        self.assertIn("r***@example.com", rendered)
+
+        server.sendmail.side_effect = RuntimeError("550 rejected recipient@example.com.")
+        with (
+            mock.patch.object(backend.mailer_mod, "_mail_config", return_value=cfg),
+            mock.patch.object(backend.mailer_mod, "_connect", return_value=server),
+            mock.patch.object(backend.mailer_mod.logger, "exception") as log_exception,
+            self.assertRaises(RuntimeError),
+        ):
+            backend.mailer_mod.send_broadcast_email(email, "probe", "plain", "<p>probe</p>")
+        rendered = " ".join(str(call) for call in log_exception.call_args_list)
+        self.assertNotIn(email, rendered)
+        self.assertIn("r***@example.com", rendered)
+
+    def test_quoted_email_is_redacted_in_transactional_and_broadcast_mail_logs(self):
+        email = '"synthetic-private-local"@example.test'
+        subject = f"delivery subject for {email}"
+        cfg = {
+            "from_address": "sender@example.com",
+            "from_name": "Probe",
+            "username": "sender@example.com",
+        }
+        formatter = log_redaction.RedactingFormatter("%(message)s")
+        deliveries = (
+            backend.mailer_mod._send,
+            backend.mailer_mod.send_broadcast_email,
+        )
+
+        def render(call):
+            record = logging.LogRecord(
+                "mailer", logging.INFO, __file__, 1,
+                call.args[0], call.args[1:], None,
+            )
+            return formatter.format(record)
+
+        for deliver in deliveries:
+            server = mock.Mock()
+            with (
+                mock.patch.object(backend.mailer_mod, "_mail_config", return_value=cfg),
+                mock.patch.object(backend.mailer_mod, "_connect", return_value=server),
+                mock.patch.object(backend.mailer_mod.logger, "info") as log_info,
+            ):
+                deliver(email, subject, "plain", "<p>probe</p>")
+            info_output = "\n".join(render(call) for call in log_info.call_args_list)
+            self.assertNotIn(email, info_output)
+            self.assertNotIn("synthetic-private-local", info_output)
+            self.assertIn('"***"@example.test', info_output)
+
+            server.sendmail.side_effect = RuntimeError(f"550 rejected {email}")
+            with (
+                mock.patch.object(backend.mailer_mod, "_mail_config", return_value=cfg),
+                mock.patch.object(backend.mailer_mod, "_connect", return_value=server),
+                mock.patch.object(backend.mailer_mod.logger, "exception") as log_exception,
+                self.assertRaises(RuntimeError),
+            ):
+                deliver(email, subject, "plain", "<p>probe</p>")
+            error_output = "\n".join(render(call) for call in log_exception.call_args_list)
+            self.assertNotIn(email, error_output)
+            self.assertNotIn("synthetic-private-local", error_output)
+            self.assertIn('"***"@example.test', error_output)
+
     def test_job_upload_rejects_non_array(self):
         resume_id = store_mod.save_resume("王五 测试", {}, self.victim_user["user_id"])
         before = len(os.listdir(store_mod.JOBS_DIR))
@@ -449,6 +738,161 @@ class SafeListdirTests(unittest.TestCase):
                         offenders.append(f"{name}:{number}")
 
         self.assertEqual(offenders, [], f"这些地方仍在裸用 os.listdir：{offenders}")
+
+
+class PathTraversalRegressionTests(unittest.TestCase):
+    """客户端提供的资源 ID 只能映射到目标目录内的单个文件名。"""
+
+    def _marker(self, payload):
+        name = "escape-" + uuid.uuid4().hex + ".json"
+        path = os.path.join(_TMP, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+        return path, name[:-5]
+
+    def test_job_id_cannot_escape_jobs_directory(self):
+        marker, stem = self._marker({"job_id": "probe", "user_id": "u1"})
+        attack = ".." + os.sep + stem
+
+        self.assertEqual(store_mod._job_path(attack), "")
+        self.assertIsNone(store_mod.get_job(attack, user_id="u1"))
+        self.assertFalse(store_mod.delete_job(attack, user_id="u1"))
+        self.assertTrue(os.path.exists(marker))
+
+    def test_archive_id_cannot_escape_archives_directory(self):
+        active_marker, active_stem = self._marker(
+            {"archive_id": "probe", "user_id": "u1", "status": "active", "final_score": 1}
+        )
+        attack = ".." + os.sep + active_stem
+
+        self.assertEqual(store_mod._archive_path(attack), "")
+        self.assertIsNone(store_mod.get_archive(attack, user_id="u1"))
+        self.assertFalse(store_mod.update_archive_tags(attack, "u1", ["escaped"]))
+        self.assertFalse(store_mod.update_archive_category(attack, "u1", "escaped"))
+        self.assertFalse(store_mod.soft_delete_archive(attack, "u1"))
+        self.assertTrue(os.path.exists(active_marker))
+
+        trashed_marker, trashed_stem = self._marker(
+            {"archive_id": "probe2", "user_id": "u1", "status": "trashed"}
+        )
+        attack = ".." + os.sep + trashed_stem
+        self.assertFalse(store_mod.restore_archive(attack, "u1"))
+        self.assertFalse(store_mod.permanent_delete_archive(attack, "u1"))
+        self.assertTrue(os.path.exists(trashed_marker))
+
+    def test_captcha_id_cannot_escape_rate_limits_directory(self):
+        marker, stem = self._marker({"probe": True})
+        attack = os.sep.join(("..", "..", "..", stem))
+
+        self.assertEqual(auth_mod._captcha_file(attack), "")
+        self.assertFalse(auth_mod.verify_captcha(attack, "0000"))
+        self.assertTrue(os.path.exists(marker))
+
+    def test_invite_request_id_cannot_escape_requests_directory(self):
+        marker, stem = self._marker(
+            {"request_id": "probe", "status": "pending", "email": "probe@example.com"}
+        )
+        attack = ".." + os.sep + stem
+
+        self.assertEqual(auth_mod._invite_request_path(attack), "")
+        self.assertIsNone(auth_mod.get_invite_request(attack))
+        _record, _error, status = auth_mod.reject_invite_request(attack, "admin")
+        self.assertEqual(status, 404)
+        self.assertTrue(os.path.exists(marker))
+
+    def test_user_id_cannot_escape_users_directory(self):
+        marker, stem = self._marker({"user_id": "probe", "username": "probe"})
+        attack = ".." + os.sep + stem
+
+        self.assertIsNone(auth_mod.find_user_by_id(attack))
+        self.assertFalse(auth_mod._write_user_record({
+            "user_id": attack, "username": "probe"}))
+        self.assertEqual(notify_mod.resolve_recipients("selected", [attack]), [])
+        self.assertTrue(os.path.exists(marker))
+
+        user_id = str(uuid.uuid4())
+        record = {"user_id": user_id, "username": "safe-" + uuid.uuid4().hex[:8]}
+        expected = os.path.join(auth_mod.USERS_DIR, user_id + ".json")
+        self.assertEqual(auth_mod._user_record_path(user_id), expected)
+        self.assertTrue(auth_mod._write_user_record(record))
+        self.assertEqual(auth_mod.find_user_by_id(user_id), record)
+
+    def test_usage_ids_cannot_escape_usage_directory(self):
+        marker, stem = self._marker({"probe": "untouched"})
+        attack = ".." + os.sep + stem
+        self.assertEqual(auth_mod._usage_path(attack), "")
+        self.assertEqual(quota_mod._usage_path(attack), "")
+
+        auth_mod.record_user_usage(attack, "analysis")
+        auth_mod.get_user_usage(attack)
+        auth_mod.delete_user_usage(attack)
+        self.assertEqual(quota_mod.today_analysis_count(attack), 0)
+        with open(marker, encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle), {"probe": "untouched"})
+
+        user_id = str(uuid.uuid4())
+        expected = os.path.join(C.USER_USAGE_DIR, user_id + ".json")
+        self.assertEqual(auth_mod._usage_path(user_id), expected)
+        self.assertEqual(quota_mod._usage_path(user_id), expected)
+
+    def test_signed_jwt_user_id_cannot_escape_users_directory(self):
+        marker, stem = self._marker({"user_id": "probe", "email": "probe@example.test"})
+        attack = ".." + os.sep + stem
+        now = auth_mod.time.time()
+        token = auth_mod.jwt.encode({
+            "user_id": attack,
+            "username": "probe",
+            "pwd_ver": 1,
+            "iss": "resume-matcher",
+            "jti": str(uuid.uuid4()),
+            "iat": now,
+            "exp": now + 3600,
+        }, C.JWT_SECRET_KEY, algorithm=auth_mod.JWT_ALGORITHM)
+
+        response = backend.app.test_client().get(
+            "/api/v1/quota/me",
+            headers={"Authorization": "Bearer " + token})
+
+        self.assertEqual(response.status_code, 401)
+        self.assertTrue(os.path.exists(marker))
+
+    def test_auth_middleware_rechecks_user_path_before_file_access(self):
+        marker, stem = self._marker({"user_id": "probe", "email": "probe@example.test"})
+        payload = {"user_id": ".." + os.sep + stem, "username": "probe"}
+        with mock.patch.object(auth_mod, "decode_jwt", return_value=payload), \
+                mock.patch.object(auth_mod, "_read_json", side_effect=AssertionError("file read")) as read:
+            response = backend.app.test_client().get(
+                "/api/v1/quota/me", headers={"Authorization": "Bearer synthetic-token"})
+        self.assertEqual(response.status_code, 401)
+        read.assert_not_called()
+        self.assertTrue(os.path.exists(marker))
+
+    def test_announcement_id_cannot_escape_announcements_directory(self):
+        marker, stem = self._marker(
+            {"announcement_id": "probe", "status": "active", "title": "probe"}
+        )
+        attack = ".." + os.sep + stem
+
+        self.assertEqual(notify_mod._announcement_path(attack), "")
+        self.assertEqual(notify_mod._reads_path(attack), "")
+        self.assertIsNone(notify_mod.get_announcement(attack))
+        self.assertFalse(notify_mod.cancel_announcement(attack))
+        self.assertFalse(notify_mod.delete_announcement(attack))
+        self.assertFalse(notify_mod.dismiss_announcement("u1", attack))
+        self.assertTrue(os.path.exists(marker))
+
+    def test_email_log_id_cannot_escape_email_logs_directory(self):
+        marker, stem = self._marker({"email_log_id": "probe", "subject": "probe"})
+        attack = ".." + os.sep + stem
+
+        self.assertIsNone(notify_mod.get_email_log_detail(attack))
+        self.assertIsNone(notify_mod.get_email_log_detail("CON"))
+        self.assertTrue(os.path.exists(marker))
+
+    def test_safe_component_rejects_windows_device_names(self):
+        for value in ("CON", "con", "PRN", "AUX", "NUL", "COM1", "com9", "LPT1", "lpt9"):
+            self.assertEqual(safe_fs.safe_component(value), "", value)
+        self.assertEqual(safe_fs.safe_component("candidate-1"), "candidate-1")
 
 
 if __name__ == "__main__":

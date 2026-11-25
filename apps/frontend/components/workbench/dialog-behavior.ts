@@ -66,10 +66,10 @@ export function useDialogBehavior({
   // Tab 焦点陷阱：焦点移出面板时循环回面板内
   useEffect(() => {
     if (!open) return;
-    const panel = panelRef.current;
-    if (!panel) return;
     const onTab = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return;
+      const panel = panelRef.current;
+      if (!panel) return;
       const focusables = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
         (el) => el.offsetParent !== null || el === document.activeElement,
       );

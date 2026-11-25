@@ -49,6 +49,7 @@ def normalize_runtime_config(value: dict | None) -> dict:
         raise ValueError("接口地址必须是有效的 HTTP 或 HTTPS 地址。")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("接口地址不能包含账号、密码、查询参数或锚点。")
+    base_url = system_config.validate_base_url(base_url)
     if not model or len(model) > 160 or any(char in model for char in "\r\n\t"):
         raise ValueError("请填写有效的模型名称。")
 
@@ -102,12 +103,18 @@ def normalize_web_search_flag(value: Any) -> bool:
 
 def _runtime_client(value: dict) -> tuple[OpenAI, dict]:
     config = normalize_runtime_config(value)
-    client = OpenAI(
-        api_key=config["api_key"],
-        base_url=config["base_url"],
-        timeout=300.0,
-    )
+    client = _new_openai_client(config["api_key"], config["base_url"], 300.0)
     return client, config
+
+
+def _new_openai_client(api_key: str, base_url: str, timeout: float) -> OpenAI:
+    http_client = system_config.create_ai_http_client(base_url, timeout=timeout)
+    try:
+        return OpenAI(api_key=api_key, base_url=base_url, timeout=timeout,
+                      http_client=http_client)
+    except Exception:
+        http_client.close()
+        raise
 
 
 def _server_settings() -> dict:
@@ -136,11 +143,8 @@ def _get_client() -> OpenAI:
             "模型服务未配置：请在「账号管理 → 模型配置」中填写 API Key；"
             "也可继续用 .env 的 LLM_API_KEY 作为服务器层配置。"
         )
-    return OpenAI(
-        api_key=server["api_key"],
-        base_url=server["base_url"],
-        timeout=float(server.get("timeout") or 300),
-    )
+    return _new_openai_client(server["api_key"], server["base_url"],
+                              float(server.get("timeout") or 300))
 
 
 # 客户端按"生效配置指纹"复用：配置一改立即重建，不必重启进程
@@ -162,8 +166,13 @@ def _client_singleton() -> OpenAI:
         _client_fingerprint = fingerprint
     elif _client_fingerprint and fingerprint != _client_fingerprint:
         # 指纹未知（外部注入的客户端）时就地尊重它；已知则配置一变立刻重建
-        _client = _get_client()
+        replacement = _get_client()
+        previous = _client
+        _client = replacement
         _client_fingerprint = fingerprint
+        close = getattr(previous, "close", None)
+        if callable(close):
+            close()
     return _client
 
 
@@ -316,11 +325,13 @@ def list_models(api_key: str = "", base_url: str = "", timeout: float = 30.0) ->
         raise RuntimeError("请先填写接口地址。")
 
     started = time.monotonic()
-    client = OpenAI(api_key=key, base_url=url, timeout=float(timeout))
+    client = _new_openai_client(key, url, float(timeout))
     try:
         page = client.models.list()
     except Exception as exc:  # noqa: BLE001 - 原样回传服务商报错，但先抹掉密钥
         raise RuntimeError(_redact(exc, key)) from None
+    finally:
+        client.close()
 
     models: list[str] = []
     for item in getattr(page, "data", None) or []:
@@ -354,7 +365,7 @@ def test_connection(api_key: str = "", base_url: str = "", model: str = "",
         raise RuntimeError("请先填写默认模型。")
 
     started = time.monotonic()
-    client = OpenAI(api_key=key, base_url=url, timeout=float(timeout))
+    client = _new_openai_client(key, url, float(timeout))
     try:
         response = client.chat.completions.create(
             model=name,
@@ -364,6 +375,8 @@ def test_connection(api_key: str = "", base_url: str = "", model: str = "",
         )
     except Exception as exc:  # noqa: BLE001 - 原样回传服务商报错，但先抹掉密钥
         raise RuntimeError(_redact(exc, key)) from None
+    finally:
+        client.close()
 
     reply = ""
     try:
@@ -393,27 +406,35 @@ def call_llm(
         server = _server_settings()
         model = server.get("model") or ""
         base_url = server.get("base_url") or ""
+        configured_timeout = server.get("timeout")
     else:
-        client, config = _runtime_client(runtime_config)
-        model = config["model"]
-        base_url = config["base_url"]
-    configured_timeout = 300
-    if runtime_config is not None:
-        try:
-            configured_timeout = max(30, min(300, int(config.get("timeout") or 300)))
-        except (TypeError, ValueError):
-            configured_timeout = 300
-    else:
-        try:
-            configured_timeout = max(30, min(300, int(server.get("timeout") or 300)))
-        except (TypeError, ValueError):
-            configured_timeout = 300
+        client, normalized = _runtime_client(runtime_config)
+        model = normalized["model"]
+        base_url = normalized["base_url"]
+        configured_timeout = normalized.get("timeout")
+
+    try:
+        timeout = max(30, min(300, int(configured_timeout or 300)))
+    except (TypeError, ValueError):
+        timeout = 300
+
+    try:
+        return _call_with_client(client, prompt, expect_json=expect_json,
+                                 max_tokens=max_tokens, thinking=thinking,
+                                 model=model, base_url=base_url, timeout=timeout)
+    finally:
+        if runtime_config is not None:
+            client.close()
+
+
+def _call_with_client(client, prompt, *, expect_json, max_tokens, thinking,
+                      model, base_url, timeout):
     request_args = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "top_p": 0.9,
-        "timeout": configured_timeout,
+        "timeout": timeout,
     }
     if max_tokens is not None:
         request_args["max_tokens"] = max_tokens

@@ -256,8 +256,10 @@ export async function previewEmail(payload: EmailComposePayload): Promise<string
     body: JSON.stringify(payload),
   });
   if (!response.ok) { handleUnauthorized(response); throw new Error((await errorDetail(response)) || '预览渲染失败。'); }
-  const body = (await response.json()) as { data?: { html?: string } };
-  return body.data?.html || '';
+  const body = (await response.json()) as { data?: { html?: string | string[] } };
+  const html = body.data?.html;
+  // 兼容旧接口把 (html, plain) 元组序列化成数组的情况，避免纯文本漏进 iframe。
+  return Array.isArray(html) ? (html[0] || '') : (html || '');
 }
 
 export interface EmailSendSummary {

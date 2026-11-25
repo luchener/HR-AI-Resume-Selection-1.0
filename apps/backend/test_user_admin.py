@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import unittest
+from unittest.mock import patch
 
 # ── 必须在 import app 之前重定向数据目录 ─────────────────────────────
 _TMP = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".test-tmp-user-admin")
@@ -216,6 +217,22 @@ class UserAdminTests(unittest.TestCase):
         r = self._req("get", "/api/v1/admin/users", token=token)
         self.assertEqual(r.status_code, 200)
 
+    def test_ordinary_admin_cannot_create_whitelist_super_admin(self):
+        reserved = "reserved-super@example.com"
+        with patch.object(auth_module, "ADMIN_EMAILS", [*auth_module.ADMIN_EMAILS, reserved]):
+            r = self._req(
+                "post",
+                "/api/v1/admin/users",
+                data={
+                    "username": "escalated_super",
+                    "password": "StrongPass123",
+                    "email": reserved,
+                },
+                token=self.mid_admin_token,
+            )
+        self.assertEqual(r.status_code, 403, _json(r))
+        self.assertIsNone(auth_module.find_user_by_username("escalated_super"))
+
     # ── 修改：邮箱 / 管理员标记 ─────────────────────────────────────
 
     def test_admin_update_email(self):
@@ -344,6 +361,10 @@ class UserAdminTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200, _json(r))
         names = [i["username"] for i in _json(r)["data"]["items"]]
         self.assertIn("restore_me", names)
+        # 普通管理员不能恢复账号（会连带恢复原权限）。
+        r = self._req("post", "/api/v1/admin/users/restore_me/restore", token=self.mid_admin_token)
+        self.assertEqual(r.status_code, 403, _json(r))
+        self.assertTrue(auth_module.is_user_deleted("restore_me"))
         # 恢复 → 可登录（密码版本 +1，旧 token 失效）
         r = self._req("post", "/api/v1/admin/users/restore_me/restore", token=self.admin_token)
         self.assertEqual(r.status_code, 200, _json(r))
@@ -547,7 +568,8 @@ class UserAdminTests(unittest.TestCase):
     # ── 管理员手动冻结（防异常消耗 token）─────────────────────────────
 
     def test_admin_freeze_blocks_login_and_reset(self):
-        self._mkuser("freeze_victim", "fv@example.com")
+        victim = self._mkuser("freeze_victim", "fv@example.com")
+        victim_token = auth_module.generate_jwt(victim["user_id"], victim["username"])
         # 管理员冻结（带原因）
         r = self._req("post", "/api/v1/admin/users/freeze_victim/freeze",
                       data={"reason": "频繁调用异常消耗 token"}, token=self.admin_token)
@@ -575,6 +597,9 @@ class UserAdminTests(unittest.TestCase):
         self.assertEqual(body.get("frozen_by"), "admin")
         self.assertIn("账号异常请联系系统管理员处理", body.get("detail", ""))
         self.assertTrue(body.get("admin_email"))
+        # 冻结立即吊销既有 JWT，无需等待重新登录。
+        r = self._req("get", "/api/v1/auth/me", token=victim_token)
+        self.assertEqual(r.status_code, 401, _json(r))
         # 重置密码请求 → 423（无法通过改密绕过）
         r = self.client.post("/api/v1/auth/reset-password/request",
                              data=json.dumps({"email": "fv@example.com"}),

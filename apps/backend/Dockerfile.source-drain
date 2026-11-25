@@ -1,0 +1,6 @@
+# Reviewed production drain overlay. Build from the exact deployed image with
+# an explicit code-only context; never include environment or data directories.
+ARG SOURCE_DRAIN_BASE
+FROM ${SOURCE_DRAIN_BASE}
+COPY --chown=1000:1000 apps/backend/*.py /app/
+CMD ["sh", "-c", "exec gunicorn -c python:gunicorn_source_drain -w ${GUNICORN_WORKERS} -b 0.0.0.0:8000 --timeout 1200 --graceful-timeout 1200 app:app"]

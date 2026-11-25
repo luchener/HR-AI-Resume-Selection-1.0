@@ -68,10 +68,11 @@ def _safe_name(filename: str, ext: str) -> str:
 def path_for(resume_id: str) -> str:
     """返回已留存原件的路径；不存在返回空串。"""
     directory = _dir()
-    if not directory or not resume_id:
+    safe_id = safe_fs.safe_component(resume_id)
+    if not directory or not safe_id:
         return ""
     for ext in _KNOWN_EXTS:
-        path = os.path.join(directory, "%s.%s" % (resume_id, ext))
+        path = os.path.join(directory, "%s.%s" % (safe_id, ext))
         if os.path.exists(path):
             return path
     return ""
@@ -103,13 +104,14 @@ def save(resume_id: str, data: bytes, filename: str = "", content_type: str = ""
 
     不抛异常：上传链路此时文本已入库，原件留存失败只是少一层保底。
     """
-    if not data or not resume_id:
+    safe_id = safe_fs.safe_component(resume_id)
+    if not data or not safe_id:
         return {}
     ext = _ext_for(filename, content_type)
     directory = _dir()
     if not ext or not directory:
         return {}
-    path = os.path.join(directory, "%s.%s" % (resume_id, ext))
+    path = os.path.join(directory, "%s.%s" % (safe_id, ext))
     # 临时文件名每次调用都唯一（只带 pid 会被同进程的并发线程算成同一个路径，
     # 互相 rename 掉对方的临时文件 → os.replace 抛 FileNotFoundError）。
     tmp = "%s.%s.%s.tmp" % (path, os.getpid(), os.urandom(4).hex())
@@ -137,12 +139,13 @@ def save(resume_id: str, data: bytes, filename: str = "", content_type: str = ""
 def delete(resume_id: str) -> bool:
     """删除该简历留存的全部原件文件（含历史扩展名）。"""
     directory = _dir()
-    if not directory or not resume_id:
+    safe_id = safe_fs.safe_component(resume_id)
+    if not directory or not safe_id:
         return False
     removed = False
     for ext in _KNOWN_EXTS:
         try:
-            os.remove(os.path.join(directory, "%s.%s" % (resume_id, ext)))
+            os.remove(os.path.join(directory, "%s.%s" % (safe_id, ext)))
             removed = True
         except OSError:
             continue

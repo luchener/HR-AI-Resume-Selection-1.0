@@ -74,13 +74,45 @@ import {
 
 type Tab = 'requests' | 'codes' | 'frozen' | 'users' | 'resumes' | 'ops' | 'announcements' | 'emails' | 'quota' | 'mail' | 'llm';
 
-const TAB_KEYS: Tab[] = ['requests', 'codes', 'frozen', 'users', 'ops', 'announcements', 'emails', 'mail', 'llm'];
+const TAB_GROUPS = [
+  {
+    label: '账号与权限',
+    tabs: [
+      { key: 'users', label: '用户管理', icon: UserRoundIcon },
+      { key: 'frozen', label: '冻结账号', icon: ShieldCheckIcon },
+      { key: 'resumes', label: '简历库', icon: FileTextIcon, superAdmin: true },
+    ],
+  },
+  {
+    label: '邀请与审批',
+    tabs: [
+      { key: 'requests', label: '申请审批', icon: InboxIcon },
+      { key: 'codes', label: '邀请码总览', icon: TicketIcon },
+    ],
+  },
+  {
+    label: '系统运维',
+    tabs: [
+      { key: 'ops', label: '操作记录', icon: HistoryIcon },
+      { key: 'announcements', label: '公告通知', icon: MegaphoneIcon },
+      { key: 'quota', label: '使用配额', icon: GaugeIcon },
+      { key: 'emails', label: '邮件通知', icon: MailIcon },
+      { key: 'mail', label: '邮件服务', icon: SendIcon, superAdmin: true },
+      { key: 'llm', label: '模型配置', icon: KeyRoundIcon, superAdmin: true },
+    ],
+  },
+] satisfies Array<{
+  label: string;
+  tabs: Array<{ key: Tab; label: string; icon: typeof InboxIcon; superAdmin?: boolean }>;
+}>;
+
+const TAB_KEYS = TAB_GROUPS.flatMap(({ tabs }) => tabs.map(({ key }) => key));
 
 /** 从 URL query 解析 Tab（非法值回落 'requests'）；仅在浏览器端可用 */
 function tabFromQuery(): Tab {
   if (typeof window === 'undefined') return 'requests';
   const raw = new URLSearchParams(window.location.search).get('tab') as Tab | null;
-  return raw && (TAB_KEYS as string[]).includes(raw) ? raw : 'requests';
+  return raw && TAB_KEYS.includes(raw) ? raw : 'requests';
 }
 
 function fmtTime(iso?: string | number | null): string {
@@ -142,6 +174,9 @@ export default function AdminPage() {
     const fromUrl = tabFromQuery();
     if (fromUrl !== 'requests') setTab(fromUrl);
   }, []);
+  useEffect(() => {
+    if (isHydrated && !isSuperAdmin && (tab === 'resumes' || tab === 'mail' || tab === 'llm')) setTab('users');
+  }, [isHydrated, isSuperAdmin, tab]);
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const url = new URL(window.location.href);
@@ -743,8 +778,14 @@ export default function AdminPage() {
     );
   }
 
+  const visibleGroups = TAB_GROUPS.map(({ label, tabs }) => ({
+    label,
+    tabs: tabs.filter((item) => !('superAdmin' in item) || isSuperAdmin),
+  }));
+  const activeGroup = visibleGroups.find(({ tabs }) => tabs.some(({ key }) => key === tab)) ?? visibleGroups[0];
+
   const tabCls = (active: boolean) =>
-    `inline-flex h-9 items-center gap-2 rounded px-4 text-sm font-medium transition-colors ${active ? 'bg-brand-deep text-white' : 'text-body hover:bg-mist'}`;
+    `inline-flex h-9 shrink-0 items-center gap-2 px-3 text-[12px] font-medium transition-colors ${active ? 'bg-ink text-white' : 'text-sub hover:bg-mist hover:text-ink'}`;
 
   const rowAction = (label: string, onClick: () => void, tone: 'ok' | 'bad' = 'ok', disabled = false, busy = false) => (
     <button
@@ -764,54 +805,44 @@ export default function AdminPage() {
 
   return (
     <AppShell active="admin">
-      <div className="mx-auto w-full max-w-[1500px] px-5 py-8 sm:px-8 lg:px-10 lg:py-10 xl:px-14">
-        <header className="flex flex-col gap-4 border-b border-line pb-7 xl:flex-row xl:items-end xl:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase text-sub">Account Admin</p>
-            <h1 className="mt-2 text-3xl font-semibold text-ink sm:text-4xl">账号管理</h1>
-            <p className="mt-3 text-sm text-sub">审批邀请码申请、管理邀请码与冻结账号（仅管理员可见）</p>
+      <div className="mx-auto w-full max-w-[1300px] px-5 py-8 sm:px-8 lg:px-12 lg:py-10">
+        <header className="border-b border-line">
+          <div className="pb-6">
+            <p className="font-mono text-[10px] uppercase tracking-[0.2em] text-sub">04 / Admin</p>
+            <h1 className="mt-4 text-[42px] font-medium leading-[1.06] tracking-[-0.028em] text-ink">账号管理</h1>
+            <p className="mt-3 text-sm text-sub">审批邀请码申请、管理邀请码与冻结账号（仅管理员可见）。</p>
           </div>
-          <div className="flex flex-wrap items-center gap-1 rounded-md border border-line bg-white p-1">
-            <button type="button" onClick={() => setTab('requests')} className={tabCls(tab === 'requests')}>
-              <InboxIcon className="size-4" /> 申请审批
-            </button>
-            <button type="button" onClick={() => setTab('codes')} className={tabCls(tab === 'codes')}>
-              <TicketIcon className="size-4" /> 邀请码总览
-            </button>
-            <button type="button" onClick={() => setTab('frozen')} className={tabCls(tab === 'frozen')}>
-              <ShieldCheckIcon className="size-4" /> 冻结账号
-            </button>
-            <button type="button" onClick={() => setTab('users')} className={tabCls(tab === 'users')}>
-              <UserRoundIcon className="size-4" /> 用户管理
-            </button>
-            {isSuperAdmin && (
-              <button type="button" onClick={() => setTab('resumes')} className={tabCls(tab === 'resumes')}>
-                <FileTextIcon className="size-4" /> 简历库
+          <nav aria-label="账号管理分组" className="flex gap-5 overflow-x-auto border-t border-line px-1 sm:gap-7">
+            {visibleGroups.map(({ label, tabs }) => {
+              const active = label === activeGroup.label;
+              return (
+                <button
+                  key={label}
+                  type="button"
+                  aria-current={active ? 'true' : undefined}
+                  onClick={() => { if (!active) setTab(tabs[0].key); }}
+                  className={`h-11 shrink-0 border-b-2 text-[13px] focus-visible:outline-offset-[-2px] ${
+                    active ? 'border-ink font-semibold text-ink' : 'border-transparent text-sub hover:text-ink'
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </nav>
+          <nav aria-label={`${activeGroup.label}页签`} className="flex gap-1 overflow-x-auto border-t border-line px-1 py-2">
+            {activeGroup.tabs.map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setTab(key)}
+                className={tabCls(tab === key)}
+                aria-current={tab === key ? 'page' : undefined}
+              >
+                <Icon className="size-4" aria-hidden="true" /> {label}
               </button>
-            )}
-            <button type="button" onClick={() => setTab('ops')} className={tabCls(tab === 'ops')}>
-              <HistoryIcon className="size-4" /> 操作记录
-            </button>
-            <button type="button" onClick={() => setTab('announcements')} className={tabCls(tab === 'announcements')}>
-              <MegaphoneIcon className="size-4" /> 公告通知
-            </button>
-            <button type="button" onClick={() => setTab('quota')} className={tabCls(tab === 'quota')}>
-              <GaugeIcon className="size-4" /> 使用配额
-            </button>
-            <button type="button" onClick={() => setTab('emails')} className={tabCls(tab === 'emails')}>
-              <MailIcon className="size-4" /> 邮件通知
-            </button>
-            {isSuperAdmin && (
-              <button type="button" onClick={() => setTab('mail')} className={tabCls(tab === 'mail')}>
-                <SendIcon className="size-4" /> 邮件服务
-              </button>
-            )}
-            {isSuperAdmin && (
-              <button type="button" onClick={() => setTab('llm')} className={tabCls(tab === 'llm')}>
-                <KeyRoundIcon className="size-4" /> 模型配置
-              </button>
-            )}
-          </div>
+            ))}
+          </nav>
         </header>
 
         {notice.text && (
@@ -826,7 +857,7 @@ export default function AdminPage() {
           <div className="mt-6">
             <div className="flex flex-wrap gap-1 rounded-md border border-line bg-white p-1">
               {(['pending', 'approved', 'rejected'] as const).map((s) => (
-                <button key={s} type="button" onClick={() => setReqTab(s)} className={tabCls(reqTab === s)}>
+                <button key={s} type="button" onClick={() => setReqTab(s)} className={tabCls(reqTab === s)} aria-pressed={reqTab === s}>
                   {s === 'pending' ? '待审批' : s === 'approved' ? '已通过' : '已拒绝'}
                 </button>
               ))}
@@ -836,13 +867,13 @@ export default function AdminPage() {
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-mist">
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">申请邮箱</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">申请理由</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">提交时间</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">被拒历史</th>
-                    {reqTab === 'rejected' && <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">拒绝理由</th>}
-                    {reqTab === 'approved' && <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">发码状态</th>}
-                    <th className="border-b border-line-soft px-4 py-3 text-right text-xs font-semibold text-sub">操作</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">申请邮箱</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">申请理由</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">提交时间</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">被拒历史</th>
+                    {reqTab === 'rejected' && <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">拒绝理由</th>}
+                    {reqTab === 'approved' && <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">发码状态</th>}
+                    <th className="border-b border-line-soft px-4 py-3 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -973,13 +1004,13 @@ export default function AdminPage() {
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-mist">
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">码标识（哈希）</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">状态</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">绑定邮箱</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">生成时间</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">过期时间</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">使用人</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-right text-xs font-semibold text-sub">操作</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">码标识（哈希）</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">状态</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">绑定邮箱</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">生成时间</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">过期时间</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">使用人</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1042,11 +1073,11 @@ export default function AdminPage() {
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-mist">
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">用户名</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">冻结时间</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">来源</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">原因 / 失败次数</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-right text-xs font-semibold text-sub">操作</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">用户名</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">冻结时间</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">来源</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">原因 / 失败次数</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1181,12 +1212,12 @@ export default function AdminPage() {
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-mist">
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">用户名</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">邮箱</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">角色</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">状态</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">注册时间</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-right text-xs font-semibold text-sub">操作</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">用户名</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">邮箱</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">角色</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">状态</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">注册时间</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1353,11 +1384,11 @@ export default function AdminPage() {
               <table className="w-full border-collapse text-sm">
                 <thead>
                   <tr className="bg-mist">
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">时间</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">操作类型</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">操作者</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">目标用户</th>
-                    <th className="border-b border-line-soft px-4 py-3 text-left text-xs font-semibold text-sub">详情</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">时间</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">操作类型</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">操作者</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">目标用户</th>
+                    <th className="border-b border-line-soft px-4 py-3 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">详情</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1697,12 +1728,12 @@ export default function AdminPage() {
                 <table className="w-full border-collapse text-sm">
                   <thead>
                     <tr className="bg-mist">
-                      <th className="border-b border-line-soft px-4 py-2.5 text-left text-xs font-semibold text-sub">排名</th>
-                      <th className="border-b border-line-soft px-4 py-2.5 text-left text-xs font-semibold text-sub">用户名</th>
-                      <th className="border-b border-line-soft px-4 py-2.5 text-right text-xs font-semibold text-sub">登录</th>
-                      <th className="border-b border-line-soft px-4 py-2.5 text-right text-xs font-semibold text-sub">分析</th>
-                      <th className="border-b border-line-soft px-4 py-2.5 text-right text-xs font-semibold text-sub">合计</th>
-                      <th className="border-b border-line-soft px-4 py-2.5 text-left text-xs font-semibold text-sub">最近使用</th>
+                      <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">排名</th>
+                      <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">用户名</th>
+                      <th className="border-b border-line-soft px-4 py-2.5 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">登录</th>
+                      <th className="border-b border-line-soft px-4 py-2.5 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">分析</th>
+                      <th className="border-b border-line-soft px-4 py-2.5 text-right font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">合计</th>
+                      <th className="border-b border-line-soft px-4 py-2.5 text-left font-mono text-[11px] font-medium uppercase tracking-[0.1em] text-sub">最近使用</th>
                     </tr>
                   </thead>
                   <tbody>
